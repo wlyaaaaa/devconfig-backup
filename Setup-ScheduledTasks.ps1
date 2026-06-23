@@ -1,10 +1,11 @@
 ﻿<#
 .SYNOPSIS
-  注册 DevConfig 三级备份的计划任务（幂等，可重复运行）。
+  注册 DevConfig + WeChat 备份的计划任务（幂等，可重复运行）。
 .DESCRIPTION
   - DevConfigBackup-Local : 每天 12:30 + 登录时 -> -Tier Local,Usb（零流量；U盘在就同步）
   - DevConfigBackup-Cloud : 每周日 03:00     -> -Tier Drive（改动才传，海外低峰）
   - DevConfigBackup-OnUSB : 插入U盘(NTFS卷挂载)事件 -> -Tier Usb（即插即同步）
+  - WeChatBackup-Weekly   : 每周六 04:00     -> 微信聊天记录增量到U盘
   以当前用户、仅登录时运行，无需密码与管理员权限。
 .NOTES
   启动器固定用 Windows PowerShell 5.1（powershell.exe）——任务计划无法直接启动
@@ -18,36 +19,41 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script = Join-Path $PSScriptRoot 'Backup-DevConfig.ps1'
-if (-not (Test-Path $script)) { throw "找不到 $script" }
+$devScript = Join-Path $PSScriptRoot 'Backup-DevConfig.ps1'
+$wxScript  = Join-Path $PSScriptRoot 'Backup-WeChat.ps1'
+if (-not (Test-Path $devScript)) { throw "找不到 $devScript" }
 
 # 固定用 5.1（WindowsApps 版 pwsh 无法被任务计划启动）
 $launcher = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive -RunLevel Limited
-$settings  = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
-                -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 1)
-
-function New-Action([string]$TierArgs) {
+function New-Settings([int]$Hours) {
+    New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
+        -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours $Hours)
+}
+function New-Action([string]$Script, [string]$ScriptArgs) {
     New-ScheduledTaskAction -Execute $launcher `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`" $TierArgs" `
+        -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Script`" $ScriptArgs" `
         -WorkingDirectory $PSScriptRoot
 }
-function Register-DCB([string]$Name, $Triggers, [string]$TierArgs, [string]$Desc) {
+function Register-T([string]$Name, $Triggers, $Action, $Settings, [string]$Desc) {
     Register-ScheduledTask -TaskName $Name -TaskPath '\' -Force `
-        -Action (New-Action $TierArgs) -Trigger $Triggers -Principal $principal -Settings $settings -Description $Desc | Out-Null
+        -Action $Action -Trigger $Triggers -Principal $principal -Settings $Settings -Description $Desc | Out-Null
     Write-Host "  [OK] $Name" -ForegroundColor Green
 }
 
+$s1 = New-Settings 1
+$s4 = New-Settings 4
+
 # ① 本地 + U盘：每天 + 登录
-Register-DCB 'DevConfigBackup-Local' `
+Register-T 'DevConfigBackup-Local' `
     @((New-ScheduledTaskTrigger -Daily -At $DailyAt), (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME)) `
-    '-Tier Local,Usb' '开发配置备份：本地+U盘（每天/登录）'
+    (New-Action $devScript '-Tier Local,Usb') $s1 '开发配置备份：本地+U盘（每天/登录）'
 
 # ② Drive：每周日低峰
-Register-DCB 'DevConfigBackup-Cloud' `
+Register-T 'DevConfigBackup-Cloud' `
     (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At $WeeklyAt) `
-    '-Tier Drive' '开发配置备份：Google Drive（每周·改动才传）'
+    (New-Action $devScript '-Tier Drive') $s1 '开发配置备份：Google Drive（每周·改动才传）'
 
 # ③ 插入U盘事件触发（NTFS 卷挂载 EventID 98；动作内再判断 H: 是否存在）
 try {
@@ -58,11 +64,18 @@ try {
     $tEvt = New-CimInstance -CimClass $cls -ClientOnly
     $tEvt.Enabled = $true
     $tEvt.Subscription = $sub
-    Register-DCB 'DevConfigBackup-OnUSB' $tEvt '-Tier Usb' '开发配置备份：插入U盘即同步'
+    Register-T 'DevConfigBackup-OnUSB' $tEvt (New-Action $devScript '-Tier Usb') $s1 '开发配置备份：插入U盘即同步'
 } catch {
     Write-Warning "U盘事件任务创建失败（不影响每天/登录的U盘同步）：$($_.Exception.Message)"
 }
 
+# ④ 微信聊天记录：每周六增量到U盘（仅 H: 在时；脚本内判断）
+if (Test-Path $wxScript) {
+    Register-T 'WeChatBackup-Weekly' `
+        (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At '04:00') `
+        (New-Action $wxScript '-Target Usb') $s4 '微信聊天记录每周增量到U盘'
+}
+
 Write-Host "`n已注册的任务：" -ForegroundColor Cyan
-Get-ScheduledTask -TaskName 'DevConfigBackup-*' | Format-Table TaskName, State -AutoSize
-Write-Host "提示：可手动验证 -> Start-ScheduledTask DevConfigBackup-Local; (Get-ScheduledTaskInfo DevConfigBackup-Local).LastTaskResult  # 0=成功"
+Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*' | Format-Table TaskName, State -AutoSize
+Write-Host "验证：Start-ScheduledTask DevConfigBackup-Local; (Get-ScheduledTaskInfo DevConfigBackup-Local).LastTaskResult  # 0=成功"
