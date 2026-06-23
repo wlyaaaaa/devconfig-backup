@@ -231,16 +231,22 @@ function Push-Drive {
     $last = if (Test-Path $lastFile) { (Get-Content $lastFile -Raw).Trim() } else { '' }
     if (-not $Force -and $last -eq $Pack.Sha) { Write-Log "内容未变化(sha 相同)，跳过 Drive 上传" 'OK'; return }
 
+    # 连通性预检：代理没开/海外网络不通时优雅跳过（下次触发自动重试，不报错为失败）
+    & rclone lsd "$GDriveRemote" --max-depth 1 --contimeout 15s --timeout 20s --retries 1 --low-level-retries 2 *> $null
+    if ($LASTEXITCODE -ne 0) { Write-Log "Drive 不可达(代理/海外网络未就绪)，跳过本次，下次触发自动重试" 'WARN'; return }
+
     $dest = "$GDriveRemote$GDriveFolder"
     Write-Log "rclone 上传 -> $dest/$($Pack.Name) (bwlimit=$BwLimit) ..."
-    & rclone copyto $Pack.Zip "$dest/$($Pack.Name)" --bwlimit $BwLimit --transfers 1 --retries 3 --low-level-retries 10
+    # 强重试 + 断点续传（rclone copy 幂等：进程被中断后再次运行自动跳过已传文件）
+    & rclone copyto $Pack.Zip "$dest/$($Pack.Name)" --bwlimit $BwLimit --transfers 1 --retries 5 --retries-sleep 30s --low-level-retries 20 --timeout 120s
     if ($LASTEXITCODE -eq 0) {
-        & rclone copy (Join-Path $OutDir 'latest.zip') $dest --bwlimit $BwLimit *> $null
+        & rclone copy (Join-Path $OutDir 'latest.zip') $dest --bwlimit $BwLimit --retries 3 *> $null
         Set-Content $lastFile $Pack.Sha -Encoding ASCII
+        Set-Content (Join-Path $StateDir 'last-drive-success.txt') (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Encoding ASCII
         $remote = (& rclone lsf $dest --include 'devconfig-*.zip' 2>$null) | Sort-Object -Descending
         if ($remote.Count -gt $KeepDrive) { $remote | Select-Object -Skip $KeepDrive | ForEach-Object { & rclone deletefile "$dest/$_" *> $null } }
         Write-Log "Drive 上传完成" 'OK'
-    } else { Write-Log "rclone 上传失败 exit=$LASTEXITCODE" 'ERR' }
+    } else { Write-Log "rclone 上传失败 exit=$LASTEXITCODE（部分已传，下次自动续传）" 'ERR' }
 }
 
 # ============================================================

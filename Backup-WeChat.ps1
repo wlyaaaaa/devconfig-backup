@@ -68,6 +68,9 @@ foreach ($t in $Target) {
                 if ($remotes.Count) { $GDriveRemote = $remotes[0]; Say "  默认远端不存在，改用 $GDriveRemote" }
                 else { Say "rclone 无已配置远端，跳过 Drive" 'Yellow'; break }
             }
+            # 连通性预检：代理/海外网络没就绪则优雅跳过，下次自动重试（rclone copy 幂等续传）
+            & rclone lsd "$GDriveRemote" --max-depth 1 --contimeout 15s --timeout 20s --retries 1 *> $null
+            if ($LASTEXITCODE -ne 0) { Say "Drive 不可达(代理/海外网络未就绪)，跳过，下次重试" 'Yellow'; break }
             $dest = "$GDriveRemote$GDriveFolder"
             $exArgs = $exclDirs | ForEach-Object { '--exclude'; "$_/**" }
             # copy=只增不删（历史安全）；多小文件调参：并发/分块/fast-list/限速

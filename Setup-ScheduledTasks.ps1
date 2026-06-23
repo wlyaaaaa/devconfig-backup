@@ -44,16 +44,19 @@ function Register-T([string]$Name, $Triggers, $Action, $Settings, [string]$Desc)
 
 $s1 = New-Settings 1
 $s4 = New-Settings 4
+# Drive 兜底专用：仅有网络时跑 + 错过自动补跑（Drive 内部还会做代理连通性预检）
+$sNet = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
-# ① 本地 + U盘：每天 + 登录
+# ① 本地 + U盘 + Drive：每天12:30 + 登录（Drive 改动才传、连不通自跳过、强重试续传）
 Register-T 'DevConfigBackup-Local' `
     @((New-ScheduledTaskTrigger -Daily -At $DailyAt), (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME)) `
-    (New-Action $devScript '-Tier Local,Usb') $s1 '开发配置备份：本地+U盘（每天/登录）'
+    (New-Action $devScript '-Tier Local,Usb,Drive') $s1 '配置备份：本地+U盘+Drive（每天/登录）'
 
-# ② Drive：每周日低峰
+# ② Drive 兜底：每天 21:00（有网才跑，补白天没传成功的）
 Register-T 'DevConfigBackup-Cloud' `
-    (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Sunday -At $WeeklyAt) `
-    (New-Action $devScript '-Tier Drive') $s1 '开发配置备份：Google Drive（每周·改动才传）'
+    (New-ScheduledTaskTrigger -Daily -At '21:00') `
+    (New-Action $devScript '-Tier Drive') $sNet '配置备份：Drive 兜底（每天21点·有网才跑）'
 
 # ③ 插入U盘事件触发（NTFS 卷挂载 EventID 98；动作内再判断 H: 是否存在）
 try {
