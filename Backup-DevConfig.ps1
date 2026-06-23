@@ -221,6 +221,12 @@ function Push-Usb {
 function Push-Drive {
     param($Pack)
     if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) { Write-Log "rclone 未安装，跳过 Drive" 'WARN'; return }
+    # 远端解析：默认用 $GDriveRemote，不存在则回退到第一个已配置远端（适配任意命名）
+    $remotes = @(& rclone listremotes 2>$null)
+    if ($remotes -notcontains $GDriveRemote) {
+        if ($remotes.Count) { $GDriveRemote = $remotes[0]; Write-Log "  默认远端不存在，改用 $GDriveRemote" }
+        else { Write-Log "rclone 无已配置远端，跳过 Drive" 'WARN'; return }
+    }
     $lastFile = Join-Path $StateDir 'last-uploaded.sha256'
     $last = if (Test-Path $lastFile) { (Get-Content $lastFile -Raw).Trim() } else { '' }
     if (-not $Force -and $last -eq $Pack.Sha) { Write-Log "内容未变化(sha 相同)，跳过 Drive 上传" 'OK'; return }
