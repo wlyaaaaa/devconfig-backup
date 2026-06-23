@@ -22,9 +22,9 @@ param(
     [string]   $GDriveFolder = "Backups/$env:COMPUTERNAME",
     [string]   $BwLimit      = '4M',
 
-    [int]      $KeepLocal = 14,
-    [int]      $KeepUsb   = 8,
-    [int]      $KeepDrive = 4
+    [int]      $KeepLocal = 7,
+    [int]      $KeepUsb   = 3,
+    [int]      $KeepDrive = 3
 )
 
 $ErrorActionPreference = 'Continue'
@@ -197,7 +197,7 @@ function Invoke-Pack {
 
     Get-ChildItem $OutDir -Filter 'devconfig-*.zip' | Sort-Object LastWriteTime -Descending |
         Select-Object -Skip $KeepLocal | Remove-Item -Force -ErrorAction SilentlyContinue
-    return [pscustomobject]@{ Zip = $zip; Sha = $sha; MB = $zipMB }
+    return [pscustomobject]@{ Zip = $zip; Sha = $sha; MB = $zipMB; Name = "devconfig-$stamp.zip" }
 }
 
 # ============================================================
@@ -232,8 +232,8 @@ function Push-Drive {
     if (-not $Force -and $last -eq $Pack.Sha) { Write-Log "内容未变化(sha 相同)，跳过 Drive 上传" 'OK'; return }
 
     $dest = "$GDriveRemote$GDriveFolder"
-    Write-Log "rclone 上传 -> $dest (bwlimit=$BwLimit) ..."
-    & rclone copy $Pack.Zip $dest --bwlimit $BwLimit --transfers 1 --retries 3 --low-level-retries 10
+    Write-Log "rclone 上传 -> $dest/$($Pack.Name) (bwlimit=$BwLimit) ..."
+    & rclone copyto $Pack.Zip "$dest/$($Pack.Name)" --bwlimit $BwLimit --transfers 1 --retries 3 --low-level-retries 10
     if ($LASTEXITCODE -eq 0) {
         & rclone copy (Join-Path $OutDir 'latest.zip') $dest --bwlimit $BwLimit *> $null
         Set-Content $lastFile $Pack.Sha -Encoding ASCII
@@ -252,7 +252,12 @@ if ($Tier -contains 'Local' -or $Tier -contains 'Usb') {
     $pack = Invoke-Pack
 } else {
     $lz = Join-Path $OutDir 'latest.zip'
-    if (Test-Path $lz) { $pack = [pscustomobject]@{ Zip = $lz; Sha = (Get-FileHash $lz -Algorithm SHA256).Hash; MB = [math]::Round((Get-Item $lz).Length/1MB,2) } }
+    if (Test-Path $lz) {
+        # 从 state 解析带日期的文件名（用于在 Drive 存日期版）
+        $sf = Join-Path $StateDir 'latest.sha256'
+        $datedName = if (Test-Path $sf) { ((Get-Content $sf -Raw).Trim() -split '\s+')[-1] } else { "devconfig-$stamp.zip" }
+        $pack = [pscustomobject]@{ Zip = $lz; Sha = (Get-FileHash $lz -Algorithm SHA256).Hash; MB = [math]::Round((Get-Item $lz).Length/1MB,2); Name = $datedName }
+    }
     else { Write-Log "无 latest.zip，Drive 需先跑一次 Local" 'ERR'; exit 1 }
 }
 if ($pack) {

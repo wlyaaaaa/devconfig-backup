@@ -62,9 +62,20 @@ foreach ($t in $Target) {
         }
         'Drive' {
             if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) { Say "rclone 未安装，跳过 Drive" 'Yellow'; break }
+            # 远端自动探测（默认名不存在则用第一个已配置远端）
+            $remotes = @(& rclone listremotes 2>$null)
+            if ($remotes -notcontains $GDriveRemote) {
+                if ($remotes.Count) { $GDriveRemote = $remotes[0]; Say "  默认远端不存在，改用 $GDriveRemote" }
+                else { Say "rclone 无已配置远端，跳过 Drive" 'Yellow'; break }
+            }
             $dest = "$GDriveRemote$GDriveFolder"
             $exArgs = $exclDirs | ForEach-Object { '--exclude'; "$_/**" }
-            $rc = @($Source, $dest) + $exArgs + @('--bwlimit', $BwLimit, '--transfers', '4', '--retries', '3', '--low-level-retries', '10')
+            # copy=只增不删（历史安全）；多小文件调参：并发/分块/fast-list/限速
+            $rc = @($Source, $dest) + $exArgs + @(
+                '--bwlimit', $BwLimit, '--transfers', '8', '--checkers', '16',
+                '--drive-chunk-size', '64M', '--fast-list',
+                '--retries', '3', '--low-level-retries', '10', '--stats', '60s'
+            )
             if ($List) { $rc += '--dry-run' }
             Say "rclone copy -> $dest $(if($List){'(干跑)'})"
             & rclone copy @rc

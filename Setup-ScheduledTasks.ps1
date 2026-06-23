@@ -73,7 +73,7 @@ try {
 if (Test-Path $wxScript) {
     Register-T 'WeChatBackup-Weekly' `
         (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At '04:00') `
-        (New-Action $wxScript '-Target Usb') $s4 '微信聊天记录每周增量到U盘'
+        (New-Action $wxScript '-Target Usb,Drive') $s4 '微信聊天记录每周增量到U盘+Drive'
 }
 
 Write-Host "`n已注册的任务：" -ForegroundColor Cyan
