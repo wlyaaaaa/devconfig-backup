@@ -48,14 +48,17 @@
 
 | 级 | 任务 | 周期/触发 | 流量 |
 |---|---|---|---|
-| ① 本地 | `DevConfigBackup-Local` (`-Tier Local,Usb`) | 每天 12:30 + 登录 | 无 |
+| ① 本地 | `DevConfigBackup-Local` (`-Tier Local,Usb,Drive`) | 每天 12:30 + 登录 | 本地/U盘无 |
 | ② U盘 | 同上 + `DevConfigBackup-OnUSB` | 插U盘(NTFS卷挂载)即同步 | 无 |
-| ③ Drive | `DevConfigBackup-Cloud` (`-Tier Drive`) | 每周日 03:00，**sha256 变了才传**，限速 | 海外（多数周为 0） |
+| ③ Drive | 上面 Local 顺带 + `DevConfigBackup-Cloud` 兜底 | 每天 12:30/登录尝试 + 21:00 兜底；**连通性预检+sha变了才传+强重试续传** | 海外（多数天为 0） |
 | 微信 | `WeChatBackup-Weekly` (`-Target Usb,Drive`) | 每周六 04:00，增量到U盘+Drive | U盘无;Drive~1.5G/周 |
 
 > - **配置保留**：U盘 / Drive 各保留 **3 份带日期**（`devconfig-YYYYMMDD-HHMMSS.zip`）+ 一份 `latest.zip`。
 > - **rclone 远端名自动探测**：脚本默认找 `gdrive:`，没有就用第一个已配置远端（本机实为 `<邮箱>:`）。
 > - **微信选增量(非压缩包)**：微信 ~90% 是已压缩媒体，压缩省不到 10% 且单包无法增量；增量每周仅传变化的库(~1.5G)，一年比"全量压缩包"省 ~16 倍海外流量。
+> - **增量是自动的**：robocopy(`/E`) 与 rclone(`copy`) 都按"文件名+大小+修改时间"比对，已存在且未变的文件自动跳过——首次全量后，每次只扫描+复制增量(变化的库+新增媒体)，速度快、流量小，无需担心。
+> - **Drive 海外可靠性（针对断网/没开机/代理没开）**：① 到点没开机 → `StartWhenAvailable` 开机后补跑；② 代理/海外网络没就绪 → 连通性预检优雅跳过，下个窗口(登录/12:30/21:00)自动重试；③ 传到一半断 → `rclone copy` 幂等，下次从断点续传(只补没传完的)。
+> - **看进度/日志**：`pwsh -File Backup-Status.ps1`（任务结果、本地/U盘/Drive 新鲜度、Drive 上次成功时间、微信上传进度、最近日志尾部）。
 
 省流量三杠杆全在 ③：**改动才传** + **封顶每周** + `--bwlimit` 低峰。内容仅 ~65MB，满传也微不足道。
 

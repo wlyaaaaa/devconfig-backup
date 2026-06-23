@@ -2,10 +2,10 @@
 .SYNOPSIS
   注册 DevConfig + WeChat 备份的计划任务（幂等，可重复运行）。
 .DESCRIPTION
-  - DevConfigBackup-Local : 每天 12:30 + 登录时 -> -Tier Local,Usb（零流量；U盘在就同步）
-  - DevConfigBackup-Cloud : 每周日 03:00     -> -Tier Drive（改动才传，海外低峰）
+  - DevConfigBackup-Local : 每天 12:30 + 登录时 -> -Tier Local,Usb,Drive（Drive改动才传/连不通自跳过/强重试续传）
+  - DevConfigBackup-Cloud : 每天 21:00 兜底    -> -Tier Drive（有网才跑，补白天没传成功的）
   - DevConfigBackup-OnUSB : 插入U盘(NTFS卷挂载)事件 -> -Tier Usb（即插即同步）
-  - WeChatBackup-Weekly   : 每周六 04:00     -> 微信聊天记录增量到U盘
+  - WeChatBackup-Weekly   : 每周六 04:00     -> 微信聊天记录增量到U盘+Drive
   以当前用户、仅登录时运行，无需密码与管理员权限。
 .NOTES
   启动器固定用 Windows PowerShell 5.1（powershell.exe）——任务计划无法直接启动
