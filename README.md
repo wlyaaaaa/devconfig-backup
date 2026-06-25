@@ -102,15 +102,22 @@ rclone config        # 新建名为 gdrive 的 Google Drive 远端（OAuth，需
 [Backup-WeChat.ps1](Backup-WeChat.ps1)：
 
 ```powershell
-pwsh -File Backup-WeChat.ps1 -List          # 先干跑估算
+pwsh -File Backup-WeChat.ps1 -List          # 先干跑估算（刷新本地快照后 --dry-run 列出待传量）
 pwsh -File Backup-WeChat.ps1 -Target Usb     # 增量到U盘（robocopy /E，只增不删，零流量；推荐主力）
-pwsh -File Backup-WeChat.ps1 -Target Drive   # 增量到 Drive（rclone copy，走海外流量，按需）
+pwsh -File Backup-WeChat.ps1 -Target Drive   # 增量到 Drive（默认 5G 封顶；先刷新本地快照再上传）
+pwsh -File Backup-WeChat.ps1 -Target Drive -MaxTransfer 0   # 首次全量补传：临时不封顶（需盯进度）
 ```
 
 **全量+增量原理**：robocopy `/E` 与 rclone `copy` 都只复制新增/改动文件，且**从不删除**（历史永不丢）。
 首次全量 ~38GB；之后仅复制变化的库(`db_storage`~1.5G)与新增媒体。
-**建议**：U盘做主力（零流量），Drive 仅按需/低频（38G 首传费海外额度）。
-已自动化：`WeChatBackup-Weekly` 每周六增量到U盘；首次全量(~38G)已完成。
+
+**Drive 上传的三道流量护栏**（杜绝"边传边改"反复重传烧海外流量）：
+1. **绝不直传微信源目录**：微信运行时数据库在被写入，rclone 直传会中途报 `source file is being updated` 并整文件从头重传。故先 robocopy 源→本地静态快照(`E:\WeChatBackup`，零流量)，再从快照上传。
+2. **上云排除 SQLite 运行时文件** `*.db-wal/*.db-shm/*.db-journal`（恢复时自动重建；本地/U盘快照仍保留以保完整）。
+3. **流量硬封顶** `-MaxTransfer`（默认 `5G`，`cutoff-mode=cautious` 绝不超限）；仅首次全量补传用 `-MaxTransfer 0` 关闭，且须盯进度，传完即恢复默认。
+
+**建议**：U盘做主力（零流量），Drive 仅按需/低频。**切换或首传前先 `-List` 干跑**，确认待传量是合理增量而非整盘 38G，再放行真传。
+已自动化：`WeChatBackup-Weekly` 每周六增量到U盘+Drive；首次全量(~38G)上传中（见 `Backup-Status.ps1`）。
 
 ---
 

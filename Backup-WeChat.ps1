@@ -5,14 +5,19 @@
   仅备份"历史聊天记录"(msg/db_storage/business/config/resource/all_users/old_backup)，
   剔除缓存/临时/小程序运行时(cache/temp/WMPF/apm_record)。
   增量方式：robocopy /E（只增不删，历史永不丢失）+ rclone copy（Drive 只传新增/改动）。
-  首次运行为全量(~27GB)；之后仅复制变化的库与新增媒体。
+  首次运行为全量(~38GB)；之后仅复制变化的库与新增媒体。
+  【Drive 流量安全】① 绝不直传微信源目录(运行时数据库边传边改→反复重传烧流量)，
+    而是先 robocopy 到本地静态快照再从快照上传；② 上云排除 SQLite 运行时文件
+    (.db-wal/.db-shm/.db-journal，恢复时自动重建)；③ -MaxTransfer 流量硬封顶(默认5G)。
 .EXAMPLE
   pwsh -File Backup-WeChat.ps1 -List           # 干跑，只估算将复制的量（强烈建议先跑）
   pwsh -File Backup-WeChat.ps1 -Target Usb      # 增量到U盘（零流量，推荐主力）
   pwsh -File Backup-WeChat.ps1 -Target Local    # 增量到本地另一盘
-  pwsh -File Backup-WeChat.ps1 -Target Drive    # 增量到 Google Drive（走海外流量，按需）
+  pwsh -File Backup-WeChat.ps1 -Target Drive    # 增量到 Google Drive（默认5G封顶，走海外流量）
+  pwsh -File Backup-WeChat.ps1 -Target Drive -MaxTransfer 0   # 首次全量补传：不封顶（需严密监控）
 .NOTES
-  27GB 首次上传 Drive 很费海外流量，建议：先 -Target Usb 全量，Drive 仅按需/低频。
+  38GB 首次上传 Drive 很费海外流量，建议：先 -Target Usb 全量，Drive 仅按需/低频。
+  首次全量后务必恢复默认封顶(-MaxTransfer 5G)，确保之后每次都是小额增量。
 #>
 [CmdletBinding()]
 param(
@@ -23,6 +28,7 @@ param(
     [string]   $GDriveRemote = 'gdrive:',
     [string]   $GDriveFolder = 'Backups/WeChat/xwechat_files',
     [string]   $BwLimit      = '4M',
+    [string]   $MaxTransfer  = '5G',
     [switch]   $List
 )
 
@@ -68,19 +74,37 @@ foreach ($t in $Target) {
                 if ($remotes.Count) { $GDriveRemote = $remotes[0]; Say "  默认远端不存在，改用 $GDriveRemote" }
                 else { Say "rclone 无已配置远端，跳过 Drive" 'Yellow'; break }
             }
+            # 治本：绝不直传微信源目录——微信运行时数据库在被写入，rclone 上传中途
+            # 检测到 modtime 变化即报 "source file is being updated" 并整文件从头重传，
+            # 反复烧海外流量却传不成功。改为先 robocopy 源→本地静态快照（零流量），
+            # 再从这份"不会被微信改写"的快照上传，从根上消除边传边改的重传循环。
+            Say "Drive 上传前先刷新本地静态快照（零流量）: $LocalRoot" 'Cyan'
+            New-Item -ItemType Directory -Path $LocalRoot -Force | Out-Null
+            Sync-Local $LocalRoot $false
             # 连通性预检：代理/海外网络没就绪则优雅跳过，下次自动重试（rclone copy 幂等续传）
             & rclone lsd "$GDriveRemote" --max-depth 1 --contimeout 15s --timeout 20s --retries 1 *> $null
             if ($LASTEXITCODE -ne 0) { Say "Drive 不可达(代理/海外网络未就绪)，跳过，下次重试" 'Yellow'; break }
             $dest = "$GDriveRemote$GDriveFolder"
-            $exArgs = $exclDirs | ForEach-Object { '--exclude'; "$_/**" }
-            # copy=只增不删（历史安全）；多小文件调参：并发/分块/fast-list/限速
-            $rc = @($Source, $dest) + $exArgs + @(
+            # 排除：① 缓存/临时目录；② SQLite 运行时文件(.db-wal/.db-shm/.db-journal)——
+            #   高频变动、恢复时自动重建，仅"上云"时排除（本地快照已含它们以保完整）。
+            $exArgs  = $exclDirs | ForEach-Object { '--exclude'; "$_/**" }
+            $exArgs += @('--exclude','*.db-wal','--exclude','*.db-shm','--exclude','*.db-journal')
+            # copy=只增不删（历史安全）；源为静态快照 $LocalRoot（非微信源目录）
+            $rc = @($LocalRoot, $dest) + $exArgs + @(
                 '--bwlimit', $BwLimit, '--transfers', '8', '--checkers', '16',
                 '--drive-chunk-size', '64M', '--fast-list',
-                '--retries', '3', '--low-level-retries', '10', '--stats', '60s'
+                '--retries', '3', '--low-level-retries', '10',
+                '--log-file', $log, '--log-level', 'INFO', '--stats', '30s'
             )
+            # 流量硬封顶（兜底不浪费海外流量）：MaxTransfer=0/空 → 不封顶（仅首次全量用，需严密监控）
+            if ($MaxTransfer -and $MaxTransfer -ne '0') {
+                $rc += @('--max-transfer', $MaxTransfer, '--cutoff-mode', 'cautious')
+                Say "  流量封顶: --max-transfer $MaxTransfer (cautious=绝不超限)" 'Yellow'
+            } else {
+                Say "  ⚠ 流量封顶已关闭（首次全量模式）——请严密监控上传进度" 'Magenta'
+            }
             if ($List) { $rc += '--dry-run' }
-            Say "rclone copy -> $dest $(if($List){'(干跑)'})"
+            Say "rclone copy $LocalRoot -> $dest $(if($List){'(干跑)'})"
             & rclone copy @rc
             Say "  rclone exit=$LASTEXITCODE" 'Green'
         }
