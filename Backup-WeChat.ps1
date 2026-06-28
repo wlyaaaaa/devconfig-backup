@@ -29,6 +29,7 @@ param(
     [string]   $GDriveFolder = 'Backups/WeChat/xwechat_files',
     [string]   $BwLimit      = '4M',
     [string]   $MaxTransfer  = '5G',
+    [switch]   $DriveFull,
     [switch]   $List
 )
 
@@ -85,12 +86,20 @@ foreach ($t in $Target) {
             & rclone lsd "$GDriveRemote" --max-depth 1 --contimeout 15s --timeout 20s --retries 1 *> $null
             if ($LASTEXITCODE -ne 0) { Say "Drive 不可达(代理/海外网络未就绪)，跳过，下次重试" 'Yellow'; break }
             $dest = "$GDriveRemote$GDriveFolder"
-            # 排除：① 缓存/临时目录；② SQLite 运行时文件(.db-wal/.db-shm/.db-journal)——
-            #   高频变动、恢复时自动重建，仅"上云"时排除（本地快照已含它们以保完整）。
-            $exArgs  = $exclDirs | ForEach-Object { '--exclude'; "$_/**" }
-            $exArgs += @('--exclude','*.db-wal','--exclude','*.db-shm','--exclude','*.db-journal')
+            # 方案A: 默认只上传"数据库 db_storage"(聊天核心~1.5G),海量媒体走U盘不上云(省海外流量);
+            #        -DriveFull 才传全量。两种都排除 SQLite 运行时文件(wal/shm/journal,恢复时重建)。
+            if ($DriveFull) {
+                $filter  = $exclDirs | ForEach-Object { '--exclude'; "$_/**" }
+                $filter += @('--exclude','*.db-wal','--exclude','*.db-shm','--exclude','*.db-journal')
+                Say "  Drive范围: 全量(db+媒体)" 'Yellow'
+            } else {
+                # 只收 db_storage 下的库: 先排运行时文件, 再只收 db_storage, 其余(媒体等)全排
+                $filter = @('--filter','- *.db-wal','--filter','- *.db-shm','--filter','- *.db-journal',
+                            '--filter','+ **/db_storage/**','--filter','- *')
+                Say "  Drive范围: 仅数据库db_storage(方案A,媒体走U盘)" 'Cyan'
+            }
             # copy=只增不删（历史安全）；源为静态快照 $LocalRoot（非微信源目录）
-            $rc = @($LocalRoot, $dest) + $exArgs + @(
+            $rc = @($LocalRoot, $dest) + $filter + @(
                 '--bwlimit', $BwLimit, '--transfers', '8', '--checkers', '16',
                 '--drive-chunk-size', '64M', '--fast-list',
                 '--retries', '3', '--low-level-retries', '10',
@@ -107,6 +116,16 @@ foreach ($t in $Target) {
             Say "rclone copy $LocalRoot -> $dest $(if($List){'(干跑)'})"
             & rclone copy @rc
             Say "  rclone exit=$LASTEXITCODE" 'Green'
+            # 方案A: 上传解密密钥(几KB,恢复命门)——明文(用户授权,Drive 高级保护可信)
+            $keyDir = 'E:\WeChatBackup\_KEYS'
+            if (Test-Path $keyDir) {
+                $keyDest = "$GDriveRemote" + "Backups/WeChat/_KEYS"
+                $kc = @($keyDir, $keyDest, '--log-file', $log, '--log-level', 'INFO')
+                if ($List) { $kc += '--dry-run' }
+                Say "上传密钥 -> $keyDest $(if($List){'(干跑)'})" 'Cyan'
+                & rclone copy @kc
+                Say "  密钥上传 exit=$LASTEXITCODE" 'Green'
+            } else { Say "  未找到密钥目录 $keyDir，跳过密钥上传" 'Yellow' }
         }
         default { Say "未知 Target: $t" 'Yellow' }
     }
