@@ -2,10 +2,11 @@
 .SYNOPSIS
   注册 DevConfig + WeChat 备份的计划任务（幂等，可重复运行）。
 .DESCRIPTION
-  - DevConfigBackup-Local : 每天 12:30 + 登录时 -> -Tier Local,Usb,Drive（Drive改动才传/连不通自跳过/强重试续传）
-  - DevConfigBackup-Cloud : 每天 21:00 兜底    -> -Tier Drive（有网才跑，补白天没传成功的）
-  - DevConfigBackup-OnUSB : 插入U盘(NTFS卷挂载)事件 -> -Tier Usb（即插即同步）
-  - WeChatBackup-Weekly   : 每周六 04:00     -> 微信聊天记录增量到U盘+Drive
+  - DevConfigBackup-Local  : 每天 12:30 + 登录 -> -Tier Local（仅本地硬盘·零流量·高频保护）
+  - DevConfigBackup-Weekly : 每周六 04:30      -> -Tier Usb,Drive（配置一周一次到U盘+Drive·有网才跑）
+  - DevConfigBackup-OnUSB  : 插入U盘事件        -> -Tier Usb（机会式即插即同步·不常插不磨损）
+  - WeChatBackup-Weekly    : 每周六 04:00      -> 微信:db+密钥到Drive、全量到U盘（方案A·一周一次）
+  说明: U盘是1TB闪存,为省写入寿命改为每周一次;Drive(配置+微信)均每周一次省海外流量。
   以当前用户、仅登录时运行，无需密码与管理员权限。
 .NOTES
   启动器固定用 Windows PowerShell 5.1（powershell.exe）——任务计划无法直接启动
@@ -48,15 +49,18 @@ $s4 = New-Settings 4
 $sNet = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -AllowStartIfOnBatteries `
             -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
-# ① 本地 + U盘 + Drive：每天12:30 + 登录（Drive 改动才传、连不通自跳过、强重试续传）
+# 重建前先清理旧任务（避免调频/改名后残留旧的每天Drive任务）
+Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
+
+# ① 本地：每天12:30 + 登录（仅本地硬盘，零流量、高频保护；不碰U盘闪存、不走海外流量）
 Register-T 'DevConfigBackup-Local' `
     @((New-ScheduledTaskTrigger -Daily -At $DailyAt), (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME)) `
-    (New-Action $devScript '-Tier Local,Usb,Drive') $s1 '配置备份：本地+U盘+Drive（每天/登录）'
+    (New-Action $devScript '-Tier Local') $s1 '配置备份：仅本地（每天/登录·零流量）'
 
-# ② Drive 兜底：每天 21:00（有网才跑，补白天没传成功的）
-Register-T 'DevConfigBackup-Cloud' `
-    (New-ScheduledTaskTrigger -Daily -At '21:00') `
-    (New-Action $devScript '-Tier Drive') $sNet '配置备份：Drive 兜底（每天21点·有网才跑）'
+# ② U盘 + Drive：每周六（配置一周一次；省U盘闪存写入+省海外流量；有网才跑、连不通下个窗口重试）
+Register-T 'DevConfigBackup-Weekly' `
+    (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At '04:30') `
+    (New-Action $devScript '-Tier Usb,Drive') $sNet '配置备份：U盘+Drive（每周六·一周一次）'
 
 # ③ 插入U盘事件触发（NTFS 卷挂载 EventID 98；动作内再判断 H: 是否存在）
 try {
