@@ -9,8 +9,8 @@
   说明: U盘是1TB闪存,为省写入寿命改为每周一次;Drive(配置+微信)均每周一次省海外流量。
   以当前用户、仅登录时运行，无需密码与管理员权限。
 .NOTES
-  启动器固定用 Windows PowerShell 5.1（powershell.exe）——任务计划无法直接启动
-  Microsoft Store 版 pwsh（WindowsApps 打包路径）。脚本本身兼容 5.1 与 7。
+  计划任务动作固定走 wscript.exe + VBS hidden launcher，避免 PowerShell 窗口一闪而过。
+  VBS 内部仍使用 Windows PowerShell 5.1 执行业务脚本，脚本本身兼容 5.1 与 7。
   重装新机后：先跑一次 Backup-DevConfig.ps1 -Tier Local 生成 latest.zip，再运行本脚本。
 #>
 [CmdletBinding()]
@@ -22,19 +22,21 @@ param(
 $ErrorActionPreference = 'Stop'
 $devScript = Join-Path $PSScriptRoot 'Backup-DevConfig.ps1'
 $wxScript  = Join-Path $PSScriptRoot 'Backup-WeChat.ps1'
+$devWrapper = Join-Path $PSScriptRoot 'Backup-DevConfig-Hidden.vbs'
+$wxWrapper  = Join-Path $PSScriptRoot 'Backup-WeChat-Hidden.vbs'
 if (-not (Test-Path $devScript)) { throw "找不到 $devScript" }
+if (-not (Test-Path $devWrapper)) { throw "找不到 $devWrapper" }
 
-# 固定用 5.1（WindowsApps 版 pwsh 无法被任务计划启动）
-$launcher = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$launcher = Join-Path $env:WINDIR 'System32\wscript.exe'
 
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive -RunLevel Limited
 function New-Settings([int]$Hours) {
     New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours $Hours)
 }
-function New-Action([string]$Script, [string]$ScriptArgs) {
+function New-Action([string]$Wrapper, [string]$ScriptArgs) {
     New-ScheduledTaskAction -Execute $launcher `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Script`" $ScriptArgs" `
+        -Argument "`"$Wrapper`" $ScriptArgs" `
         -WorkingDirectory $PSScriptRoot
 }
 function Register-T([string]$Name, $Triggers, $Action, $Settings, [string]$Desc) {
@@ -55,12 +57,12 @@ Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*' -ErrorAction Si
 # ① 本地：每天12:30 + 登录（仅本地硬盘，零流量、高频保护；不碰U盘闪存、不走海外流量）
 Register-T 'DevConfigBackup-Local' `
     @((New-ScheduledTaskTrigger -Daily -At $DailyAt), (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME)) `
-    (New-Action $devScript '-Tier Local') $s1 '配置备份：仅本地（每天/登录·零流量）'
+    (New-Action $devWrapper 'Local') $s1 '配置备份：仅本地（每天/登录·零流量）'
 
 # ② U盘 + Drive：每周六（配置一周一次；省U盘闪存写入+省海外流量；有网才跑、连不通下个窗口重试）
 Register-T 'DevConfigBackup-Weekly' `
     (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At '04:30') `
-    (New-Action $devScript '-Tier Usb,Drive') $sNet '配置备份：U盘+Drive（每周六·一周一次）'
+    (New-Action $devWrapper 'Usb,Drive') $sNet '配置备份：U盘+Drive（每周六·一周一次）'
 
 # ③ 插入U盘事件触发（NTFS 卷挂载 EventID 98；动作内再判断 H: 是否存在）
 try {
@@ -71,16 +73,17 @@ try {
     $tEvt = New-CimInstance -CimClass $cls -ClientOnly
     $tEvt.Enabled = $true
     $tEvt.Subscription = $sub
-    Register-T 'DevConfigBackup-OnUSB' $tEvt (New-Action $devScript '-Tier Usb') $s1 '开发配置备份：插入U盘即同步'
+    Register-T 'DevConfigBackup-OnUSB' $tEvt (New-Action $devWrapper 'Usb') $s1 '开发配置备份：插入U盘即同步'
 } catch {
     Write-Warning "U盘事件任务创建失败（不影响每天/登录的U盘同步）：$($_.Exception.Message)"
 }
 
 # ④ 微信聊天记录：每周六增量到U盘（仅 H: 在时；脚本内判断）
 if (Test-Path $wxScript) {
+    if (-not (Test-Path $wxWrapper)) { throw "找不到 $wxWrapper" }
     Register-T 'WeChatBackup-Weekly' `
         (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At '04:00') `
-        (New-Action $wxScript '-Target Usb,Drive') $s4 '微信聊天记录每周增量到U盘+Drive'
+        (New-Action $wxWrapper 'Usb,Drive') $s4 '微信聊天记录每周增量到U盘+Drive'
 }
 
 Write-Host "`n已注册的任务：" -ForegroundColor Cyan

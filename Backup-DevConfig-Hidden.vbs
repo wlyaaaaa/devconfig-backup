@@ -1,0 +1,22 @@
+' Hidden launcher for DevConfigBackup-* scheduled tasks.
+Dim fso, shell, here, tier, command, exitCode
+
+Set fso = CreateObject("Scripting.FileSystemObject")
+Set shell = CreateObject("WScript.Shell")
+
+here = fso.GetParentFolderName(WScript.ScriptFullName)
+tier = "Local"
+If WScript.Arguments.Count > 0 Then
+    tier = WScript.Arguments(0)
+End If
+
+Select Case LCase(tier)
+    Case "local", "usb", "drive", "local,usb", "local,drive", "usb,drive", "local,usb,drive"
+    Case Else
+        WScript.Echo "Unsupported DevConfig backup tier: " & tier
+        WScript.Quit 2
+End Select
+
+command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & here & "\Backup-DevConfig.ps1"" -Tier " & tier
+exitCode = shell.Run(command, 0, True)
+WScript.Quit exitCode
