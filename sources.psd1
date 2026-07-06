@@ -85,6 +85,7 @@
 
     # 始终排除的文件名（robocopy /XF，可重下的大数据文件）
     ExcludeFiles = @(
+        '*.tmp',
         'geoip.dat', 'geosite.dat', 'Country.mmdb',
         'Cookies', 'Cookies-journal', 'History', 'History-journal',
         'Favicons', 'Favicons-journal', 'Visited Links',
