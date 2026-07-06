@@ -45,6 +45,7 @@
         'JetBrains',
         'Apifox',
         'Typora',
+        'WhirlwindFX\SignalRgb',
         'GitHub CLI',
         'io.github.clash-verge-rev.clash-verge-rev'
     )
@@ -77,13 +78,18 @@
         'plugins', 'jdbc-drivers', 'node_modules', 'npm', 'packages', 'extensions',
         'shared_client', 'antigravity', 'worktrees', 'bin', 'share', 'nlp',
         'cache', 'caches', 'Cache', 'Cache_Data', 'GPUCache', 'DawnCache',
-        'blob_storage', 'Crashpad', 'Code Cache', 'Service Worker',
+        'blob_storage', 'Crashpad', 'Code Cache', 'CacheStorage', 'Service Worker',
+        'Session Storage', 'VideoDecodeStats', 'Shared Dictionary',
         'logs', '.tmp', 'tmp', 'temp', '.git', 'History', 'OcrModel'
     )
 
     # 始终排除的文件名（robocopy /XF，可重下的大数据文件）
     ExcludeFiles = @(
-        'geoip.dat', 'geosite.dat', 'Country.mmdb'
+        'geoip.dat', 'geosite.dat', 'Country.mmdb',
+        'Cookies', 'Cookies-journal', 'History', 'History-journal',
+        'Favicons', 'Favicons-journal', 'Visited Links',
+        'Network Persistent State', 'TransportSecurity',
+        'Trust Tokens', 'Trust Tokens-journal', 'SharedStorage'
     )
 
     # 历史/对话日志目录名（默认排除；-IncludeHistory 时保留）
