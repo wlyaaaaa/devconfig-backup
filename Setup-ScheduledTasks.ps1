@@ -2,10 +2,10 @@
 .SYNOPSIS
   注册 DevConfig + WeChat 备份的计划任务（幂等，可重复运行）。
 .DESCRIPTION
-  - DevConfigBackup-Local  : 每天 12:30 + 登录 -> -Tier Local（仅本地硬盘·零流量·高频保护）
-  - DevConfigBackup-Weekly : 每周六 04:30      -> -Tier Usb,Drive（配置一周一次到U盘+Drive·有网才跑）
+  - DevConfigBackup-Local  : 每天 21:05 + 登录后20分钟 -> -Tier Local（仅本地硬盘·零流量·高频保护）
+  - DevConfigBackup-Weekly : 每周日 20:00             -> -Tier Usb,Drive（配置一周一次到U盘+Drive·有网才跑）
   - DevConfigBackup-OnUSB  : 插入U盘事件        -> -Tier Usb（机会式即插即同步·不常插不磨损）
-  - WeChatBackup-Weekly    : 每周六 04:00      -> 微信:db+密钥到Drive、全量到U盘（方案A·一周一次）
+  - WeChatBackup-Weekly    : 每周六 20:00      -> 微信:db+密钥到Drive、全量到U盘（方案A·一周一次）
   说明: U盘是1TB闪存,为省写入寿命改为每周一次;Drive(配置+微信)均每周一次省海外流量。
   以当前用户、仅登录时运行，无需密码与管理员权限。
 .NOTES
@@ -15,8 +15,13 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $DailyAt  = '12:30',
-    [string] $WeeklyAt = '03:00'
+    [string] $DailyAt  = '21:05',
+    [ValidateSet('Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday')]
+    [string] $WeeklyDay = 'Sunday',
+    [string] $WeeklyAt = '20:00',
+    [ValidateSet('Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday')]
+    [string] $WeChatWeeklyDay = 'Saturday',
+    [string] $WeChatWeeklyAt = '20:00'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -54,15 +59,17 @@ $sNet = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvaila
 # 重建前先清理旧任务（避免调频/改名后残留旧的每天Drive任务）
 Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
 
-# ① 本地：每天12:30 + 登录（仅本地硬盘，零流量、高频保护；不碰U盘闪存、不走海外流量）
+# ① 本地：每天21:05 + 登录后20分钟（桌面机错过晚间窗口时补一份；不碰U盘闪存、不走海外流量）
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$logonTrigger.Delay = 'PT20M'
 Register-T 'DevConfigBackup-Local' `
-    @((New-ScheduledTaskTrigger -Daily -At $DailyAt), (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME)) `
+    @((New-ScheduledTaskTrigger -Daily -At $DailyAt), $logonTrigger) `
     (New-Action $devWrapper 'Local') $s1 '配置备份：仅本地（每天/登录·零流量）'
 
-# ② U盘 + Drive：每周六（配置一周一次；省U盘闪存写入+省海外流量；有网才跑、连不通下个窗口重试）
+# ② U盘 + Drive：每周日晚上（配置一周一次；省U盘闪存写入+省海外流量；有网才跑、连不通下个窗口重试）
 Register-T 'DevConfigBackup-Weekly' `
-    (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At '04:30') `
-    (New-Action $devWrapper 'Usb,Drive') $sNet '配置备份：U盘+Drive（每周六·一周一次）'
+    (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeeklyDay -At $WeeklyAt) `
+    (New-Action $devWrapper 'Usb,Drive') $sNet '配置备份：U盘+Drive（每周晚间·一周一次）'
 
 # ③ 插入U盘事件触发（NTFS 卷挂载 EventID 98；动作内再判断 H: 是否存在）
 try {
@@ -78,11 +85,11 @@ try {
     Write-Warning "U盘事件任务创建失败（不影响每天/登录的U盘同步）：$($_.Exception.Message)"
 }
 
-# ④ 微信聊天记录：每周六增量到U盘（仅 H: 在时；脚本内判断）
+# ④ 微信聊天记录：每周六晚上增量到U盘（仅 H: 在时；脚本内判断）
 if (Test-Path $wxScript) {
     if (-not (Test-Path $wxWrapper)) { throw "找不到 $wxWrapper" }
     Register-T 'WeChatBackup-Weekly' `
-        (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Saturday -At '04:00') `
+        (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeChatWeeklyDay -At $WeChatWeeklyAt) `
         (New-Action $wxWrapper 'Usb,Drive') $s4 '微信聊天记录每周增量到U盘+Drive'
 }
 
