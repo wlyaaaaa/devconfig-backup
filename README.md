@@ -56,7 +56,7 @@
 > - **频率原则(2026-06调整)**：零流量的(本地/U盘)高频、烧海外流量的(Drive)低频。U盘是 1TB 闪存,为省写入寿命改 **每周一次**;Drive(配置+微信)也 **每周一次** 省海外流量;本地硬盘每天(零流量、高频保护)。
 > - **配置保留**：U盘 / Drive 各保留 **3 份带日期**（`devconfig-YYYYMMDD-HHMMSS.zip`）+ 一份 `latest.zip`。
 > - **rclone 远端名自动探测**：脚本默认找 `gdrive:`，没有就用第一个已配置远端（本机实为 `<邮箱>:`）。
-> - **微信完整历史上云**：微信 38GB 里大部分是已压缩媒体，压缩收益很小；因此不用全量压缩包，而是用 `rclone copy` 逐文件增量，已上传文件自动跳过。
+> - **微信完整历史上云**：微信 38GB 里大部分是已压缩媒体，压缩收益很小；因此不用全量压缩包，而是用 `rclone copy` 逐文件增量，已上传文件自动跳过。默认单次 Drive 上传有 **8G 流量保险丝**，防止异常情况下大额重传。
 > - **增量是自动的**：robocopy(`/E`) 与 rclone(`copy`) 都按"文件名+大小+修改时间"比对,未变的跳过——只传变化的库(db 是**整文件级**增量,一个库变了整库重传)。
 > - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑；② 代理没就绪 → 连通预检优雅跳过、下个窗口重试；③ 传一半断 → `rclone copy` 幂等续传；④ 已存在文件按大小/修改时间跳过，不会从头重传。
 > - **看进度/日志**：`pwsh -File Backup-Status.ps1`。
@@ -103,7 +103,8 @@ rclone config        # 新建名为 gdrive 的 Google Drive 远端（OAuth，需
 ```powershell
 pwsh -File Backup-WeChat.ps1 -List          # 干跑:刷新本地快照后列出待传量
 pwsh -File Backup-WeChat.ps1 -Target Usb     # 全量到U盘(robocopy /E,只增不删,零流量;主力)
-pwsh -File Backup-WeChat.ps1 -Target Drive   # 完整聊天记录增量到Drive(含媒体;已传自动跳过)
+pwsh -File Backup-WeChat.ps1 -Target Drive   # 完整聊天记录增量到Drive(含媒体;已传自动跳过;默认8G封顶)
+pwsh -File Backup-WeChat.ps1 -Target Drive -MaxTransfer 0   # 一次性补齐模式(关闭封顶,需人工看进度)
 pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只传db_storage
 ```
 
@@ -114,7 +115,7 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 
 **解密密钥（恢复命门）**：微信4.x db 用 SQLCipher，密钥 = IMEI+UIN 派生、不随版本变、**必须本机提取**。已提取两账号密钥固化到 `_KEYS`(U盘 + 本地 `E:\WeChatBackup`，**不进git**)。**绝不可丢**：当前 4.1.10 版本下 WeFlow GUI 提取已被封、wx_key 也已停更，丢了难重提；wx_key v2.1.8 工具留存于 `E:\WeChatBackup\_tools`。
 
-**流量护栏**（沿用）：静态快照上传(不直传使用中源目录，杜绝"边传边改"反复重传)、排除 wal/shm、`-MaxTransfer` 硬封顶。db 是**整文件级**增量，故 Drive **每周一次**即可(频率越高越重复传大库、越费流量)。
+**流量护栏**：静态快照上传(不直传使用中源目录，杜绝"边传边改"反复重传)、排除 wal/shm、`-MaxTransfer 8G` 默认硬封顶。db 是**整文件级**增量，故 Drive **每周一次**即可(频率越高越重复传大库、越费流量)。
 
 ---
 

@@ -13,10 +13,11 @@
   pwsh -File Backup-WeChat.ps1 -List           # 干跑，只估算将复制的量（强烈建议先跑）
   pwsh -File Backup-WeChat.ps1 -Target Usb      # 增量到U盘（零流量，推荐主力）
   pwsh -File Backup-WeChat.ps1 -Target Local    # 增量到本地另一盘
-  pwsh -File Backup-WeChat.ps1 -Target Drive    # 完整聊天记录增量到 Google Drive（含媒体）
+  pwsh -File Backup-WeChat.ps1 -Target Drive    # 完整聊天记录增量到 Google Drive（含媒体，默认8G封顶）
   pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly # 仅数据库上云，媒体只留U盘（省流量模式）
 .NOTES
   38GB 首次上传 Drive 很费海外流量；完成后 rclone copy 会自动跳过已存在文件，后续只传增量。
+  默认单次 Drive 上传设置 8G 流量保险丝；确需一次性补齐时可显式传 -MaxTransfer 0。
 #>
 [CmdletBinding()]
 param(
@@ -27,7 +28,7 @@ param(
     [string]   $GDriveRemote = 'gdrive:',
     [string]   $GDriveFolder = 'Backups/WeChat/xwechat_files',
     [string]   $BwLimit      = '4M',
-    [string]   $MaxTransfer  = '0',
+    [string]   $MaxTransfer  = '8G',
     [switch]   $DriveFull,
     [switch]   $DbOnly,
     [switch]   $List
