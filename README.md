@@ -138,7 +138,8 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 |---|---|
 | `Backup-DevConfig.ps1` | 主脚本：采集→系统导出→清单→打包→三级分发（`-Tier Local/Usb/Drive`） |
 | `Backup-WeChat.ps1` | 微信聊天记录增量备份 |
-| `Setup-ScheduledTasks.ps1` | 注册 3 个计划任务（幂等） |
+| `Monitor-WeChatDrive.ps1` | 每小时监控微信 Drive 备份进度；未完成且无上传进程时自动续传；成功后自动禁用监控任务 |
+| `Setup-ScheduledTasks.ps1` | 注册/重建 DevConfig + WeChat 常规备份计划任务（幂等） |
 | `sources.psd1` | 备份源清单 + 排除规则（数据，改这里即可） |
 | `out/ staging/ state/ logs/` | 运行产物，**已 gitignore** |
 
@@ -170,11 +171,12 @@ cd E:\DevConfigBackup
 .\Backup-WeChat.ps1 -List                   # 微信干跑估算
 .\Backup-WeChat.ps1 -Target Usb             # 微信增量到U盘
 .\Backup-WeChat.ps1 -Target Usb,Drive       # 微信增量到U盘+Drive
+.\Monitor-WeChatDrive.ps1                   # 手动检查微信Drive进度/必要时续传
 ```
 
 ### 计划任务管理
 ```powershell
-.\Setup-ScheduledTasks.ps1                  # 注册/重建全部 4 个任务
+.\Setup-ScheduledTasks.ps1                  # 注册/重建常规备份任务
 Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*' | ft TaskName,State
 Start-ScheduledTask DevConfigBackup-Local   # 手动跑
 (Get-ScheduledTaskInfo DevConfigBackup-Local).LastTaskResult   # 0=成功
