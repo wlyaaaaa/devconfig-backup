@@ -139,6 +139,7 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 | `Backup-DevConfig.ps1` | 主脚本：采集→系统导出→清单→打包→三级分发（`-Tier Local/Usb/Drive`） |
 | `Backup-WeChat.ps1` | 微信聊天记录增量备份 |
 | `Monitor-WeChatDrive.ps1` | 每小时监控微信 Drive 备份进度；未完成且无上传进程时自动续传；成功后自动禁用监控任务 |
+| `Install-WeChatDriveMonitor.ps1` | 注册/刷新微信 Drive 小时监控任务；直接运行 PowerShell，30 分钟硬超时，避免监控实例卡住 |
 | `Setup-ScheduledTasks.ps1` | 注册/重建 DevConfig + WeChat 常规备份计划任务（幂等） |
 | `sources.psd1` | 备份源清单 + 排除规则（数据，改这里即可） |
 | `out/ staging/ state/ logs/` | 运行产物，**已 gitignore** |
@@ -172,6 +173,7 @@ cd E:\DevConfigBackup
 .\Backup-WeChat.ps1 -Target Usb             # 微信增量到U盘
 .\Backup-WeChat.ps1 -Target Usb,Drive       # 微信增量到U盘+Drive
 .\Monitor-WeChatDrive.ps1                   # 手动检查微信Drive进度/必要时续传
+.\Install-WeChatDriveMonitor.ps1            # 注册每小时监控，完成后监控脚本会自禁用
 ```
 
 ### 计划任务管理

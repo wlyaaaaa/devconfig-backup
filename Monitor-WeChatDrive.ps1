@@ -15,7 +15,8 @@ param(
     [string] $GDriveRemote = 'gdrive:',
     [string] $GDriveFolder = 'Backups/WeChat/xwechat_files',
     [string] $MonitorTaskName = 'WeChatDrive-Monitor-Hourly',
-    [double] $CompletePercent = 99.5
+    [double] $CompletePercent = 99.5,
+    [int] $RcloneTimeoutSec = 900
 )
 
 $ErrorActionPreference = 'Continue'
@@ -41,11 +42,58 @@ function Resolve-RcloneRemote {
     return $null
 }
 
+function Invoke-RcloneWithTimeout {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string[]] $Arguments,
+        [int] $TimeoutSec = 900,
+        [string] $Purpose = 'rclone'
+    )
+
+    function ConvertTo-ProcessArgumentString([string[]]$Items) {
+        $quoted = foreach ($item in $Items) {
+            if ($item -match '[\s"]') {
+                '"' + ($item -replace '"', '\"') + '"'
+            } else {
+                $item
+            }
+        }
+        return ($quoted -join ' ')
+    }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'rclone.exe'
+    $psi.Arguments = ConvertTo-ProcessArgumentString $Arguments
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $psi.WorkingDirectory = $Root
+
+    $p = New-Object System.Diagnostics.Process
+    $p.StartInfo = $psi
+    try {
+        [void]$p.Start()
+        if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+            try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+            Write-MonitorLog "$Purpose 超过 ${TimeoutSec}s 未返回，终止本轮检查，等待下一轮重试。" 'WARN'
+            return [pscustomobject]@{ ExitCode = 124; Stdout = ''; Stderr = ''; TimedOut = $true }
+        }
+
+        $outText = $p.StandardOutput.ReadToEnd()
+        $errText = $p.StandardError.ReadToEnd()
+        return [pscustomobject]@{ ExitCode = $p.ExitCode; Stdout = $outText; Stderr = $errText; TimedOut = $false }
+    } finally {
+        if ($p) { $p.Dispose() }
+    }
+}
+
 function Get-RcloneSizeJson {
     param([string]$Path, [string[]]$ExtraArgs = @())
-    $raw = & rclone size $Path @ExtraArgs --fast-list --json 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
-    try { return ($raw | ConvertFrom-Json) } catch { return $null }
+    $args = @('size', $Path) + $ExtraArgs + @('--fast-list', '--json')
+    $result = Invoke-RcloneWithTimeout -Arguments $args -TimeoutSec $RcloneTimeoutSec -Purpose "rclone size $Path"
+    if ($result.ExitCode -ne 0 -or -not $result.Stdout) { return $null }
+    try { return ($result.Stdout | ConvertFrom-Json) } catch { return $null }
 }
 
 function Test-WeChatRcloneActive {
@@ -90,7 +138,7 @@ $excludes = @(
     '--exclude','*.db-journal'
 )
 
-Write-MonitorLog '==== WeChat Drive monitor start ===='
+Write-MonitorLog "==== WeChat Drive monitor start PID=$PID ===="
 if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) {
     Write-MonitorLog 'rclone 未安装或不在 PATH，无法监控 Drive' 'ERR'
     exit 1
@@ -127,13 +175,14 @@ Write-MonitorLog ("进度: {0} GiB / {1} GiB = {2}% ; Drive文件={3} 本地文�
 
 if ($pct -ge $CompletePercent) {
     Write-MonitorLog "达到 $CompletePercent%，执行 rclone check 做最终确认..."
-    & rclone check $LocalRoot $dest @excludes --one-way --size-only --fast-list --checkers 16 --log-file $LogFile --log-level INFO
-    if ($LASTEXITCODE -eq 0) {
+    $checkArgs = @('check', $LocalRoot, $dest) + $excludes + @('--one-way', '--size-only', '--fast-list', '--checkers', '16', '--log-file', $LogFile, '--log-level', 'INFO')
+    $check = Invoke-RcloneWithTimeout -Arguments $checkArgs -TimeoutSec ([math]::Max($RcloneTimeoutSec, 1800)) -Purpose 'rclone check'
+    if ($check.ExitCode -eq 0) {
         Write-MonitorLog "微信 Drive 备份已确认完成: $driveGiB / $localGiB GiB, $pct%" 'OK'
         Disable-SelfMonitor $MonitorTaskName
         exit 0
     }
-    Write-MonitorLog "rclone check 未通过(exit=$LASTEXITCODE)，继续保持监控并等待补齐" 'WARN'
+    Write-MonitorLog "rclone check 未通过(exit=$($check.ExitCode))，继续保持监控并等待补齐" 'WARN'
 }
 
 if (-not $active) {
@@ -143,4 +192,3 @@ if (-not $active) {
 }
 Write-MonitorLog '==== WeChat Drive monitor end ===='
 exit 0
-
