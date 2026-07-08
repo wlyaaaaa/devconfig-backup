@@ -52,8 +52,168 @@ function Say($m,$c='Gray'){ $l="{0} {1}" -f (Get-Date -Format 'HH:mm:ss'),$m; Wr
 if (-not (Test-Path -LiteralPath $Source)) { Say "源不存在: $Source" 'Red'; exit 1 }
 Say "==== WeChat backup | Target=$($Target -join ',') | List=$List ====" 'Cyan'
 
-function Sync-Local([string]$dst, [bool]$listOnly) {
-    $a = @($Source, $dst, '/E','/R:1','/W:1','/MT:16','/NDL','/NP','/XD') + $exclDirs
+$script:HDriveUsbWriteLockName = 'Global\CodexHDriveUsbWriteLock'
+$script:UsbFreeSpaceBufferBytes = 1GB
+
+function Format-Bytes {
+    param([Nullable[Int64]]$Bytes)
+    if ($null -eq $Bytes) { return 'unknown' }
+    if ($Bytes -ge 1GB) { return ('{0:N2} GB' -f ($Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return ('{0:N1} MB' -f ($Bytes / 1MB)) }
+    return ('{0:N0} bytes' -f $Bytes)
+}
+
+function Get-DriveRootFromPath {
+    param([string]$Path)
+    $root = [System.IO.Path]::GetPathRoot($Path)
+    if ([string]::IsNullOrWhiteSpace($root)) { return $null }
+    return $root.TrimEnd('\')
+}
+
+function Get-HDriveUsbStatus {
+    param([string]$TargetRoot)
+
+    $drive = Get-DriveRootFromPath $TargetRoot
+    $status = [ordered]@{
+        Drive             = $drive
+        Exists            = $false
+        Dirty             = $null
+        DirtySource       = ''
+        HealthStatus      = 'Unknown'
+        OperationalStatus = @('Unknown')
+        FullRepairNeeded  = $false
+        RepairNeeded      = $false
+        FreeBytes         = $null
+        SizeBytes         = $null
+        Error             = ''
+    }
+
+    if ([string]::IsNullOrWhiteSpace($drive)) {
+        $status.Error = "无法从 UsbRoot 解析盘符: $TargetRoot"
+        return [pscustomobject]$status
+    }
+
+    $root = "$drive\"
+    $status.Exists = Test-Path -LiteralPath $root
+    if (-not $status.Exists) { return [pscustomobject]$status }
+
+    try {
+        $logical = Get-CimInstance -ClassName Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drive.Replace("'", "''")) -ErrorAction Stop
+        if ($logical) {
+            if ($null -ne $logical.VolumeDirty) {
+                $status.Dirty = [bool]$logical.VolumeDirty
+                $status.DirtySource = 'Win32_LogicalDisk.VolumeDirty'
+            }
+            if ($null -ne $logical.FreeSpace) { $status.FreeBytes = [Int64]$logical.FreeSpace }
+            if ($null -ne $logical.Size) { $status.SizeBytes = [Int64]$logical.Size }
+        }
+    } catch {
+        $status.Error = "CIM 查询失败: $($_.Exception.Message)"
+    }
+
+    if ($null -eq $status.Dirty) {
+        try {
+            $dirtyOutput = & fsutil dirty query $drive 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $dirtyText = ($dirtyOutput -join "`n")
+                if ($dirtyText -match 'NOT\s+Dirty') {
+                    $status.Dirty = $false
+                    $status.DirtySource = 'fsutil dirty query'
+                } elseif ($dirtyText -match 'Dirty') {
+                    $status.Dirty = $true
+                    $status.DirtySource = 'fsutil dirty query'
+                }
+            } elseif ([string]::IsNullOrWhiteSpace($status.Error)) {
+                $status.Error = "fsutil dirty query exit=$LASTEXITCODE"
+            }
+        } catch {
+            if ([string]::IsNullOrWhiteSpace($status.Error)) { $status.Error = "fsutil dirty query 失败: $($_.Exception.Message)" }
+        }
+    }
+
+    if ($drive -match '^([A-Za-z]):$') {
+        try {
+            $volume = Get-Volume -DriveLetter $matches[1] -ErrorAction Stop
+            if ($volume) {
+                $status.HealthStatus = [string]$volume.HealthStatus
+                $ops = @($volume.OperationalStatus | ForEach-Object { [string]$_ })
+                if ($ops.Count -gt 0) { $status.OperationalStatus = $ops }
+                if ($null -ne $volume.SizeRemaining) { $status.FreeBytes = [Int64]$volume.SizeRemaining }
+                if ($null -ne $volume.Size) { $status.SizeBytes = [Int64]$volume.Size }
+                $opText = $status.OperationalStatus -join ','
+                $status.FullRepairNeeded = ($opText -match 'Full Repair Needed')
+                $status.RepairNeeded = ($opText -match 'Full Repair Needed|Spot Fix Needed|Needs Scan')
+            }
+        } catch {
+            if ([string]::IsNullOrWhiteSpace($status.Error)) { $status.Error = "Get-Volume 查询失败: $($_.Exception.Message)" }
+        }
+    }
+
+    return [pscustomobject]$status
+}
+
+function Test-HDriveUsbReady {
+    param(
+        [string]$TargetRoot,
+        [Int64]$RequiredBytes
+    )
+
+    $status = Get-HDriveUsbStatus -TargetRoot $TargetRoot
+    if (-not $status.Exists) { Say "U盘 $($status.Drive) 未插入，跳过 USB 写入" 'Yellow'; return $false }
+    if ($status.Dirty -eq $true) { Say "U盘 $($status.Drive) dirty=True（$($status.DirtySource)），跳过 USB 写入" 'Yellow'; return $false }
+    if ($null -eq $status.Dirty) { Say "无法确认 U盘 $($status.Drive) dirty 状态，跳过 USB 写入；$($status.Error)" 'Yellow'; return $false }
+    if ($status.FullRepairNeeded -or $status.RepairNeeded) { Say "U盘 $($status.Drive) OperationalStatus=$($status.OperationalStatus -join ',')，跳过 USB 写入" 'Yellow'; return $false }
+    if ($status.HealthStatus -and $status.HealthStatus -notin @('Healthy','Unknown')) { Say "U盘 $($status.Drive) HealthStatus=$($status.HealthStatus)，跳过 USB 写入" 'Yellow'; return $false }
+    if ($null -eq $status.FreeBytes) { Say "无法确认 U盘 $($status.Drive) 剩余空间，跳过 USB 写入；$($status.Error)" 'Yellow'; return $false }
+
+    $needed = [Int64]([Math]::Max(0, $RequiredBytes) + $script:UsbFreeSpaceBufferBytes)
+    if ($status.FreeBytes -lt $needed) {
+        Say "U盘 $($status.Drive) 剩余空间不足：剩余 $(Format-Bytes $status.FreeBytes)，预计需 $(Format-Bytes $RequiredBytes) + 1 GB 缓冲，跳过 USB 写入" 'Yellow'
+        return $false
+    }
+
+    Say "U盘门禁通过: $($status.Drive) dirty=False health=$($status.HealthStatus) op=$($status.OperationalStatus -join ',') free=$(Format-Bytes $status.FreeBytes)" 'Green'
+    return $true
+}
+
+function Get-DirectoryRequiredBytes {
+    param([string]$Src, [string]$Dst)
+    [Int64]$required = 0
+    if (-not (Test-Path -LiteralPath $Src)) { return 0 }
+    Get-ChildItem -LiteralPath $Src -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $rel = $_.FullName.Substring($Src.TrimEnd('\').Length).TrimStart('\')
+        $destFile = Join-Path $Dst $rel
+        [Int64]$existing = 0
+        if (Test-Path -LiteralPath $destFile) { $existing = [Int64](Get-Item -LiteralPath $destFile).Length }
+        $required += [Int64][Math]::Max(0, ([Int64]$_.Length - $existing))
+    }
+    return $required
+}
+
+function Invoke-WithHDriveUsbWriteLock {
+    param([scriptblock]$Body)
+
+    $mutex = $null
+    $acquired = $false
+    try {
+        $mutex = [System.Threading.Mutex]::new($false, $script:HDriveUsbWriteLockName)
+        Say "等待 USB 写入锁 $script:HDriveUsbWriteLockName ..."
+        try { $acquired = $mutex.WaitOne([TimeSpan]::FromMinutes(30)) }
+        catch [System.Threading.AbandonedMutexException] { $acquired = $true; Say "USB 写入锁曾被异常释放，已接管继续执行" 'Yellow' }
+        if (-not $acquired) { Say "等待 USB 写入锁超时，跳过 USB 写入" 'Yellow'; return $false }
+        & $Body
+        return $true
+    } catch {
+        Say "USB 写入锁异常，跳过 USB 写入: $($_.Exception.Message)" 'Red'
+        return $false
+    } finally {
+        if ($acquired -and $mutex) { try { $mutex.ReleaseMutex() } catch {} }
+        if ($mutex) { $mutex.Dispose() }
+    }
+}
+
+function Sync-Local([string]$dst, [bool]$listOnly, [int]$Threads = 16) {
+    $a = @($Source, $dst, '/E','/R:1','/W:1',"/MT:$Threads",'/NDL','/NP','/XD') + $exclDirs
     if ($listOnly) { $a += '/L' }       # /L = 只列出，不实际复制
     Say "robocopy -> $dst $(if($listOnly){'(干跑)'})"
     & robocopy @a | Out-Null
@@ -63,10 +223,19 @@ function Sync-Local([string]$dst, [bool]$listOnly) {
 foreach ($t in $Target) {
     switch ($t) {
         'Usb' {
-            $drv = ($UsbRoot -split '\\')[0]
-            if (-not (Test-Path "$drv\")) { Say "U盘 $drv 未插入，跳过" 'Yellow'; break }
-            New-Item -ItemType Directory -Path $UsbRoot -Force | Out-Null
-            Sync-Local $UsbRoot ([bool]$List)
+            if ($List) {
+                $status = Get-HDriveUsbStatus -TargetRoot $UsbRoot
+                Say "U盘干跑状态: exists=$($status.Exists) dirty=$($status.Dirty) health=$($status.HealthStatus) op=$($status.OperationalStatus -join ',') free=$(Format-Bytes $status.FreeBytes)" 'Yellow'
+                Sync-Local $UsbRoot $true 4
+                break
+            }
+            Invoke-WithHDriveUsbWriteLock {
+                if (-not (Test-HDriveUsbReady -TargetRoot $UsbRoot -RequiredBytes 0)) { return }
+                $requiredBytes = Get-DirectoryRequiredBytes -Src $Source -Dst $UsbRoot
+                if (-not (Test-HDriveUsbReady -TargetRoot $UsbRoot -RequiredBytes $requiredBytes)) { return }
+                New-Item -ItemType Directory -Path $UsbRoot -Force | Out-Null
+                Sync-Local $UsbRoot $false 4
+            } | Out-Null
         }
         'Local' {
             New-Item -ItemType Directory -Path $LocalRoot -Force | Out-Null

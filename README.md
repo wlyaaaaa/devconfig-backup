@@ -60,6 +60,7 @@
 > - **增量是自动的**：robocopy(`/E`) 与 rclone(`copy`) 都按"文件名+大小+修改时间"比对,未变的跳过——只传变化的库(db 是**整文件级**增量,一个库变了整库重传)。
 > - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑；② 代理没就绪 → 连通预检优雅跳过、下个窗口重试；③ 传一半断 → `rclone copy` 幂等续传；④ 已存在文件按大小/修改时间跳过，不会从头重传。
 > - **看进度/日志**：`pwsh -File Backup-Status.ps1`。
+> - **H盘写入护栏**：USB 写入前检查 dirty、`Full Repair Needed`、剩余空间，并用 `Global\CodexHDriveUsbWriteLock` 防并发；H 盘需要修复时跳过 USB 写入，但不阻断 Local / Drive。
 
 ---
 
