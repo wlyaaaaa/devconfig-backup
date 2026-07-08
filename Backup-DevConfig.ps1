@@ -279,6 +279,24 @@ function Copy-One {
     }
 }
 
+function Copy-RelativeFile {
+    param([string]$Base, [string]$Relative, [string]$OutBase)
+    $src = Join-Path $Base $Relative
+    if (-not (Test-Path -LiteralPath $src)) { return }
+    $parent = Split-Path $Relative -Parent
+    $dstDir = if ([string]::IsNullOrWhiteSpace($parent)) { $OutBase } else { Join-Path $OutBase $parent }
+    New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
+    Copy-Item -LiteralPath $src -Destination $dstDir -Force -ErrorAction SilentlyContinue
+}
+
+function Copy-RelativeDir {
+    param([string]$Base, [string]$Relative, [string]$OutBase, [string[]]$Excl, [string[]]$ExclF)
+    $src = Join-Path $Base $Relative
+    if (-not (Test-Path -LiteralPath $src)) { Write-Log "  跳过(不存在) $src" 'WARN'; return }
+    $dst = Join-Path $OutBase $Relative
+    Invoke-Rc $src $dst $Excl $ExclF
+}
+
 # ============================================================
 # 1) 采集 -> staging
 # ============================================================
@@ -292,8 +310,11 @@ function Invoke-Gather {
     New-Item -ItemType Directory -Path $homeOut,$adOut,$adlOut,$extraOut -Force | Out-Null
 
     foreach ($f in $cfg.HomeFiles)  { Copy-One (Join-Path $Home10 $f) $homeOut }
+    foreach ($f in @($cfg.HomePreciseFiles)) { Copy-RelativeFile $Home10 $f $homeOut }
+    foreach ($d in @($cfg.HomePreciseDirs))  { Copy-RelativeDir  $Home10 $d $homeOut $excludeDirs $excludeFiles }
     foreach ($d in $cfg.HomeDirs)   { Invoke-Rc (Join-Path $Home10 $d) (Join-Path $homeOut $d) $excludeDirs $excludeFiles }
     foreach ($d in $cfg.AppDataRoamingDirs) { Invoke-Rc (Join-Path $Home10 "AppData\Roaming\$d") (Join-Path $adOut $d) $excludeDirs $excludeFiles }
+    foreach ($f in @($cfg.AppDataRoamingFiles)) { Copy-RelativeFile (Join-Path $Home10 'AppData\Roaming') $f $adOut }
     foreach ($d in $cfg.AppDataLocalDirs)   { Invoke-Rc (Join-Path $Home10 "AppData\Local\$d")   (Join-Path $adlOut $d) $excludeDirs $excludeFiles }
     foreach ($f in $cfg.AppDataLocalFiles)  { Copy-One (Join-Path $Home10 "AppData\Local\$f") (Join-Path $adlOut (Split-Path $f)) }
     foreach ($e in $cfg.ExtraDirs)  { Invoke-Rc $e.Src (Join-Path $extraOut $e.Name) $excludeDirs $excludeFiles }

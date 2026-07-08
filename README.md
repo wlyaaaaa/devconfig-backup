@@ -17,9 +17,10 @@
 | **密钥/凭据** | `.gnupg`(GPG 私钥)、`.docker/config.json`、`GitHub CLI`(gh token)、`.openclaw/.../client_secret.json` | 不可再生 |
 | **编辑器** | VS Code / Cursor 的 `User\`(设置/快捷键/snippets/MCP)、JetBrains 设置(剔 plugins/jdbc-drivers)、Apifox、Typora、Windows Terminal | |
 | **终端/代理** | FinalShell `conn\`(SSH会话+密码)、Clash Verge Rev `profiles\`(订阅)+yaml(剔 geo*.dat) | |
+| **Docker 小配置** | `.docker\config.json`、daemon 配置、contexts、Docker Desktop settings 偏好文件 | 不含 Docker Desktop VHDX、镜像层、容器运行态、登录/会话数据库 |
 | **生产力** | PowerToys 配置、PixPin 配置、用户自装字体、Scoop `persist\` | |
 | **散件** | `.gitconfig .zshrc .wakatime.cfg .claude.json .wslconfig .condarc .npmrc` | |
-| **系统导出**(脚本现生成) | 环境变量(`HKCU\Environment`)、机器 PATH、20+ 个自定义计划任务 XML、hosts、Wi-Fi(含密码)、Xshell 注册表 | |
+| **系统导出**(脚本现生成) | 环境变量(`HKCU\Environment` + `HKLM...\Environment`)、机器 PATH、20+ 个自定义计划任务 XML、hosts、Wi-Fi(含密码)、Xshell 注册表 | |
 | **重装清单** | `scoop export`、`winget export`、VS Code/Cursor 扩展列表、JetBrains 插件名单、已装软件 CSV | 让"可重下"的部分一条命令补回 |
 
 **默认剔除**（`-IncludeHistory` 可保留）：AI 聊天历史（`.claude\projects`、`.openclaw\session-backup*` 等，约 +256MB）。
@@ -32,6 +33,7 @@
 - PixPin：只取 `Config`，**不是** 203M 的截图 `History`
 - Clash：取 `profiles\`+yaml，剔 `geoip.dat/geosite.dat/Country.mmdb`(34M 可重下)
 - JetBrains：剔 `plugins\`(10.6G)+`jdbc-drivers\`
+- Docker：DevConfig 只保存 allowlist 内的 CLI/Desktop 小配置；本地自建镜像另由软件环境备份导出 tar，Docker Desktop 的 `docker_data.vhdx`、登录态、会话数据库和插件二进制不进 DevConfig
 
 ---
 
@@ -216,7 +218,9 @@ robocopy E:\restore\devconfig\appdata-roaming $env:APPDATA   /E
 robocopy E:\restore\devconfig\appdata-local   $env:LOCALAPPDATA /E
 
 # 5. 还原系统设置
-reg import E:\restore\devconfig\_system\env-user.reg      # 环境变量/PATH
+reg import E:\restore\devconfig\_system\env-user.reg      # 用户环境变量
+reg import E:\restore\devconfig\_system\env-machine.reg   # 机器环境变量（管理员）
+# 如只需核对机器 PATH，也可查看 _system\path-machine.txt
 reg import E:\restore\devconfig\_system\xshell.reg        # Xshell 会话
 Get-ChildItem E:\restore\devconfig\_system\tasks\*.xml | % {
     schtasks /create /tn $_.BaseName /xml $_.FullName /f }    # 你的自动化任务

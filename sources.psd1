@@ -18,11 +18,25 @@
         '.npmrc'
     )
 
+    # home 下精确文件（保留相对路径）
+    HomePreciseFiles = @(
+        '.docker\config.json',
+        '.docker\daemon.json',
+        '.docker\windows-daemon.json',
+        '.docker\mcp\config.yaml',
+        '.docker\mcp\registry.yaml',
+        '.docker\mcp\tools.yaml'
+    )
+
+    # home 下精确目录（保留相对路径，避免整目录拷入二进制/缓存/会话）
+    HomePreciseDirs = @(
+        '.docker\contexts'
+    )
+
     # home 下目录（整目录拷入，按 ExcludeDirs/ExcludeFiles 剔除缓存/插件）
     HomeDirs = @(
         '.gnupg',
         '.config',
-        '.docker',
         '.claude',
         '.codex',
         '.gemini',
@@ -48,6 +62,19 @@
         'WhirlwindFX\SignalRgb',
         'GitHub CLI',
         'io.github.clash-verge-rev.clash-verge-rev'
+    )
+
+    # AppData\Roaming 下精确文件（保留相对路径）
+    AppDataRoamingFiles = @(
+        'Docker\settings-store.json',
+        'Docker\features-overrides.json',
+        'Docker\locked-directories',
+        'Docker Desktop\install-state.json',
+        'Docker Desktop\persisted-state.json',
+        'Docker Desktop\Preferences',
+        'Docker Desktop\window-management.json',
+        'Docker Desktop\versions.json',
+        'Docker Desktop\notifications.json'
     )
 
     # AppData\Local 下目录（精确子目录，避开 GB 级缓存/安装目录）
@@ -109,6 +136,7 @@
     # 注册表导出（凭据/会话存在注册表里）
     RegistryExports = @(
         @{ Name = 'env-user'; Key = 'HKCU\Environment' },
+        @{ Name = 'env-machine'; Key = 'HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' },
         @{ Name = 'xshell';   Key = 'HKCU\Software\NetSarang' }
     )
 }
