@@ -42,7 +42,7 @@
                                       │
                           ┌───────────┴────────────┐
                           ▼                         ▼
-                   ② U盘 H:\My_Digital_Backup   ③ Google Drive (rclone)
+                   ② U盘 H:\80_自动备份区   ③ Google Drive (rclone)
                       (零流量,插上才同步)         (海外额度,改动才传)
 ```
 

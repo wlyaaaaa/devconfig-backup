@@ -1,5 +1,5 @@
 ' Hidden launcher for DevConfigBackup-* scheduled tasks.
-Dim fso, shell, here, tier, command, exitCode
+Dim fso, shell, here, tier, pwsh, exe, command, exitCode
 
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
@@ -17,6 +17,13 @@ Select Case LCase(tier)
         WScript.Quit 2
 End Select
 
-command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & here & "\Backup-DevConfig.ps1"" -Tier " & tier
+pwsh = shell.ExpandEnvironmentStrings("%ProgramFiles%") & "\PowerShell\7\pwsh.exe"
+If fso.FileExists(pwsh) Then
+    exe = """" & pwsh & """"
+Else
+    exe = "powershell.exe"
+End If
+
+command = exe & " -NoProfile -ExecutionPolicy Bypass -File """ & here & "\Backup-DevConfig.ps1"" -Tier " & tier
 exitCode = shell.Run(command, 0, True)
 WScript.Quit exitCode

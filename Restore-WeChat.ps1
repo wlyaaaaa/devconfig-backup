@@ -17,13 +17,17 @@
 [CmdletBinding()]
 param(
     [string] $Target       = 'E:\Documents\xwechat_files',
-    [string] $UsbRoot      = 'H:\My_Digital_Backup\WeChat\xwechat_files',
-    [string] $UsbKeys      = 'H:\My_Digital_Backup\WeChat\_KEYS',
+    [string] $UsbRoot      = '',
+    [string] $UsbKeys      = '',
     [string] $GDriveRemote = 'gdrive:',
     [string] $GDriveFolder = 'Backups/WeChat/xwechat_files',
     [switch] $List
 )
 $ErrorActionPreference = 'Continue'
+$autoBackupDirName = '80_' + (-join @([char]0x81EA, [char]0x52A8, [char]0x5907, [char]0x4EFD, [char]0x533A))
+$usbWeChatRoot = Join-Path (Join-Path 'H:\' $autoBackupDirName) 'WeChat'
+if ([string]::IsNullOrWhiteSpace($UsbRoot)) { $UsbRoot = Join-Path $usbWeChatRoot 'xwechat_files' }
+if ([string]::IsNullOrWhiteSpace($UsbKeys)) { $UsbKeys = Join-Path $usbWeChatRoot '_KEYS' }
 function Say($m,$c='Gray'){ Write-Host ("{0} {1}" -f (Get-Date -Format 'HH:mm:ss'),$m) -ForegroundColor $c }
 
 Say "==== WeChat 恢复合成 -> $Target $(if($List){'(干跑)'}) ====" 'Cyan'

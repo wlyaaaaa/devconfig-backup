@@ -34,7 +34,10 @@ $lz = Join-Path $dir 'out\latest.zip'
 if (Test-Path $lz) { '本地 latest.zip : {0:N1} MB  ({1})' -f ((Get-Item $lz).Length/1MB), (Age (Get-Item $lz).LastWriteTime) }
 $dated = Get-ChildItem (Join-Path $dir 'out') -Filter 'devconfig-*.zip' -ErrorAction SilentlyContinue
 '本地带日期版   : {0} 份  {1}' -f $dated.Count, (($dated | Sort-Object Name -Descending | Select-Object -First 3 -ExpandProperty Name) -join ', ')
-$ud='H:\My_Digital_Backup\DevConfig'; $uw='H:\My_Digital_Backup\WeChat\xwechat_files'
+$autoBackupDirName = '80_' + (-join @([char]0x81EA, [char]0x52A8, [char]0x5907, [char]0x4EFD, [char]0x533A))
+$usbBackupRoot = Join-Path 'H:\' $autoBackupDirName
+$ud = Join-Path $usbBackupRoot 'DevConfig'
+$uw = Join-Path (Join-Path $usbBackupRoot 'WeChat') 'xwechat_files'
 if (Test-Path 'H:\') {
     if (Test-Path $ud) { $z=Get-ChildItem $ud -Filter 'devconfig-*.zip'; 'U盘 配置       : {0} 份带日期, 最新 {1}' -f $z.Count, (Age ($z|Sort LastWriteTime|Select -Last 1).LastWriteTime) }
     if (Test-Path $uw) { $w=Get-ChildItem $uw -Recurse -File -ErrorAction SilentlyContinue|Measure-Object Length -Sum; 'U盘 微信       : {0} ({1} 文件)' -f (GB $w.Sum), $w.Count }

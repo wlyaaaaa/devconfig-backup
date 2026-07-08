@@ -17,7 +17,7 @@ param(
     [switch]   $IncludeHistory,
     [switch]   $Force,                       # 跳过 Drive 的 hash 门控（测试用）
 
-    [string]   $UsbRoot      = 'H:\My_Digital_Backup\DevConfig',
+    [string]   $UsbRoot      = '',
     [string]   $GDriveRemote = 'gdrive:',
     [string]   $GDriveFolder = "Backups/$env:COMPUTERNAME",
     [string]   $BwLimit      = '4M',
@@ -28,6 +28,11 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+
+if ([string]::IsNullOrWhiteSpace($UsbRoot)) {
+    $autoBackupDirName = '80_' + (-join @([char]0x81EA, [char]0x52A8, [char]0x5907, [char]0x4EFD, [char]0x533A))
+    $UsbRoot = Join-Path (Join-Path 'H:\' $autoBackupDirName) 'DevConfig'
+}
 
 # 归一化 Tier：兼容 -File 把 "Local,Usb" 当单串传入的情况
 $Tier = @($Tier) | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }

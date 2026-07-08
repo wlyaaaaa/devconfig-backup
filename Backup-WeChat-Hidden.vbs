@@ -1,5 +1,5 @@
 ' Hidden launcher for WeChatBackup-* scheduled tasks.
-Dim fso, shell, here, target, command, exitCode
+Dim fso, shell, here, target, pwsh, exe, command, exitCode
 
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
@@ -17,6 +17,13 @@ Select Case LCase(target)
         WScript.Quit 2
 End Select
 
-command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & here & "\Backup-WeChat.ps1"" -Target " & target
+pwsh = shell.ExpandEnvironmentStrings("%ProgramFiles%") & "\PowerShell\7\pwsh.exe"
+If fso.FileExists(pwsh) Then
+    exe = """" & pwsh & """"
+Else
+    exe = "powershell.exe"
+End If
+
+command = exe & " -NoProfile -ExecutionPolicy Bypass -File """ & here & "\Backup-WeChat.ps1"" -Target " & target
 exitCode = shell.Run(command, 0, True)
 WScript.Quit exitCode

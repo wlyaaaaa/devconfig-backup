@@ -23,7 +23,7 @@
 param(
     [string[]] $Target = @('Usb'),
     [string]   $Source       = 'E:\Documents\xwechat_files',
-    [string]   $UsbRoot      = 'H:\My_Digital_Backup\WeChat\xwechat_files',
+    [string]   $UsbRoot      = '',
     [string]   $LocalRoot    = 'E:\WeChatBackup\xwechat_files',
     [string]   $GDriveRemote = 'gdrive:',
     [string]   $GDriveFolder = 'Backups/WeChat/xwechat_files',
@@ -35,6 +35,10 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+$autoBackupDirName = '80_' + (-join @([char]0x81EA, [char]0x52A8, [char]0x5907, [char]0x4EFD, [char]0x533A))
+if ([string]::IsNullOrWhiteSpace($UsbRoot)) {
+    $UsbRoot = Join-Path (Join-Path (Join-Path 'H:\' $autoBackupDirName) 'WeChat') 'xwechat_files'
+}
 $Target = @($Target) | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 
 # 剔除：缓存/临时/小程序运行时/崩溃日志（历史本体在 msg / db_storage）
