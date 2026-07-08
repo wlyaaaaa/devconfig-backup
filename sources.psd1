@@ -54,6 +54,7 @@
     AppDataLocalDirs = @(
         'Microsoft\PowerToys',
         'Microsoft\Windows\Fonts',
+        'Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState',
         'PixPin\Config',
         'finalshell\conn'
     )
