@@ -1,10 +1,10 @@
-﻿<#
+<#
 .SYNOPSIS
   备份状态/进度面板：任务结果、各处备份新鲜度、Drive 上次成功、微信上传进度、最近日志。
 .EXAMPLE
   pwsh -File Backup-Status.ps1            # 一览
   pwsh -File Backup-Status.ps1 -LogLines 25
-  # 实时跟最新日志：  Get-Content (gci E:\DevConfigBackup\logs\*.log | sort LastWriteTime)[-1] -Wait -Tail 20
+  # 实时跟最新日志：  Get-Content (gci E:\Projects\Backups\devconfig-backup\logs\*.log | sort LastWriteTime)[-1] -Wait -Tail 20
 #>
 [CmdletBinding()]
 param([int]$LogLines = 12, [switch]$NoDrive)

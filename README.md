@@ -1,4 +1,4 @@
-﻿# DevConfig Backup — 开发配置 / 凭据 / 系统设置 三级级联备份
+# DevConfig Backup — 开发配置 / 凭据 / 系统设置 三级级联备份
 
 > 面向"极端意外下快速重装新机"的灾备工具。**只备份真正不可再生的配置与凭据**，
 > 软件本体、IDE 插件、npm 包、缓存等可重下内容一律剔除。
@@ -165,7 +165,7 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 
 ### 日常备份（手动触发，平时由计划任务自动跑）
 ```powershell
-cd E:\DevConfigBackup
+cd E:\Projects\Backups\devconfig-backup
 .\Backup-DevConfig.ps1 -Tier Local          # 仅本地
 .\Backup-DevConfig.ps1 -Tier Local,Usb      # 本地+U盘
 .\Backup-DevConfig.ps1 -Tier Drive          # 仅上 Drive（改动才传；-Force 强制）
