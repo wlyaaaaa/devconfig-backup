@@ -1,4 +1,4 @@
-# DevConfig Backup — 开发配置 / 凭据 / 系统设置 三级级联备份
+﻿# DevConfig Backup — 开发配置 / 凭据 / 系统设置 三级级联备份
 
 > 面向"极端意外下快速重装新机"的灾备工具。**只备份真正不可再生的配置与凭据**，
 > 软件本体、IDE 插件、npm 包、缓存等可重下内容一律剔除。
@@ -51,14 +51,14 @@
 | ① 本地 | `DevConfigBackup-Local` (`-Tier Local`) | 每天 12:30 + 登录 | 无(仅本地硬盘) |
 | ② U盘 | `DevConfigBackup-Weekly` + `DevConfigBackup-OnUSB` | 每周六 04:30 + 插U盘即同步 | 无 |
 | ③ Drive | `DevConfigBackup-Weekly` | 每周六 04:30；**连通预检 + sha变了才传 + 强重试** | 海外(配置~65MB,多数周近0) |
-| 微信 | `WeChatBackup-Weekly` (`-Target Usb,Drive`) | 每周六 04:00 | U盘无; Drive 仅db ~1G/周 |
+| 微信 | `WeChatBackup-Weekly` (`-Target Usb,Drive`) | 每周六 04:00 | U盘无; Drive 只传新增/变化文件 |
 
 > - **频率原则(2026-06调整)**：零流量的(本地/U盘)高频、烧海外流量的(Drive)低频。U盘是 1TB 闪存,为省写入寿命改 **每周一次**;Drive(配置+微信)也 **每周一次** 省海外流量;本地硬盘每天(零流量、高频保护)。
 > - **配置保留**：U盘 / Drive 各保留 **3 份带日期**（`devconfig-YYYYMMDD-HHMMSS.zip`）+ 一份 `latest.zip`。
 > - **rclone 远端名自动探测**：脚本默认找 `gdrive:`，没有就用第一个已配置远端（本机实为 `<邮箱>:`）。
-> - **微信方案A(db上云·媒体U盘)**：微信 38GB 里 ~81% 是已压缩媒体、db 是 SQLCipher 加密,实测整体压缩率 <5%(压缩无效)。故 Drive **只传数据库 db_storage(~1G,聊天核心)+解密密钥**,海量媒体只走 U盘;恢复用 `Restore-WeChat.ps1` 合成。详见 §4。
+> - **微信完整历史上云**：微信 38GB 里大部分是已压缩媒体，压缩收益很小；因此不用全量压缩包，而是用 `rclone copy` 逐文件增量，已上传文件自动跳过。
 > - **增量是自动的**：robocopy(`/E`) 与 rclone(`copy`) 都按"文件名+大小+修改时间"比对,未变的跳过——只传变化的库(db 是**整文件级**增量,一个库变了整库重传)。
-> - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑；② 代理没就绪 → 连通预检优雅跳过、下个窗口重试；③ 传一半断 → `rclone copy` 幂等续传；④ **流量硬封顶** `--max-transfer`(微信默认5G、cautious 绝不超限)兜底。
+> - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑；② 代理没就绪 → 连通预检优雅跳过、下个窗口重试；③ 传一半断 → `rclone copy` 幂等续传；④ 已存在文件按大小/修改时间跳过，不会从头重传。
 > - **看进度/日志**：`pwsh -File Backup-Status.ps1`。
 
 ---
@@ -103,15 +103,14 @@ rclone config        # 新建名为 gdrive 的 Google Drive 远端（OAuth，需
 ```powershell
 pwsh -File Backup-WeChat.ps1 -List          # 干跑:刷新本地快照后列出待传量
 pwsh -File Backup-WeChat.ps1 -Target Usb     # 全量到U盘(robocopy /E,只增不删,零流量;主力)
-pwsh -File Backup-WeChat.ps1 -Target Drive   # 仅 db_storage+密钥 到Drive(方案A,默认5G封顶)
-pwsh -File Backup-WeChat.ps1 -Target Drive -DriveFull   # (按需)连媒体一起全量上Drive
-pwsh -File Restore-WeChat.ps1                 # 恢复:U盘媒体 + Drive的db/密钥 → 合成到本机
+pwsh -File Backup-WeChat.ps1 -Target Drive   # 完整聊天记录增量到Drive(含媒体;已传自动跳过)
+pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只传db_storage
 ```
 
-**方案A：数据库上云、媒体走U盘**（实测压缩对微信无效——81% 已压缩媒体 + db 加密，整体省 <5%）：
-- **Drive 只传** `db_storage`(~1G，聊天核心，含两账号) + 解密密钥；海量媒体不上云。
-- **U盘全量**：db+媒体都在(零流量、只增不删)。
-- **恢复**：[Restore-WeChat.ps1](Restore-WeChat.ps1) 从 U盘取媒体 + Drive 取 db/密钥合成，再用 WeFlow/wx_key 填密钥解密查看。
+**当前策略：完整聊天记录逐文件增量上云**：
+- **Drive 全量历史**：`xwechat_files` 剔除 cache/temp/WMPF/apm_record 和 SQLite 运行时 wal/shm/journal 后，聊天数据库与媒体都上云。
+- **U盘全量历史**：同样保留完整聊天记录，是零流量主备份。
+- **增量机制**：`robocopy /E` 与 `rclone copy` 都会自动跳过已存在且未变化文件；首次是全量，之后只传新增/变化。
 
 **解密密钥（恢复命门）**：微信4.x db 用 SQLCipher，密钥 = IMEI+UIN 派生、不随版本变、**必须本机提取**。已提取两账号密钥固化到 `_KEYS`(U盘 + 本地 `E:\WeChatBackup`，**不进git**)。**绝不可丢**：当前 4.1.10 版本下 WeFlow GUI 提取已被封、wx_key 也已停更，丢了难重提；wx_key v2.1.8 工具留存于 `E:\WeChatBackup\_tools`。
 

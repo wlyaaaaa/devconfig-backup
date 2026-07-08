@@ -8,16 +8,15 @@
   首次运行为全量(~38GB)；之后仅复制变化的库与新增媒体。
   【Drive 流量安全】① 绝不直传微信源目录(运行时数据库边传边改→反复重传烧流量)，
     而是先 robocopy 到本地静态快照再从快照上传；② 上云排除 SQLite 运行时文件
-    (.db-wal/.db-shm/.db-journal，恢复时自动重建)；③ -MaxTransfer 流量硬封顶(默认5G)。
+    (.db-wal/.db-shm/.db-journal，恢复时自动重建)；③ rclone copy 自动跳过已上传文件。
 .EXAMPLE
   pwsh -File Backup-WeChat.ps1 -List           # 干跑，只估算将复制的量（强烈建议先跑）
   pwsh -File Backup-WeChat.ps1 -Target Usb      # 增量到U盘（零流量，推荐主力）
   pwsh -File Backup-WeChat.ps1 -Target Local    # 增量到本地另一盘
-  pwsh -File Backup-WeChat.ps1 -Target Drive    # 增量到 Google Drive（默认5G封顶，走海外流量）
-  pwsh -File Backup-WeChat.ps1 -Target Drive -MaxTransfer 0   # 首次全量补传：不封顶（需严密监控）
+  pwsh -File Backup-WeChat.ps1 -Target Drive    # 完整聊天记录增量到 Google Drive（含媒体）
+  pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly # 仅数据库上云，媒体只留U盘（省流量模式）
 .NOTES
-  38GB 首次上传 Drive 很费海外流量，建议：先 -Target Usb 全量，Drive 仅按需/低频。
-  首次全量后务必恢复默认封顶(-MaxTransfer 5G)，确保之后每次都是小额增量。
+  38GB 首次上传 Drive 很费海外流量；完成后 rclone copy 会自动跳过已存在文件，后续只传增量。
 #>
 [CmdletBinding()]
 param(
@@ -28,8 +27,9 @@ param(
     [string]   $GDriveRemote = 'gdrive:',
     [string]   $GDriveFolder = 'Backups/WeChat/xwechat_files',
     [string]   $BwLimit      = '4M',
-    [string]   $MaxTransfer  = '5G',
+    [string]   $MaxTransfer  = '0',
     [switch]   $DriveFull,
+    [switch]   $DbOnly,
     [switch]   $List
 )
 
@@ -86,17 +86,17 @@ foreach ($t in $Target) {
             & rclone lsd "$GDriveRemote" --max-depth 1 --contimeout 15s --timeout 20s --retries 1 *> $null
             if ($LASTEXITCODE -ne 0) { Say "Drive 不可达(代理/海外网络未就绪)，跳过，下次重试" 'Yellow'; break }
             $dest = "$GDriveRemote$GDriveFolder"
-            # 方案A: 默认只上传"数据库 db_storage"(聊天核心~1.5G),海量媒体走U盘不上云(省海外流量);
-            #        -DriveFull 才传全量。两种都排除 SQLite 运行时文件(wal/shm/journal,恢复时重建)。
-            if ($DriveFull) {
+            # 默认上传完整聊天历史（db + 媒体），rclone copy 会自动跳过 Drive 已有文件。
+            # 只有显式 -DbOnly 时才只上传 db_storage，用作临时省流量模式。
+            if (-not $DbOnly -or $DriveFull) {
                 $filter  = $exclDirs | ForEach-Object { '--exclude'; "$_/**" }
                 $filter += @('--exclude','*.db-wal','--exclude','*.db-shm','--exclude','*.db-journal')
-                Say "  Drive范围: 全量(db+媒体)" 'Yellow'
+                Say "  Drive范围: 完整聊天历史(db+媒体)" 'Yellow'
             } else {
                 # 只收 db_storage 下的库: 先排运行时文件, 再只收 db_storage, 其余(媒体等)全排
                 $filter = @('--filter','- *.db-wal','--filter','- *.db-shm','--filter','- *.db-journal',
                             '--filter','+ **/db_storage/**','--filter','- *')
-                Say "  Drive范围: 仅数据库db_storage(方案A,媒体走U盘)" 'Cyan'
+                Say "  Drive范围: 仅数据库db_storage(-DbOnly省流量模式)" 'Cyan'
             }
             # copy=只增不删（历史安全）；源为静态快照 $LocalRoot（非微信源目录）
             $rc = @($LocalRoot, $dest) + $filter + @(

@@ -5,8 +5,8 @@
   - DevConfigBackup-Local  : 每天 21:05 + 登录后20分钟 -> -Tier Local（仅本地硬盘·零流量·高频保护）
   - DevConfigBackup-Weekly : 每周日 20:00             -> -Tier Usb,Drive（配置一周一次到U盘+Drive·有网才跑）
   - DevConfigBackup-OnUSB  : 插入U盘事件        -> -Tier Usb（机会式即插即同步·不常插不磨损）
-  - WeChatBackup-Weekly    : 每周六 20:00      -> 微信:db+密钥到Drive、全量到U盘（方案A·一周一次）
-  说明: U盘是1TB闪存,为省写入寿命改为每周一次;Drive(配置+微信)均每周一次省海外流量。
+  - WeChatBackup-Weekly    : 每周六 20:00      -> 微信完整聊天记录增量到U盘+Drive（含媒体）
+  说明: U盘是1TB闪存,为省写入寿命改为每周一次;Drive 依靠 rclone copy 自动跳过已存在文件。
   以当前用户、仅登录时运行，无需密码与管理员权限。
 .NOTES
   计划任务动作固定走 wscript.exe + VBS hidden launcher，避免 PowerShell 窗口一闪而过。
@@ -56,8 +56,14 @@ $s4 = New-Settings 4
 $sNet = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -AllowStartIfOnBatteries `
             -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2)
 
-# 重建前先清理旧任务（避免调频/改名后残留旧的每天Drive任务）
-Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*' -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false
+# 重建前尽量清理旧任务（非管理员会遇到部分旧任务拒绝删除；不阻塞后续 -Force 覆盖）
+foreach ($oldTask in @(Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*' -ErrorAction SilentlyContinue)) {
+    try {
+        Unregister-ScheduledTask -InputObject $oldTask -Confirm:$false -ErrorAction Stop
+    } catch {
+        Write-Warning "旧任务删除失败，后续尝试直接覆盖：$($oldTask.TaskName) - $($_.Exception.Message)"
+    }
+}
 
 # ① 本地：每天21:05 + 登录后20分钟（桌面机错过晚间窗口时补一份；不碰U盘闪存、不走海外流量）
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
