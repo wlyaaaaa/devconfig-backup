@@ -5,7 +5,8 @@
 > 核心事实：原始一锅端是 **十几 GB**，精选后仅 **~170 MB**（打包后 **~65 MB**）。
 
 本仓库只包含**工具脚本**。**备份数据（含 API key/私钥的 zip、注册表导出）永不进仓库**，
-见 [.gitignore](.gitignore)。
+见 [.gitignore](.gitignore)。仓库边界见 [AGENTS.md](AGENTS.md)，提交前用
+[`tests/Assert-NoBackupArtifacts.ps1`](tests/Assert-NoBackupArtifacts.ps1) 检查备份产物没有进入 Git 候选文件。
 
 ---
 
@@ -125,7 +126,7 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 ## 5. 安全说明（重要）
 
 - 备份内**含明文凭据**：各 AI 工具 API key、`env-user.reg` 里的 `GITHUB_TOKEN/GEMINI_API_KEY/GOOGLE_API_KEY/OPENCLAW_GATEWAY_PASSWORD`、FinalShell/Xshell 服务器密码、GPG 私钥。
-- **本仓库（公开）只放脚本，绝不放 zip/reg/任何备份数据**——见 `.gitignore`。公开仓库泄露 token 会被爬虫几分钟内扫走。
+- **本仓库（公开）只放脚本，绝不放 zip/reg/任何备份数据**——见 `.gitignore`，并由 `tests/Assert-NoBackupArtifacts.ps1` 做提交前护栏检查。公开仓库泄露 token 会被爬虫几分钟内扫走。
 - **U盘 + 私有 Google Drive 存明文的可信度**：
   - 私有 Drive（开 2FA）+ 自己保管的 U盘，对**可轮换的密钥**（token/API key）是可接受的；万一泄露，轮换即可。
   - **GPG 私钥不可轮换**，建议对 `.gnupg` 单独加密（或给整包加 7z AES-256 密码）。
@@ -144,6 +145,8 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 | `Install-WeChatDriveMonitor.ps1` | 注册/刷新微信 Drive 小时监控任务；直接运行 PowerShell，30 分钟硬超时，避免监控实例卡住 |
 | `Setup-ScheduledTasks.ps1` | 注册/重建 DevConfig + WeChat 常规备份计划任务（幂等） |
 | `sources.psd1` | 备份源清单 + 排除规则（数据，改这里即可） |
+| `AGENTS.md` | 仓库边界、PCConfig 分工、公开安全规则 |
+| `tests/Assert-NoBackupArtifacts.ps1` | 检查 Git 候选文件中没有备份包、注册表导出、密钥容器、`.env` 或微信数据库 |
 | `out/ staging/ state/ logs/` | 运行产物，**已 gitignore** |
 
 ---
