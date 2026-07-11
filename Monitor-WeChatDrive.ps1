@@ -98,7 +98,7 @@ function Get-RcloneSizeJson {
 
 function Test-WeChatRcloneActive {
     $procs = @(Get-CimInstance Win32_Process -Filter "name='rclone.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'Backups[/\\]WeChat[/\\]xwechat_files|Backups/WeChat/xwechat_files|Backups\\WeChat\\xwechat_files' })
+        Where-Object { $_.CommandLine -match 'E:\\WeChatBackup\\xwechat_files|Backups[/\\]WeChat[/\\]xwechat_files' })
     return $procs.Count -gt 0
 }
 
@@ -175,7 +175,7 @@ Write-MonitorLog ("进度: {0} GiB / {1} GiB = {2}% ; Drive文件={3} 本地文�
 
 if ($pct -ge $CompletePercent) {
     Write-MonitorLog "达到 $CompletePercent%，执行 rclone check 做最终确认..."
-    $checkArgs = @('check', $LocalRoot, $dest) + $excludes + @('--one-way', '--size-only', '--fast-list', '--checkers', '16', '--log-file', $LogFile, '--log-level', 'INFO')
+    $checkArgs = @('check', $LocalRoot, $dest) + $excludes + @('--one-way', '--fast-list', '--checkers', '16', '--retries', '3', '--low-level-retries', '10', '--log-file', $LogFile, '--log-level', 'INFO')
     $check = Invoke-RcloneWithTimeout -Arguments $checkArgs -TimeoutSec ([math]::Max($RcloneTimeoutSec, 1800)) -Purpose 'rclone check'
     if ($check.ExitCode -eq 0) {
         Write-MonitorLog "微信 Drive 备份已确认完成: $driveGiB / $localGiB GiB, $pct%" 'OK'
@@ -185,7 +185,8 @@ if ($pct -ge $CompletePercent) {
     Write-MonitorLog "rclone check 未通过(exit=$($check.ExitCode))，继续保持监控并等待补齐" 'WARN'
 }
 
-if (-not $active) {
+    $active = Test-WeChatRcloneActive
+    if (-not $active) {
     Start-WeChatDriveCatchup
 } else {
     Write-MonitorLog '检测到上传正在进行，本轮不重复启动。'

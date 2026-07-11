@@ -186,7 +186,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.Management.Autom
 **输入与输出：**
 - 新增开关：[switch] $DriveOnly。
 - 默认模式：保留当前 U 盘全量合并加 Drive db_storage 更新。
-- Drive-only 模式：按备份相同排除规则将完整 Drive 树复制到 $Target，再把 _KEYS 复制到目标旁边，并输出 WeFlow/wx_key 解密说明。
+- 仅 Drive 模式：按备份相同排除规则将完整 Drive 树复制到 $Target，再把 _KEYS 复制到目标旁边，并输出 WeFlow/wx_key 解密说明。
 
 - [ ] 在参数块中加入 $DriveOnly。
 - [ ] 设置 -DriveOnly 时跳过 U 盘 robocopy 分支，使用 cache/**、Cache/**、temp/**、Temp/**、WMPF/**、apm_record/**、crash/**、FileStorageTemp/**、recommend_cover/**、*.db-wal、*.db-shm、*.db-journal 排除规则执行 rclone copy $src $Target。
@@ -221,7 +221,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -DriveOnl
 - [ ] 记录内容完整性必须使用普通 rclone check；--size-only 不能作为完成证明。
 - [ ] 记录每次 8G 上限，以及不完整任务如何由下一次周任务继续。
 - [ ] 记录 14 个文件的修复是一次 checksum 对账，不是全量重传。
-- [ ] 记录两条恢复路径：U 盘优先合并和 Drive-only 全量恢复。
+- [ ] 记录两条恢复路径：U 盘优先合并和仅 Drive 全量恢复。
 - [ ] 所有示例不得包含真实远端账号、token、密钥、原始日志或聊天标识。
 
 ---

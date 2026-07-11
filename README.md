@@ -54,14 +54,16 @@
 | ① 本地 | `DevConfigBackup-Local` (`-Tier Local`) | 每天 12:30 + 登录 | 无(仅本地硬盘) |
 | ② U盘 | `DevConfigBackup-Weekly` + `DevConfigBackup-OnUSB` | 每周六 04:30 + 插U盘即同步 | 无 |
 | ③ Drive | `DevConfigBackup-Weekly` | 每周六 04:30；**连通预检 + sha变了才传 + 强重试** | 海外(配置~65MB,多数周近0) |
-| 微信 | `WeChatBackup-Weekly` (`-Target Usb,Drive`) | 每周六 04:00 | U盘无; Drive 只传新增/变化文件 |
+| 微信 | `WeChatBackup-Weekly` (`-Target Usb,Drive`) | 每周六 04:00 | U盘无; Drive 只传新增/变化文件并做内容校验 |
 
 > - **频率原则(2026-06调整)**：零流量的(本地/U盘)高频、烧海外流量的(Drive)低频。U盘是 1TB 闪存,为省写入寿命改 **每周一次**;Drive(配置+微信)也 **每周一次** 省海外流量;本地硬盘每天(零流量、高频保护)。
 > - **配置保留**：U盘 / Drive 各保留 **3 份带日期**（`devconfig-YYYYMMDD-HHMMSS.zip`）+ 一份 `latest.zip`。
 > - **rclone 远端名自动探测**：脚本默认找 `gdrive:`，没有就用第一个已配置远端（本机实为 `<邮箱>:`）。
-> - **微信完整历史上云**：微信 38GB 里大部分是已压缩媒体，压缩收益很小；因此不用全量压缩包，而是用 `rclone copy` 逐文件增量，已上传文件自动跳过。默认单次 Drive 上传有 **8G 流量保险丝**，防止异常情况下大额重传。
-> - **增量是自动的**：robocopy(`/E`) 与 rclone(`copy`) 都按"文件名+大小+修改时间"比对,未变的跳过——只传变化的库(db 是**整文件级**增量,一个库变了整库重传)。
-> - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑；② 代理没就绪 → 连通预检优雅跳过、下个窗口重试；③ 传一半断 → `rclone copy` 幂等续传；④ 已存在文件按大小/修改时间跳过，不会从头重传。
+> - **微信完整历史上云**：微信 38GB 里大部分是已压缩媒体，压缩收益很小；因此不用全量压缩包，而是用 `rclone copy --checksum` 逐文件增量，已上传且内容未变的文件自动跳过。默认单次 Drive 上传有 **8G 流量保险丝**，防止异常情况下大额重传。
+> - **增量是自动的**：robocopy(`/E`) 先刷新静态快照，rclone(`copy --checksum`) 按内容 hash 判断是否变化；只传新增或内容变化的文件，数据库仍是**整文件级**增量。
+> - **内容校验是完成条件**：上传后执行普通 `rclone check`；`--size-only` 只能证明大小一致，不能证明内容一致。
+> - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑；② 代理没就绪 → 连通预检优雅跳过、下个窗口重试；③ 传一半断 → `rclone copy` 幂等续传；④ 每周任务失败时保留失败状态，下周继续。
+> - **小时监控是临时工具**：`WeChatDrive-Monitor-Hourly` 只用于首次全量补齐，首次内容级校验通过后禁用；正常运行只依赖 `WeChatBackup-Weekly`。
 > - **看进度/日志**：`pwsh -File Backup-Status.ps1`。
 > - **H盘写入护栏**：USB 写入前检查 dirty、`Full Repair Needed`、剩余空间，并用 `Global\CodexHDriveUsbWriteLock` 防并发；H 盘需要修复时跳过 USB 写入，但不阻断 Local / Drive。
 
@@ -115,11 +117,13 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 **当前策略：完整聊天记录逐文件增量上云**：
 - **Drive 全量历史**：`xwechat_files` 剔除 cache/temp/WMPF/apm_record 和 SQLite 运行时 wal/shm/journal 后，聊天数据库与媒体都上云。
 - **U盘全量历史**：同样保留完整聊天记录，是零流量主备份。
-- **增量机制**：`robocopy /E` 与 `rclone copy` 都会自动跳过已存在且未变化文件；首次是全量，之后只传新增/变化。
+**增量机制**：`robocopy /E` 刷新静态快照，`rclone copy --checksum` 自动跳过内容未变化文件；首次是全量，之后只传新增/变化。即使文件大小和修改时间不变，只要内容变化也会被识别。
 
 **解密密钥（恢复命门）**：微信4.x db 用 SQLCipher，密钥 = IMEI+UIN 派生、不随版本变、**必须本机提取**。已提取两账号密钥固化到 `_KEYS`(U盘 + 本地 `E:\WeChatBackup`，**不进git**)。**绝不可丢**：当前 4.1.10 版本下 WeFlow GUI 提取已被封、wx_key 也已停更，丢了难重提；wx_key v2.1.8 工具留存于 `E:\WeChatBackup\_tools`。
 
-**流量护栏**：静态快照上传(不直传使用中源目录，杜绝"边传边改"反复重传)、排除 wal/shm、`-MaxTransfer 8G` 默认硬封顶。db 是**整文件级**增量，故 Drive **每周一次**即可(频率越高越重复传大库、越费流量)。
+**流量护栏**：静态快照上传(不直传使用中源目录，杜绝"边传边改"反复重传)、排除 wal/shm、`-MaxTransfer 8G` 默认硬封顶。checksum 扫描增加本地哈希计算和 Drive 元数据读取，但不会把未变化文件重新上传。db 是**整文件级**增量，故 Drive **每周一次**即可。
+
+本次首次补齐曾发现 14 个同大小同时间但内容不同的配置/MMKV 文件；修复后以普通 `rclone check` 的 0 differences 为最终证据，不再使用 `--size-only` 作为完成证明。
 
 ---
 
@@ -231,12 +235,16 @@ Get-ChildItem E:\restore\devconfig\_system\wifi\*.xml | % {
     netsh wlan add profile filename=$_.FullName }             # Wi-Fi
 Copy-Item E:\restore\devconfig\_system\hosts $env:WINDIR\System32\drivers\etc\hosts
 
-# 6. 取回微信（可选，38G）
-rclone copy <remote>:Backups/WeChat/xwechat_files E:\Documents\xwechat_files --transfers 8
+# 6. 取回微信（可选，约 38G）
+#    只有 Drive 时，下载完整数据库+媒体+配置（缓存和 SQLite 运行时文件会排除）
+powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -DriveOnly -Target E:\restore\xwechat_files
+#    有 U 盘时，默认模式先合并 U 盘全量，再从 Drive 补更新 db_storage
+powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -Target E:\restore\xwechat_files
 
 # 7. 重挂备份任务 + 重配 Drive
 rclone config        # 建 Google Drive 远端（脚本会自动探测名字）
 .\Setup-ScheduledTasks.ps1
 ```
+`Restore-WeChat.ps1 -DriveOnly` 会把 `_KEYS` 下载到恢复目录旁边；恢复后使用 WeFlow 或 `wx_key` 指定数据目录并填入对应 decryptKey。它用于解密查看和导出聊天记录，不保证可以直接导入官方微信客户端。
 
 > ⚠️ 恢复两大陷阱（详见 §3）：① 重设 Documents 指向 `E:\Documents`；② 新用户名保持 `10979`。
