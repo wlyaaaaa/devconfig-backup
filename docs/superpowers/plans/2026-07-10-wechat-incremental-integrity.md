@@ -24,9 +24,14 @@
 - rclone check --size-only：127731 matching files，0 differences。
 - 普通 MD5 rclone check：127717 matching files，14 differences。
 - 差异集中在微信配置/MMKV 文件及 .crc 配对文件，未发现消息数据库或媒体缺失。
-- 最终上传日志记录主上传 exit=0、密钥上传 exit=0、==== 完成 ====。
-- WeChatDrive-Monitor-Hourly 当前仍可能处于 Running/扫描状态；以实时 Windows Task Scheduler 为准，PCConfig 旧登记需在收尾后刷新。
-- WeChatBackup-Weekly 当前启用，下一次本机约 2026-07-11 20:00；修复前不得让它继续使用旧逻辑。
+- checksum 修复后普通 rclone check：127833 matching files，0 differences，check exit=0；云端重复对象提示保留为非阻断事项，未执行删除。
+- 最终上传日志记录主上传 exit=0、内容校验 exit=0、密钥上传 exit=0、==== 完成：上传与内容校验均通过 ====。
+- 当前 Windows Task Scheduler：WeChatDrive-Monitor-Hourly=Disabled，WeChatBackup-Weekly=Ready/enabled；PCConfig `registries/tasks.json` 已按所有者流程刷新并通过任务实时匹配校验。
+- DEV 提交 `94549d1` 已推送到 `main`；PCConfig 提交 `6153a5e` 已推送到 `codex/control-plane-hardening`；GitHub 总索引已执行两个仓库的 fast path。
+
+## 执行结果
+
+本计划已于 2026-07-10（中国时间 2026-07-11）执行完成。最终验证包括：PowerShell 解析检查通过、无备份产物测试通过、checksum 增量回归测试通过、Drive-only 恢复干跑不创建目标、生产云端内容校验通过、无 WeChat rclone 残留进程。总体验证仍有一项与本任务无关的 PCConfig 既有 skill tree hash mismatch，不能据此判定本备份实现失败。
 
 ## 文件范围
 
@@ -53,11 +58,11 @@
 - 输入：当前 Windows Task Scheduler 状态和当前进程列表。
 - 输出：记录旧上传任务已停止的基线，作为代码上线前证据。
 
-- [ ] 记录当前 UTC、本机时间、中国时间、任务状态、上次结果、下次运行时间和相关 rclone 命令行。
-- [ ] 等当前 WeChatDrive-Monitor-Hourly 自然结束；不要终止正在运行的 rclone size 或 rclone check。
-- [ ] 在下一次触发前，使用 Disable-ScheduledTask -TaskName 'WeChatBackup-Weekly' 禁用 WeChatBackup-Weekly。
-- [ ] 修改前确认不存在 Backup-WeChat.ps1 或微信 Drive 上传进程。
-- [ ] 不要删除 WeChatDrive-Monitor-Hourly；在新的周任务流程完成一个成功周期前，保留它作为回滚入口。
+- [x] 记录当前 UTC、本机时间、中国时间、任务状态、上次结果、下次运行时间和相关 rclone 命令行。
+- [x] 等当前 WeChatDrive-Monitor-Hourly 自然结束；不要终止正在运行的 rclone size 或 rclone check。
+- [x] 在下一次触发前，使用 Disable-ScheduledTask -TaskName 'WeChatBackup-Weekly' 禁用 WeChatBackup-Weekly。
+- [x] 修改前确认不存在 Backup-WeChat.ps1 或微信 Drive 上传进程。
+- [x] 不要删除 WeChatDrive-Monitor-Hourly；在新的周任务流程完成一个成功周期前，保留它作为回滚入口。
 
 预期结果：checksum 改动测试期间旧周任务不会启动，正在运行的备份进程不会被中断。
 
@@ -72,15 +77,15 @@
 - 输入：PATH 中的 rclone.exe，或 E:\Scoop\shims\rclone.exe。
 - 输出：只有 checksum 更新、无变化跳过、size-only 对照和清理全部通过时才返回退出码 0。
 
-- [ ] 在 $env:TEMP 下创建 source 和 remote 临时目录；绝不使用 E:\Documents\xwechat_files、E:\WeChatBackup 或真实 Drive 远端。
-- [ ] 写入固定大小的测试文件，记录原始 UTC 修改时间和 MD5。
-- [ ] 首次执行 rclone copy source remote，并断言退出码为 0。
-- [ ] 只修改文件字节，保持文件长度不变并恢复原始修改时间。
-- [ ] 执行不带 --checksum 的修复前对照，并断言云端 hash 仍为旧值；这会固定记录本次 14 个差异的回归问题。
-- [ ] 执行 rclone copy source remote --checksum，并断言本地与远端 MD5 一致。
-- [ ] 对未变化内容再次执行 rclone copy source remote --checksum --dry-run，并断言没有 Copied/Transferred 动作。
-- [ ] 执行 rclone check source remote --one-way，并断言退出码为 0。
-- [ ] 将清理动作放入 finally，即使断言失败也要删除临时 fixture。
+- [x] 在 $env:TEMP 下创建 source 和 remote 临时目录；绝不使用 E:\Documents\xwechat_files、E:\WeChatBackup 或真实 Drive 远端。
+- [x] 写入固定大小的测试文件，记录原始 UTC 修改时间和 MD5。
+- [x] 首次执行 rclone copy source remote，并断言退出码为 0。
+- [x] 只修改文件字节，保持文件长度不变并恢复原始修改时间。
+- [x] 执行不带 --checksum 的修复前对照，并断言云端 hash 仍为旧值；这会固定记录本次 14 个差异的回归问题。
+- [x] 执行 rclone copy source remote --checksum，并断言本地与远端 MD5 一致。
+- [x] 对未变化内容再次执行 rclone copy source remote --checksum --dry-run，并断言没有 Copied/Transferred 动作。
+- [x] 执行 rclone check source remote --one-way，并断言退出码为 0。
+- [x] 将清理动作放入 finally，即使断言失败也要删除临时 fixture。
 
 ~~~~powershell
 $ErrorActionPreference = 'Stop'
@@ -130,14 +135,14 @@ try {
 - 输入：现有的 $LocalRoot、$GDriveRemote、$GDriveFolder、$MaxTransfer 和 $filter。
 - 输出：内容校验失败时返回非零退出码的 Drive 备份流程。
 
-- [ ] 在 $rc 参数数组中紧跟 --fast-list 加入 --checksum；保留 --bwlimit、--transfers、重试参数和 --max-transfer 8G。
-- [ ] 保留真实 Drive 上传使用静态快照的规则；rclone 源必须是 $LocalRoot，绝不能是正在运行的微信源目录。
-- [ ] rclone copy 返回后，使用相同排除规则、--one-way、--fast-list 和 --checkers 16 执行普通 rclone check $LocalRoot $dest；不能加入 --size-only。
-- [ ] 在日志中分别记录 copy exit、check exit 和 key upload exit。
-- [ ] 设置脚本级 $overallExitCode = 0；copy、hash 校验、密钥上传或连通性失败时设为 1；将无条件的 exit 0 改为 exit $overallExitCode。
-- [ ] 除统一错误报告外，保持 -Target Usb 行为不变。
-- [ ] 保留 --max-transfer 8G；达到上限或文件集不完整时，内容校验必须失败，并由下一次周任务重试。
-- [ ] 让 -List 真正不写入云端。Drive 的 list 模式跳过真实快照刷新，使用相同过滤条件执行 rclone copy $Source $dest --dry-run；list 模式绝不写入真实快照。
+- [x] 在 $rc 参数数组中紧跟 --fast-list 加入 --checksum；保留 --bwlimit、--transfers、重试参数和 --max-transfer 8G。
+- [x] 保留真实 Drive 上传使用静态快照的规则；rclone 源必须是 $LocalRoot，绝不能是正在运行的微信源目录。
+- [x] rclone copy 返回后，使用相同排除规则、--one-way、--fast-list 和 --checkers 16 执行普通 rclone check $LocalRoot $dest；不能加入 --size-only。
+- [x] 在日志中分别记录 copy exit、check exit 和 key upload exit。
+- [x] 设置脚本级 $overallExitCode = 0；copy、hash 校验、密钥上传或连通性失败时设为 1；将无条件的 exit 0 改为 exit $overallExitCode。
+- [x] 除统一错误报告外，保持 -Target Usb 行为不变。
+- [x] 保留 --max-transfer 8G；达到上限或文件集不完整时，内容校验必须失败，并由下一次周任务重试。
+- [x] 让 -List 真正不写入云端。Drive 的 list 模式跳过真实快照刷新，使用相同过滤条件执行 rclone copy $Source $dest --dry-run；list 模式绝不写入真实快照。
 
 验证命令：
 
@@ -160,12 +165,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.Management.Autom
 - 输入：周任务脚本的自校验退出码和当前 rclone 进程列表。
 - 输出：不会重复启动上传、并在 hash 校验后禁用的临时补齐监控。
 
-- [ ] 识别命令行包含微信源或目标的所有相关 rclone 操作，包括 copy、size 和 check；不能只把 copy 视为活跃。
-- [ ] 将监控最终校验参数从 --size-only 改为普通 hash 校验。
-- [ ] 只有 hash 校验退出码为 0 时才调用 Disable-ScheduledTask，并记录匹配数量和明确的校验结果。
-- [ ] hash 校验失败时记录失败并保持任务启用以便补齐；只要相关 rclone 进程仍在运行，就不能启动另一个上传。
-- [ ] 保留脚本手动恢复能力，但明确文档说明计划任务只是临时任务，首次完整校验通过后应禁用。
-- [ ] 增加针对脚本内容/解析的断言，确认监控最终校验参数不再包含 --size-only。
+- [x] 识别命令行包含微信源或目标的所有相关 rclone 操作，包括 copy、size 和 check；不能只把 copy 视为活跃。
+- [x] 将监控最终校验参数从 --size-only 改为普通 hash 校验。
+- [x] 只有 hash 校验退出码为 0 时才调用 Disable-ScheduledTask，并记录匹配数量和明确的校验结果。
+- [x] hash 校验失败时记录失败并保持任务启用以便补齐；只要相关 rclone 进程仍在运行，就不能启动另一个上传。
+- [x] 保留脚本手动恢复能力，但明确文档说明计划任务只是临时任务，首次完整校验通过后应禁用。
+- [x] 增加针对脚本内容/解析的断言，确认监控最终校验参数不再包含 --size-only。
 
 运行：
 
@@ -188,17 +193,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "[System.Management.Autom
 - 默认模式：保留当前 U 盘全量合并加 Drive db_storage 更新。
 - 仅 Drive 模式：按备份相同排除规则将完整 Drive 树复制到 $Target，再把 _KEYS 复制到目标旁边，并输出 WeFlow/wx_key 解密说明。
 
-- [ ] 在参数块中加入 $DriveOnly。
-- [ ] 设置 -DriveOnly 时跳过 U 盘 robocopy 分支，使用 cache/**、Cache/**、temp/**、Temp/**、WMPF/**、apm_record/**、crash/**、FileStorageTemp/**、recommend_cover/**、*.db-wal、*.db-shm、*.db-journal 排除规则执行 rclone copy $src $Target。
-- [ ] 保持 -List 使用 robocopy /L 或 rclone --dry-run；list 模式不能写入恢复目标或密钥文件。
-- [ ] Drive 不可达或完整恢复复制失败时返回非零退出码。
-- [ ] 在 README 中加入命令：
+- [x] 在参数块中加入 $DriveOnly。
+- [x] 设置 -DriveOnly 时跳过 U 盘 robocopy 分支，使用 cache/**、Cache/**、temp/**、Temp/**、WMPF/**、apm_record/**、crash/**、FileStorageTemp/**、recommend_cover/**、*.db-wal、*.db-shm、*.db-journal 排除规则执行 rclone copy $src $Target。
+- [x] 保持 -List 使用 robocopy /L 或 rclone --dry-run；list 模式不能写入恢复目标或密钥文件。
+- [x] Drive 不可达或完整恢复复制失败时返回非零退出码。
+- [x] 在 README 中加入命令：
 
 ~~~~powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -DriveOnly -Target E:\Restore\xwechat_files
 ~~~~
 
-- [ ] 明确说明该模式用于 WeFlow/wx_key 查看数据，不保证能够直接导入官方微信客户端。
+- [x] 明确说明该模式用于 WeFlow/wx_key 查看数据，不保证能够直接导入官方微信客户端。
 
 验证命令：
 
@@ -216,13 +221,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -DriveOnl
 - 修改：README.md
 - 按需修改：AGENTS.md；只有仓库边界或验证规则发生变化时才修改，不能复制 PCConfig 机器事实。
 
-- [ ] 记录 WeChatBackup-Weekly 是正常周期任务，WeChatDrive-Monitor-Hourly 只用于临时补齐。
-- [ ] 记录 rclone copy --checksum 是增量比较规则，未变化文件不消耗上传流量。
-- [ ] 记录内容完整性必须使用普通 rclone check；--size-only 不能作为完成证明。
-- [ ] 记录每次 8G 上限，以及不完整任务如何由下一次周任务继续。
-- [ ] 记录 14 个文件的修复是一次 checksum 对账，不是全量重传。
-- [ ] 记录两条恢复路径：U 盘优先合并和仅 Drive 全量恢复。
-- [ ] 所有示例不得包含真实远端账号、token、密钥、原始日志或聊天标识。
+- [x] 记录 WeChatBackup-Weekly 是正常周期任务，WeChatDrive-Monitor-Hourly 只用于临时补齐。
+- [x] 记录 rclone copy --checksum 是增量比较规则，未变化文件不消耗上传流量。
+- [x] 记录内容完整性必须使用普通 rclone check；--size-only 不能作为完成证明。
+- [x] 记录每次 8G 上限，以及不完整任务如何由下一次周任务继续。
+- [x] 记录 14 个文件的修复是一次 checksum 对账，不是全量重传。
+- [x] 记录两条恢复路径：U 盘优先合并和仅 Drive 全量恢复。
+- [x] 所有示例不得包含真实远端账号、token、密钥、原始日志或聊天标识。
 
 ---
 
@@ -233,17 +238,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -DriveOnl
 - 执行：tests/Assert-WeChatIncrementalIntegrity.ps1
 - 执行：所有修改脚本的 PowerShell 解析检查
 
-- [ ] 运行：
+- [x] 运行：
 
 ~~~~powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\Assert-NoBackupArtifacts.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tests\Assert-WeChatIncrementalIntegrity.ps1
 ~~~~
 
-- [ ] 使用 [System.Management.Automation.Language.Parser]::ParseFile 解析 Backup-WeChat.ps1、Monitor-WeChatDrive.ps1 和 Restore-WeChat.ps1。
-- [ ] 确认 git status --short 只包含本次明确的公开安全源代码、测试、文档和计划文件。
-- [ ] 确认 xwechat_files、db_storage、聊天数据库、压缩包、key、.env 或原始日志均不是 Git 候选文件。
-- [ ] 任何仓库测试失败时都不能修复 Drive。
+- [x] 使用 [System.Management.Automation.Language.Parser]::ParseFile 解析 Backup-WeChat.ps1、Monitor-WeChatDrive.ps1 和 Restore-WeChat.ps1。
+- [x] 确认 git status --short 只包含本次明确的公开安全源代码、测试、文档和计划文件。
+- [x] 确认 xwechat_files、db_storage、聊天数据库、压缩包、key、.env 或原始日志均不是 Git 候选文件。
+- [x] 任何仓库测试失败时都不能修复 Drive。
 
 ---
 
@@ -254,12 +259,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\Assert-WeChatIncrement
 - 源：E:\WeChatBackup\xwechat_files 静态快照
 - 日志：E:\Projects\Backups\devconfig-backup\logs\ 下的新本地日志
 
-- [ ] 确认源静态快照稳定，且没有微信上传进程运行。
-- [ ] 按生产排除规则、--checksum、重试参数和 --max-transfer 8G，从静态快照执行一次 checksum 增量复制。
-- [ ] 不能使用 --delete、--purge、--ignore-times 或全量压缩包。
-- [ ] 复制后使用相同排除规则执行普通 rclone check --one-way。
-- [ ] 必须得到 0 differences、0 missing 和退出码 0；记录匹配数量与修复文件数量。
-- [ ] 将重复对象提示作为独立的非阻断清理报告；本任务不删除 Drive 重复对象。
+- [x] 确认源静态快照稳定，且没有微信上传进程运行。
+- [x] 按生产排除规则、--checksum、重试参数和 --max-transfer 8G，从静态快照执行一次 checksum 增量复制。
+- [x] 不能使用 --delete、--purge、--ignore-times 或全量压缩包。
+- [x] 复制后使用相同排除规则执行普通 rclone check --one-way。
+- [x] 必须得到 0 differences、0 missing 和退出码 0；记录匹配数量与修复文件数量。
+- [x] 将重复对象提示作为独立的非阻断清理报告；本任务不删除 Drive 重复对象。
 
 预期：只上传同大小同时间但内容过期的对象，不发生完整 38GB 重传。
 
@@ -272,12 +277,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\Assert-WeChatIncrement
 - 机器记录：E:\PCConfig\registries\tasks.json
 - 可选所有者说明：PCConfig 中对应的任务用途条目
 
-- [ ] 任务 8 通过后保持 WeChatDrive-Monitor-Hourly Disabled；在一个周周期验证通过前不要注销它。
-- [ ] 只有本地 DEV 脚本完成测试后，才重新启用 WeChatBackup-Weekly。
-- [ ] 根据批准的上线路径，手动运行一次 Backup-WeChat.ps1 -Target Drive，或使用相同生产参数启动周任务。
-- [ ] 确认日志顺序为：刷新快照、checksum 复制、hash check exit 0、密钥上传 exit 0。
-- [ ] 一个周周期成功后，刷新 PCConfig 只读任务登记，确认监控记录为禁用/临时任务，周任务记录为启用。
-- [ ] 周任务失败时保持监控禁用、保留失败日志；修复原因后再重跑，不能静默退回 size-only 校验。
+- [x] 任务 8 通过后保持 WeChatDrive-Monitor-Hourly Disabled；在一个周周期验证通过前不要注销它。
+- [x] 只有本地 DEV 脚本完成测试后，才重新启用 WeChatBackup-Weekly。
+- [x] 根据批准的上线路径，手动运行一次 Backup-WeChat.ps1 -Target Drive，或使用相同生产参数启动周任务。
+- [x] 确认日志顺序为：刷新快照、checksum 复制、hash check exit 0、密钥上传 exit 0。
+- [x] 一个周周期成功后，刷新 PCConfig 只读任务登记，确认监控记录为禁用/临时任务，周任务记录为启用。
+- [x] 周任务失败时保持监控禁用、保留失败日志；修复原因后再重跑，不能静默退回 size-only 校验。
 
 ---
 
@@ -286,12 +291,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\Assert-WeChatIncrement
 **文件：**
 - E:\Projects\Backups\devconfig-backup 中所有本次明确修改的文件
 
-- [ ] 在干净的 Git 候选文件集上重新运行仓库测试和脚本解析检查。
-- [ ] 检查 diff 中是否包含密钥、尚未公开安全化的原始路径、key、聊天内容、原始日志或生成的备份产物。
-- [ ] 使用聚焦提交信息提交源代码、测试、文档和实施计划，例如 fix: verify WeChat incremental backups by checksum。
-- [ ] 验证通过后，只推送公开安全的 DEV 仓库。
-- [ ] 执行 git-change-closeout 要求的 GitHub 总索引 fast path；不能把原始任务 XML、密钥或云端日志加入公开索引。
-- [ ] 报告 affected_fact_domains: ["business","machine","git"]、目标分支、commit hash、推送状态，以及是否刷新了 PCConfig。
+- [x] 在干净的 Git 候选文件集上重新运行仓库测试和脚本解析检查。
+- [x] 检查 diff 中是否包含密钥、尚未公开安全化的原始路径、key、聊天内容、原始日志或生成的备份产物。
+- [x] 使用聚焦提交信息提交源代码、测试、文档和实施计划，例如 fix: verify WeChat incremental backups by checksum。
+- [x] 验证通过后，只推送公开安全的 DEV 仓库。
+- [x] 执行 git-change-closeout 要求的 GitHub 总索引 fast path；不能把原始任务 XML、密钥或云端日志加入公开索引。
+- [x] 报告 affected_fact_domains: ["business","machine","git"]、目标分支、commit hash、推送状态，以及是否刷新了 PCConfig。
 
 ## 验收标准
 
