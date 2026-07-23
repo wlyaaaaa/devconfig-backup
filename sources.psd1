@@ -123,12 +123,18 @@
 
     # 历史/对话日志目录名（默认排除；-IncludeHistory 时保留）
     HistoryDirs = @(
-        'projects', 'data', 'session-backup*'
+        'projects', 'data', 'session-backup*',
+        'sessions', 'archived_sessions'
+    )
+
+    # 历史数据库文件（默认排除；-IncludeHistory 时保留）
+    HistoryFiles = @(
+        'logs_2.sqlite*'
     )
 
     # 自定义计划任务白名单（通配匹配 TaskName）
     ScheduledTaskPatterns = @(
-        'AutoDigitalBackupToH', 'Scripts_AutoPush', 'RAMDisk_Code_Backup',
+        'AutoDigitalBackupToG', 'AgentsHotMirror-Daily', 'Scripts_AutoPush', 'RAMDisk_Code_Backup',
         'TimeAudit*', 'OpenClaw*', 'WeFlow*', 'natpierce*',
         'Cloud', 'GCC', 'ModifyLinkUpdate', 'CleanupOrphanedMillennium'
     )

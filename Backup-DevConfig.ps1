@@ -1,44 +1,39 @@
 ﻿<#
 .SYNOPSIS
-  DevConfig 三级级联备份：采集开发配置/凭据/系统设置 -> 打包 -> 本地/U盘/Drive 分发。
+  DevConfig 备份：采集开发配置/凭据/系统设置 -> 打包 -> 本地/G盘热备/Drive 分发。
 .DESCRIPTION
   内容来自 sources.psd1。剔除可重下的插件/缓存/包/二进制；默认剔除聊天历史。
-  Tier 控制分发：Local（产出本地 zip）、Usb（同步到U盘）、Drive（rclone 上传，改动才传）。
+  Tier 控制分发：Local（产出本地 zip）、Hot（同步到G盘热备）、Drive（rclone 上传，改动才传）。H 冷备统一由 PCConfig 从 G 人工复制。
 .EXAMPLE
   pwsh -File Backup-DevConfig.ps1 -Tier Local
-  pwsh -File Backup-DevConfig.ps1 -Tier Local,Usb
+  pwsh -File Backup-DevConfig.ps1 -Tier Local,Hot
   pwsh -File Backup-DevConfig.ps1 -Tier Drive
 #>
 [CmdletBinding()]
 param(
-    # Local/Usb/Drive 任意组合；-File 传入时可能是 "Local,Usb" 单串，下面会拆分
+    # Local/Hot/Drive 任意组合；-File 传入时可能是 "Local,Hot" 单串，下面会拆分
     [string[]] $Tier = @('Local'),
 
     [switch]   $IncludeHistory,
     [switch]   $Force,                       # 跳过 Drive 的 hash 门控（测试用）
 
-    [string]   $UsbRoot      = '',
+    [string]   $HotRoot      = 'G:\80_Backup\DevConfig',
     [string]   $GDriveRemote = 'gdrive:',
     [string]   $GDriveFolder = "Backups/$env:COMPUTERNAME",
     [string]   $BwLimit      = '4M',
 
     [int]      $KeepLocal = 7,
-    [int]      $KeepUsb   = 3,
+    [int]      $KeepHot   = 7,
     [int]      $KeepDrive = 3
 )
 
 $ErrorActionPreference = 'Continue'
 
-if ([string]::IsNullOrWhiteSpace($UsbRoot)) {
-    $autoBackupDirName = '80_' + (-join @([char]0x81EA, [char]0x52A8, [char]0x5907, [char]0x4EFD, [char]0x533A))
-    $UsbRoot = Join-Path (Join-Path 'H:\' $autoBackupDirName) 'DevConfig'
-}
-
-# 归一化 Tier：兼容 -File 把 "Local,Usb" 当单串传入的情况
+# 归一化 Tier：兼容 -File 把 "Local,Hot" 当单串传入的情况
 $Tier = @($Tier) | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-$validTiers = @('Local','Usb','Drive')
+$validTiers = @('Local','Hot','Drive')
 $bad = $Tier | Where-Object { $_ -notin $validTiers }
-if ($bad) { Write-Host "无效 Tier: $($bad -join ',')（可选 Local/Usb/Drive）" -ForegroundColor Red; exit 2 }
+if ($bad) { Write-Host "无效 Tier: $($bad -join ',')（可选 Local/Hot/Drive；H 冷备请使用 PCConfig 人工 G→H 流程）" -ForegroundColor Red; exit 2 }
 
 $Root     = $PSScriptRoot
 $Staging  = Join-Path $Root 'staging'
@@ -63,194 +58,6 @@ function Write-Log {
     Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8
 }
 
-$script:HDriveUsbWriteLockName = 'Global\CodexHDriveUsbWriteLock'
-$script:UsbFreeSpaceBufferBytes = 256MB
-
-function Format-Bytes {
-    param([Nullable[Int64]]$Bytes)
-    if ($null -eq $Bytes) { return 'unknown' }
-    if ($Bytes -ge 1GB) { return ('{0:N2} GB' -f ($Bytes / 1GB)) }
-    if ($Bytes -ge 1MB) { return ('{0:N1} MB' -f ($Bytes / 1MB)) }
-    return ('{0:N0} bytes' -f $Bytes)
-}
-
-function Get-DriveRootFromPath {
-    param([string]$Path)
-    $root = [System.IO.Path]::GetPathRoot($Path)
-    if ([string]::IsNullOrWhiteSpace($root)) { return $null }
-    return $root.TrimEnd('\')
-}
-
-function Get-HDriveUsbStatus {
-    param([string]$TargetRoot)
-
-    $drive = Get-DriveRootFromPath $TargetRoot
-    $status = [ordered]@{
-        Drive              = $drive
-        Exists             = $false
-        Dirty              = $null
-        DirtySource        = ''
-        HealthStatus       = 'Unknown'
-        OperationalStatus  = @('Unknown')
-        FullRepairNeeded   = $false
-        RepairNeeded       = $false
-        FreeBytes          = $null
-        SizeBytes          = $null
-        Error              = ''
-    }
-
-    if ([string]::IsNullOrWhiteSpace($drive)) {
-        $status.Error = "无法从 UsbRoot 解析盘符: $TargetRoot"
-        return [pscustomobject]$status
-    }
-
-    $root = "$drive\"
-    $status.Exists = Test-Path -LiteralPath $root
-    if (-not $status.Exists) { return [pscustomobject]$status }
-
-    try {
-        $logical = Get-CimInstance -ClassName Win32_LogicalDisk -Filter ("DeviceID='{0}'" -f $drive.Replace("'", "''")) -ErrorAction Stop
-        if ($logical) {
-            if ($null -ne $logical.VolumeDirty) {
-                $status.Dirty = [bool]$logical.VolumeDirty
-                $status.DirtySource = 'Win32_LogicalDisk.VolumeDirty'
-            }
-            if ($null -ne $logical.FreeSpace) { $status.FreeBytes = [Int64]$logical.FreeSpace }
-            if ($null -ne $logical.Size) { $status.SizeBytes = [Int64]$logical.Size }
-        }
-    } catch {
-        $status.Error = "CIM 查询失败: $($_.Exception.Message)"
-    }
-
-    if ($null -eq $status.Dirty) {
-        try {
-            $dirtyOutput = & fsutil dirty query $drive 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                $dirtyText = ($dirtyOutput -join "`n")
-                if ($dirtyText -match 'NOT\s+Dirty') {
-                    $status.Dirty = $false
-                    $status.DirtySource = 'fsutil dirty query'
-                } elseif ($dirtyText -match 'Dirty') {
-                    $status.Dirty = $true
-                    $status.DirtySource = 'fsutil dirty query'
-                }
-            } elseif ([string]::IsNullOrWhiteSpace($status.Error)) {
-                $status.Error = "fsutil dirty query exit=$LASTEXITCODE"
-            }
-        } catch {
-            if ([string]::IsNullOrWhiteSpace($status.Error)) { $status.Error = "fsutil dirty query 失败: $($_.Exception.Message)" }
-        }
-    }
-
-    if ($drive -match '^([A-Za-z]):$') {
-        try {
-            $volume = Get-Volume -DriveLetter $matches[1] -ErrorAction Stop
-            if ($volume) {
-                $status.HealthStatus = [string]$volume.HealthStatus
-                $ops = @($volume.OperationalStatus | ForEach-Object { [string]$_ })
-                if ($ops.Count -gt 0) { $status.OperationalStatus = $ops }
-                if ($null -ne $volume.SizeRemaining) { $status.FreeBytes = [Int64]$volume.SizeRemaining }
-                if ($null -ne $volume.Size) { $status.SizeBytes = [Int64]$volume.Size }
-                $opText = $status.OperationalStatus -join ','
-                $status.FullRepairNeeded = ($opText -match 'Full Repair Needed')
-                $status.RepairNeeded = ($opText -match 'Full Repair Needed|Spot Fix Needed|Needs Scan')
-            }
-        } catch {
-            if ([string]::IsNullOrWhiteSpace($status.Error)) { $status.Error = "Get-Volume 查询失败: $($_.Exception.Message)" }
-        }
-    }
-
-    return [pscustomobject]$status
-}
-
-function Test-HDriveUsbReady {
-    param(
-        [string]$TargetRoot,
-        [Int64]$RequiredBytes
-    )
-
-    $status = Get-HDriveUsbStatus -TargetRoot $TargetRoot
-    if (-not $status.Exists) {
-        Write-Log "U盘 $($status.Drive) 未插入，跳过 USB 写入" 'WARN'
-        return $false
-    }
-    if ($status.Dirty -eq $true) {
-        Write-Log "U盘 $($status.Drive) dirty=True（$($status.DirtySource)），跳过 USB 写入" 'WARN'
-        return $false
-    }
-    if ($null -eq $status.Dirty) {
-        Write-Log "无法确认 U盘 $($status.Drive) dirty 状态，跳过 USB 写入；$($status.Error)" 'WARN'
-        return $false
-    }
-    if ($status.FullRepairNeeded -or $status.RepairNeeded) {
-        Write-Log "U盘 $($status.Drive) OperationalStatus=$($status.OperationalStatus -join ',')（含 Full Repair Needed/修复需求），跳过 USB 写入" 'WARN'
-        return $false
-    }
-    if ($status.HealthStatus -and $status.HealthStatus -notin @('Healthy','Unknown')) {
-        Write-Log "U盘 $($status.Drive) HealthStatus=$($status.HealthStatus)，跳过 USB 写入" 'WARN'
-        return $false
-    }
-    if ($null -eq $status.FreeBytes) {
-        Write-Log "无法确认 U盘 $($status.Drive) 剩余空间，跳过 USB 写入；$($status.Error)" 'WARN'
-        return $false
-    }
-
-    $needed = [Int64]([Math]::Max(0, $RequiredBytes) + $script:UsbFreeSpaceBufferBytes)
-    if ($status.FreeBytes -lt $needed) {
-        Write-Log "U盘 $($status.Drive) 剩余空间不足：剩余 $(Format-Bytes $status.FreeBytes)，预计需 $(Format-Bytes $RequiredBytes) + 256 MB 缓冲，跳过 USB 写入" 'WARN'
-        return $false
-    }
-
-    Write-Log "U盘门禁通过: $($status.Drive) dirty=False health=$($status.HealthStatus) op=$($status.OperationalStatus -join ',') free=$(Format-Bytes $status.FreeBytes)" 'OK'
-    return $true
-}
-
-function Get-CopyPlanRequiredBytes {
-    param([object[]]$CopyPlan)
-    [Int64]$required = 0
-    foreach ($item in $CopyPlan) {
-        if (-not (Test-Path -LiteralPath $item.Source)) { continue }
-        $src = Get-Item -LiteralPath $item.Source
-        [Int64]$existing = 0
-        if (Test-Path -LiteralPath $item.Destination) {
-            $existing = [Int64](Get-Item -LiteralPath $item.Destination).Length
-        }
-        $required += [Int64][Math]::Max(0, ([Int64]$src.Length - $existing))
-    }
-    return $required
-}
-
-function Invoke-WithHDriveUsbWriteLock {
-    param([scriptblock]$Body)
-
-    $mutex = $null
-    $acquired = $false
-    try {
-        $mutex = [System.Threading.Mutex]::new($false, $script:HDriveUsbWriteLockName)
-        Write-Log "等待 USB 写入锁 $script:HDriveUsbWriteLockName ..."
-        try {
-            $acquired = $mutex.WaitOne([TimeSpan]::FromMinutes(30))
-        } catch [System.Threading.AbandonedMutexException] {
-            $acquired = $true
-            Write-Log "USB 写入锁曾被异常释放，已接管继续执行" 'WARN'
-        }
-        if (-not $acquired) {
-            Write-Log "等待 USB 写入锁超时，跳过 USB 写入" 'WARN'
-            return $false
-        }
-        & $Body
-        return $true
-    } catch {
-        Write-Log "USB 写入锁异常，跳过 USB 写入: $($_.Exception.Message)" 'ERR'
-        return $false
-    } finally {
-        if ($acquired -and $mutex) {
-            try { $mutex.ReleaseMutex() } catch {}
-        }
-        if ($mutex) { $mutex.Dispose() }
-    }
-}
-
 Write-Log "==== DevConfig backup start | Tier=$($Tier -join ',') | History=$IncludeHistory ===="
 
 # ---------- 载入源清单 ----------
@@ -259,8 +66,11 @@ if (-not (Test-Path -LiteralPath $srcFile)) { Write-Log "缺少 sources.psd1" 'E
 $cfg = Import-PowerShellDataFile -LiteralPath $srcFile
 
 $excludeDirs  = @($cfg.ExcludeDirs)
-if (-not $IncludeHistory) { $excludeDirs += @($cfg.HistoryDirs) }
 $excludeFiles = @($cfg.ExcludeFiles)
+if (-not $IncludeHistory) {
+    $excludeDirs += @($cfg.HistoryDirs)
+    $excludeFiles += @($cfg.HistoryFiles)
+}
 
 # ---------- robocopy 包装 ----------
 function Invoke-Rc {
@@ -415,32 +225,16 @@ function Invoke-Pack {
 }
 
 # ============================================================
-# 5) 分发：U盘
+# 5) 分发：G盘热备 / H盘冷备
 # ============================================================
-function Push-Usb {
+function Push-Hot {
     param($Pack)
-    Invoke-WithHDriveUsbWriteLock {
-        $copyPlan = @(
-            [pscustomobject]@{
-                Source      = $Pack.Zip
-                Destination = Join-Path $UsbRoot (Split-Path $Pack.Zip -Leaf)
-            },
-            [pscustomobject]@{
-                Source      = Join-Path $OutDir 'latest.zip'
-                Destination = Join-Path $UsbRoot 'latest.zip'
-            }
-        )
-        $requiredBytes = Get-CopyPlanRequiredBytes -CopyPlan $copyPlan
-        if (-not (Test-HDriveUsbReady -TargetRoot $UsbRoot -RequiredBytes $requiredBytes)) { return }
-
-        New-Item -ItemType Directory -Path $UsbRoot -Force | Out-Null
-        foreach ($copy in $copyPlan) {
-            Copy-Item -LiteralPath $copy.Source -Destination $UsbRoot -Force
-        }
-        Get-ChildItem $UsbRoot -Filter 'devconfig-*.zip' | Sort-Object LastWriteTime -Descending |
-            Select-Object -Skip $KeepUsb | Remove-Item -Force -ErrorAction SilentlyContinue
-        Write-Log "U盘同步完成 -> $UsbRoot" 'OK'
-    } | Out-Null
+    New-Item -ItemType Directory -Path $HotRoot -Force | Out-Null
+    Copy-Item -LiteralPath $Pack.Zip -Destination $HotRoot -Force
+    Copy-Item -LiteralPath (Join-Path $OutDir 'latest.zip') -Destination $HotRoot -Force
+    Get-ChildItem $HotRoot -Filter 'devconfig-*.zip' | Sort-Object LastWriteTime -Descending |
+        Select-Object -Skip $KeepHot | Remove-Item -Force -ErrorAction SilentlyContinue
+    Write-Log "G盘热备同步完成 -> $HotRoot" 'OK'
 }
 
 # ============================================================
@@ -481,7 +275,7 @@ function Push-Drive {
 # 主流程
 # ============================================================
 $pack = $null
-if ($Tier -contains 'Local' -or $Tier -contains 'Usb') {
+if ($Tier -contains 'Local' -or $Tier -contains 'Hot') {
     Invoke-Gather; Invoke-SystemExport; Invoke-Manifests
     $pack = Invoke-Pack
 } else {
@@ -495,7 +289,7 @@ if ($Tier -contains 'Local' -or $Tier -contains 'Usb') {
     else { Write-Log "无 latest.zip，Drive 需先跑一次 Local" 'ERR'; exit 1 }
 }
 if ($pack) {
-    if ($Tier -contains 'Usb')   { Push-Usb   $pack }
+    if ($Tier -contains 'Hot')   { Push-Hot   $pack }
     if ($Tier -contains 'Drive') { Push-Drive $pack }
 }
 Write-Log "==== 完成 ====" 'OK'

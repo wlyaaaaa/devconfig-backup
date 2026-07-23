@@ -15,26 +15,6 @@ $logs  = Join-Path $dir 'logs'
 function GB($b){ '{0:N2} GB' -f ($b/1GB) }
 function Age($t){ if(-not $t){return '—'}; $d=(Get-Date)-$t; if($d.TotalDays -ge 1){'{0:N0} 天前' -f $d.TotalDays}elseif($d.TotalHours -ge 1){'{0:N0} 小时前' -f $d.TotalHours}else{'{0:N0} 分钟前' -f $d.TotalMinutes} }
 function Line(){ Write-Host ('-'*60) -ForegroundColor DarkGray }
-function Get-HDriveHealthText {
-    if (-not (Test-Path 'H:\')) { return 'H: 未插入' }
-    $dirty = 'unknown'
-    try {
-        $out = (& fsutil dirty query H: 2>&1) -join ' '
-        if ($LASTEXITCODE -eq 0) {
-            if ($out -match 'NOT\s+Dirty') { $dirty = 'clean' }
-            elseif ($out -match 'Dirty') { $dirty = 'dirty' }
-        }
-    } catch {}
-    $health = 'Unknown'
-    $op = 'Unknown'
-    try {
-        $v = Get-Volume -DriveLetter H -ErrorAction Stop
-        $health = [string]$v.HealthStatus
-        $op = (@($v.OperationalStatus) | ForEach-Object { [string]$_ }) -join ','
-    } catch {}
-    return "H: dirty=$dirty, HealthStatus=$health, OperationalStatus=$op"
-}
-
 Write-Host "`n===== DevConfig / WeChat 备份状态  $(Get-Date -Format 'yyyy-MM-dd HH:mm') =====" -ForegroundColor Cyan
 
 # 1) 计划任务
@@ -47,22 +27,19 @@ Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*' -ErrorAction Si
         $(if($i.NextRunTime){$i.NextRunTime.ToString('MM-dd HH:mm')}else{'—'})
 }
 
-# 2) 本地 / U盘
-Line; Write-Host "② 本地 & U盘" -ForegroundColor Yellow
+# 2) 本地 / G盘热备
+Line; Write-Host "② 本地 & G盘热备" -ForegroundColor Yellow
 $lz = Join-Path $dir 'out\latest.zip'
 if (Test-Path $lz) { '本地 latest.zip : {0:N1} MB  ({1})' -f ((Get-Item $lz).Length/1MB), (Age (Get-Item $lz).LastWriteTime) }
 $dated = Get-ChildItem (Join-Path $dir 'out') -Filter 'devconfig-*.zip' -ErrorAction SilentlyContinue
 '本地带日期版   : {0} 份  {1}' -f $dated.Count, (($dated | Sort-Object Name -Descending | Select-Object -First 3 -ExpandProperty Name) -join ', ')
-$autoBackupDirName = '80_' + (-join @([char]0x81EA, [char]0x52A8, [char]0x5907, [char]0x4EFD, [char]0x533A))
-$usbBackupRoot = Join-Path 'H:\' $autoBackupDirName
-$ud = Join-Path $usbBackupRoot 'DevConfig'
-$uw = Join-Path (Join-Path $usbBackupRoot 'WeChat') 'xwechat_files'
-if (Test-Path 'H:\') {
-    $hHealth = Get-HDriveHealthText
-    Write-Host $hHealth -ForegroundColor $(if($hHealth -match 'dirty|Warning|Repair'){'Red'}else{'DarkGray'})
-    if (Test-Path $ud) { $z=Get-ChildItem $ud -Filter 'devconfig-*.zip'; 'U盘 配置       : {0} 份带日期, 最新 {1}' -f $z.Count, (Age ($z|Sort LastWriteTime|Select -Last 1).LastWriteTime) }
-    if (Test-Path $uw) { $w=Get-ChildItem $uw -Recurse -File -ErrorAction SilentlyContinue|Measure-Object Length -Sum; 'U盘 微信       : {0} ({1} 文件)' -f (GB $w.Sum), $w.Count }
-} else { Write-Host 'U盘 H: 未插入' -ForegroundColor DarkGray }
+$hotRoot = 'G:\80_Backup'
+$gd = Join-Path $hotRoot 'DevConfig'
+$gw = Join-Path (Join-Path $hotRoot 'WeChat') 'xwechat_files'
+if (Test-Path $gd) { $z=Get-ChildItem $gd -Filter 'devconfig-*.zip'; 'G盘 配置热备   : {0} 份带日期, 最新 {1}' -f $z.Count, (Age ($z|Sort LastWriteTime|Select -Last 1).LastWriteTime) }
+else { Write-Host 'G盘 配置热备   : 尚未建立' -ForegroundColor DarkGray }
+if (Test-Path $gw) { $w=Get-ChildItem $gw -Recurse -File -ErrorAction SilentlyContinue|Measure-Object Length -Sum; 'G盘 微信热备   : {0} ({1} 文件)' -f (GB $w.Sum), $w.Count }
+else { Write-Host 'G盘 微信热备   : 尚未建立' -ForegroundColor DarkGray }
 
 # 3) Drive
 if (-not $NoDrive) {

@@ -5,15 +5,14 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
 
 here = fso.GetParentFolderName(WScript.ScriptFullName)
-target = "Usb,Drive"
+target = "Hot,Drive"
 If WScript.Arguments.Count > 0 Then
     target = WScript.Arguments(0)
 End If
 
 Select Case LCase(target)
-    Case "local", "usb", "drive", "local,usb", "local,drive", "usb,drive", "local,usb,drive"
+    Case "hot,drive"
     Case Else
-        WScript.Echo "Unsupported WeChat backup target: " & target
         WScript.Quit 2
 End Select
 

@@ -11,9 +11,8 @@ If WScript.Arguments.Count > 0 Then
 End If
 
 Select Case LCase(tier)
-    Case "local", "usb", "drive", "local,usb", "local,drive", "usb,drive", "local,usb,drive"
+    Case "local", "hot,drive"
     Case Else
-        WScript.Echo "Unsupported DevConfig backup tier: " & tier
         WScript.Quit 2
 End Select
 

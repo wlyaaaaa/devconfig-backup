@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 )
 
@@ -13,12 +13,17 @@ function Assert-Text {
 $devScript = Join-Path $RepoRoot 'Backup-DevConfig.ps1'
 $wechatScript = Join-Path $RepoRoot 'Backup-WeChat.ps1'
 $statusScript = Join-Path $RepoRoot 'Backup-Status.ps1'
+$setupScript = Join-Path $RepoRoot 'Setup-ScheduledTasks.ps1'
 $readme = Join-Path $RepoRoot 'README.md'
 
 $devText = Get-Content -LiteralPath $devScript -Raw
 $wechatText = Get-Content -LiteralPath $wechatScript -Raw
 $statusText = Get-Content -LiteralPath $statusScript -Raw
+$setupText = Get-Content -LiteralPath $setupScript -Raw
+$devWrapperText = Get-Content -LiteralPath (Join-Path $RepoRoot 'Backup-DevConfig-Hidden.vbs') -Raw
+$wechatWrapperText = Get-Content -LiteralPath (Join-Path $RepoRoot 'Backup-WeChat-Hidden.vbs') -Raw
 $readmeText = Get-Content -LiteralPath $readme -Raw
+$sourcesText = Get-Content -LiteralPath (Join-Path $RepoRoot 'sources.psd1') -Raw
 $allText = @($devText, $wechatText, $statusText, $readmeText) -join "`n"
 
 foreach ($file in @($devScript, $wechatScript, $statusScript)) {
@@ -28,19 +33,33 @@ foreach ($file in @($devScript, $wechatScript, $statusScript)) {
     Assert-Text "$([IO.Path]::GetFileName($file)) parses" ($errors.Count -eq 0)
 }
 
-foreach ($text in @($devText, $wechatText)) {
-    Assert-Text 'USB writer uses shared mutex' ($text -match 'Global\\CodexHDriveUsbWriteLock')
-    Assert-Text 'USB writer checks dirty state' ($text -match 'dirty|Dirty|Full Repair Needed|OperationalStatus')
-    Assert-Text 'USB writer checks free space' ($text -match 'FreeBytes|FreeSpace|剩余空间')
-}
-
-Assert-Text 'WeChat USB checks H health before source size scan' (
-    $wechatText -match 'Test-HDriveUsbReady\s+-TargetRoot\s+\$UsbRoot\s+-RequiredBytes\s+0[\s\S]*Get-DirectoryRequiredBytes'
+Assert-Text 'project scripts contain no direct H backup destination' (
+    $devText -notmatch 'H:\\' -and $wechatText -notmatch 'H:\\' -and $statusText -notmatch 'H:\\'
 )
-Assert-Text 'WeChat USB uses conservative robocopy thread count' (
-    $wechatText -match 'Sync-Local\s+\$UsbRoot\s+\$true\s+4' -and
-    $wechatText -match 'Sync-Local\s+\$UsbRoot\s+\$false\s+4'
+Assert-Text 'project scripts reject the retired Usb target' (
+    $devText -notmatch "'Usb'" -and $wechatText -match 'Usb.*PCConfig|PCConfig.*G.*H'
 )
-Assert-Text 'Backup-Status reports H health' ($statusText -match 'HealthStatus|OperationalStatus|dirty')
-Assert-Text 'README documents H dirty skip' ($readmeText -match 'dirty|Full Repair Needed|CodexHDriveUsbWriteLock|跳过')
+Assert-Text 'Backup-Status reports G hot backup' ($statusText -match 'G:\\80_Backup' -and $statusText -notmatch 'HealthStatus|OperationalStatus|dirty')
+Assert-Text 'scheduled backups use G hot tier and never schedule H cold writes' (
+    $devText -match 'G:\\80_Backup\\DevConfig' -and
+    $wechatText -match 'G:\\80_Backup\\WeChat\\xwechat_files' -and
+    $setupText -match "'Hot,Drive'" -and
+    $setupText -notmatch 'DevConfigBackup-OnUSB|Usb,Drive'
+)
+Assert-Text 'scheduled wrappers accept current hot targets without legacy Usb or modal prompts' (
+    $devWrapperText -match '"hot,drive"' -and
+    $wechatWrapperText -match '"hot,drive"' -and
+    $devWrapperText -notmatch '"usb"|WScript\.Echo' -and
+    $wechatWrapperText -notmatch '"usb"|WScript\.Echo'
+)
+Assert-Text 'G hot backup is not gated on network availability' (
+    $setupText.Contains("(New-Action `$devWrapper 'Hot,Drive') `$s4") -and
+    -not $setupText.Contains("(New-Action `$devWrapper 'Hot,Drive') `$sNet")
+)
+Assert-Text 'README routes cold backup through PCConfig G to H' ($readmeText -match 'Invoke-HotToColdBackup.ps1' -and $readmeText -match 'G.*H')
+Assert-Text 'default DevConfig backup excludes Codex session history and log database' (
+    $sourcesText -match "'sessions'" -and
+    $sourcesText -match "'logs_2\.sqlite\*'" -and
+    $devText -match 'HistoryFiles'
+)
 Assert-Text 'old H backup path has no residual references' ($allText -notmatch 'H:\\My_Digital_Backup')

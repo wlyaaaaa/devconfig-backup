@@ -1,4 +1,4 @@
-# DevConfig Backup — 开发配置 / 凭据 / 系统设置 三级级联备份
+# DevConfig Backup — 开发配置 / 凭据 / 系统设置分层备份
 
 > 面向"极端意外下快速重装新机"的灾备工具。**只备份真正不可再生的配置与凭据**，
 > 软件本体、IDE 插件、npm 包、缓存等可重下内容一律剔除。
@@ -38,26 +38,27 @@
 
 ---
 
-## 2. 三级级联架构（按流量分配周期）
+## 2. 分层备份架构（按恢复速度与介质角色分工）
 
 ```
 [Backup-DevConfig.ps1] ──产出──> ① 本地 out\devconfig-*.zip  (零流量)
                                       │
                           ┌───────────┴────────────┐
                           ▼                         ▼
-                   ② U盘 H:\80_自动备份区   ③ Google Drive (rclone)
-                      (零流量,插上才同步)         (海外额度,改动才传)
+                   ② G:\80_Backup 热备       ③ Google Drive (rclone)
+                      (在线,计划任务主力)          (海外额度,改动才传)
+                   ④ H: 冷备（由 PCConfig 在人工维护窗口从 G 刷新）
 ```
 
 | 级 | 任务 | 周期/触发 | 流量 |
 |---|---|---|---|
 | ① 本地 | `DevConfigBackup-Local` (`-Tier Local`) | 每天 12:30 + 登录 | 无(仅本地硬盘) |
-| ② U盘 | `DevConfigBackup-Weekly` + `DevConfigBackup-OnUSB` | 每周六 04:30 + 插U盘即同步 | 无 |
+| ② G盘热备 | `DevConfigBackup-Weekly` | 每周日 20:00 | 无 |
 | ③ Drive | `DevConfigBackup-Weekly` | 每周六 04:30；**连通预检 + sha变了才传 + 强重试** | 海外(配置~65MB,多数周近0) |
-| 微信 | `WeChatBackup-Weekly` (`-Target Usb,Drive`) | 每周六 04:00 | U盘无; Drive 只传新增/变化文件并做内容校验 |
+| 微信 | `WeChatBackup-Weekly` (`-Target Hot,Drive`) | 每周六 20:00 | G盘无; Drive 只传新增/变化文件并做内容校验 |
 
-> - **频率原则(2026-06调整)**：零流量的(本地/U盘)高频、烧海外流量的(Drive)低频。U盘是 1TB 闪存,为省写入寿命改 **每周一次**;Drive(配置+微信)也 **每周一次** 省海外流量;本地硬盘每天(零流量、高频保护)。
-> - **配置保留**：U盘 / Drive 各保留 **3 份带日期**（`devconfig-YYYYMMDD-HHMMSS.zip`）+ 一份 `latest.zip`。
+> - **介质原则(2026-07调整)**：G盘是可直接访问的在线热备；H盘是默认 BitLocker 锁定的冷备，只在人工维护窗口刷新，不注册计划任务。
+> - **配置保留**：G盘 / Drive 各保留 **3 份带日期**（`devconfig-YYYYMMDD-HHMMSS.zip`）+ 一份 `latest.zip`；H盘只接收 PCConfig 统一的 `G → H` 冷备。
 > - **rclone 远端名自动探测**：脚本默认找 `gdrive:`，没有就用第一个已配置远端（本机实为 `<邮箱>:`）。
 > - **微信完整历史上云**：微信 38GB 里大部分是已压缩媒体，压缩收益很小；因此不用全量压缩包，而是用 `rclone copy --checksum` 逐文件增量，已上传且内容未变的文件自动跳过。默认单次 Drive 上传有 **8G 流量保险丝**，防止异常情况下大额重传。
 > - **增量是自动的**：robocopy(`/E`) 先刷新静态快照，rclone(`copy --checksum`) 按内容 hash 判断是否变化；只传新增或内容变化的文件，数据库仍是**整文件级**增量。
@@ -65,7 +66,7 @@
 > - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑；② 代理没就绪 → 连通预检优雅跳过、下个窗口重试；③ 传一半断 → `rclone copy` 幂等续传；④ 每周任务失败时保留失败状态，下周继续。
 > - **小时监控是临时工具**：`WeChatDrive-Monitor-Hourly` 只用于首次全量补齐，首次内容级校验通过后禁用；正常运行只依赖 `WeChatBackup-Weekly`。
 > - **看进度/日志**：`pwsh -File Backup-Status.ps1`。
-> - **H盘写入护栏**：USB 写入前检查 dirty、`Full Repair Needed`、剩余空间，并用 `Global\CodexHDriveUsbWriteLock` 防并发；H 盘需要修复时跳过 USB 写入，但不阻断 Local / Drive。
+> - **H盘边界**：本项目不直接写 H。冷备由 `E:\PCConfig\tools\Invoke-HotToColdBackup.ps1` 在人工解锁窗口把固定 G 热备集合复制到 H，完成后重新锁定。
 
 ---
 
@@ -82,7 +83,7 @@ Get-Content _manifests\vscode-extensions.txt | ForEach-Object { code --install-e
 & 'C:\Program Files\7-Zip\7z.exe' x devconfig-YYYYMMDD.zip -o"$env:USERPROFILE\restore"
 
 # 2) 把 home\ 回填到 ~，appdata-roaming\ -> AppData\Roaming，appdata-local\ -> AppData\Local
-#    _system\*.reg 双击导入（环境变量/Xshell），_system\tasks\*.xml 用 schtasks /create 还原
+#    _system\*.reg 双击导入（环境变量/Xshell）；计划任务不要通配导入 XML，按 PCConfig 重建计划逐项恢复
 #    _system\wifi\*.xml: netsh wlan add profile filename=...
 
 # 3) 重新挂上备份任务
@@ -108,7 +109,7 @@ rclone config        # 新建名为 gdrive 的 Google Drive 远端（OAuth，需
 
 ```powershell
 pwsh -File Backup-WeChat.ps1 -List          # 干跑:刷新本地快照后列出待传量
-pwsh -File Backup-WeChat.ps1 -Target Usb     # 全量到U盘(robocopy /E,只增不删,零流量;主力)
+pwsh -File Backup-WeChat.ps1 -Target Hot     # 全量到G盘热备(robocopy /E,只增不删,零流量;主力)
 pwsh -File Backup-WeChat.ps1 -Target Drive   # 完整聊天记录增量到Drive(含媒体;已传自动跳过;默认8G封顶)
 pwsh -File Backup-WeChat.ps1 -Target Drive -MaxTransfer 0   # 一次性补齐模式(关闭封顶,需人工看进度)
 pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只传db_storage
@@ -116,7 +117,7 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 
 **当前策略：完整聊天记录逐文件增量上云**：
 - **Drive 全量历史**：`xwechat_files` 剔除 cache/temp/WMPF/apm_record 和 SQLite 运行时 wal/shm/journal 后，聊天数据库与媒体都上云。
-- **U盘全量历史**：同样保留完整聊天记录，是零流量主备份。
+- **G盘全量历史**：同样保留完整聊天记录，是零流量热备主力；H盘仅人工冷备。
 **增量机制**：`robocopy /E` 刷新静态快照，`rclone copy --checksum` 自动跳过内容未变化文件；首次是全量，之后只传新增/变化。即使文件大小和修改时间不变，只要内容变化也会被识别。
 
 **解密密钥（恢复命门）**：微信4.x db 用 SQLCipher，密钥 = IMEI+UIN 派生、不随版本变、**必须本机提取**。已提取两账号密钥固化到 `_KEYS`(U盘 + 本地 `E:\WeChatBackup`，**不进git**)。**绝不可丢**：当前 4.1.10 版本下 WeFlow GUI 提取已被封、wx_key 也已停更，丢了难重提；wx_key v2.1.8 工具留存于 `E:\WeChatBackup\_tools`。
@@ -143,7 +144,7 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 
 | 文件 | 作用 |
 |---|---|
-| `Backup-DevConfig.ps1` | 主脚本：采集→系统导出→清单→打包→三级分发（`-Tier Local/Usb/Drive`） |
+| `Backup-DevConfig.ps1` | 主脚本：采集→系统导出→清单→打包→分层分发（`-Tier Local/Hot/Drive`） |
 | `Backup-WeChat.ps1` | 微信聊天记录增量备份 |
 | `Monitor-WeChatDrive.ps1` | 每小时监控微信 Drive 备份进度；未完成且无上传进程时自动续传；成功后自动禁用监控任务 |
 | `Install-WeChatDriveMonitor.ps1` | 注册/刷新微信 Drive 小时监控任务；直接运行 PowerShell，30 分钟硬超时，避免监控实例卡住 |
@@ -159,7 +160,7 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 
 - **psd1 必须逗号分隔 + UTF-8 BOM**：Windows PowerShell 5.1 的 `Import-PowerShellDataFile`
   拒绝分号分隔数组；无 BOM 时中文按本地代码页误解。pwsh7 宽容会掩盖此问题。
-- **`-File` 的逗号陷阱**：`powershell -File x.ps1 -Tier Local,Usb` 会把 `Local,Usb` 当**单个字符串**
+- **`-File` 的逗号陷阱**：`powershell -File x.ps1 -Tier Local,Hot` 会把 `Local,Hot` 当**单个字符串**
   传入（不是数组）。脚本已在入口 `-split ','` 归一化，并去掉了 `ValidateSet`。
 - **任务计划无法启动 Store 版 pwsh**：`(Get-Command pwsh).Source` 指向
   `C:\Program Files\WindowsApps\...\pwsh.exe`，任务计划起不来（结果码 1）。
@@ -174,13 +175,13 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 ```powershell
 cd E:\Projects\Backups\devconfig-backup
 .\Backup-DevConfig.ps1 -Tier Local          # 仅本地
-.\Backup-DevConfig.ps1 -Tier Local,Usb      # 本地+U盘
+.\Backup-DevConfig.ps1 -Tier Local,Hot      # 本地+G盘热备
 .\Backup-DevConfig.ps1 -Tier Drive          # 仅上 Drive（改动才传；-Force 强制）
-.\Backup-DevConfig.ps1 -Tier Local,Usb -IncludeHistory   # 连聊天历史一起备(+256M)
+.\Backup-DevConfig.ps1 -Tier Local,Hot -IncludeHistory   # 连聊天历史一起备(+256M)
 
 .\Backup-WeChat.ps1 -List                   # 微信干跑估算
-.\Backup-WeChat.ps1 -Target Usb             # 微信增量到U盘
-.\Backup-WeChat.ps1 -Target Usb,Drive       # 微信增量到U盘+Drive
+.\Backup-WeChat.ps1 -Target Hot             # 微信增量到G盘热备
+.\Backup-WeChat.ps1 -Target Hot,Drive       # 微信增量到G盘热备+Drive
 .\Monitor-WeChatDrive.ps1                   # 手动检查微信Drive进度/必要时续传
 .\Install-WeChatDriveMonitor.ps1            # 注册每小时监控，完成后监控脚本会自禁用
 ```
@@ -207,7 +208,7 @@ rclone about <remote>:                                 # 配额
 # 1. 装 PowerShell7 / Git / scoop(含7zip) / rclone / Windows Terminal / 各 IDE
 #    （Store 版 pwsh 任务计划起不来，本工具的任务固定用 powershell.exe 5.1）
 
-# 2. 取回最新配置包：U盘直接拷，或从 Drive 拉
+# 2. 取回最新配置包：优先从 G 热备，灾难场景再人工解锁 H 冷备；也可从 Drive 拉
 rclone copy <remote>:Backups/WLY/latest.zip E:\restore\
 & 'C:\Program Files\7-Zip\7z.exe' x E:\restore\latest.zip -oE:\restore\devconfig
 
@@ -229,8 +230,9 @@ reg import E:\restore\devconfig\_system\env-user.reg      # 用户环境变量
 reg import E:\restore\devconfig\_system\env-machine.reg   # 机器环境变量（管理员）
 # 如只需核对机器 PATH，也可查看 _system\path-machine.txt
 reg import E:\restore\devconfig\_system\xshell.reg        # Xshell 会话
-Get-ChildItem E:\restore\devconfig\_system\tasks\*.xml | % {
-    schtasks /create /tn $_.BaseName /xml $_.FullName /f }    # 你的自动化任务
+# 不要把旧包里的任务 XML 批量导入；其中可能包含已退役的 H 盘写入任务。
+node E:\PCConfig\tools\validate_scheduled_task_rebuild_plan.mjs
+# 然后按 E:\PCConfig\docs\recovery\scheduled_tasks_rebuild.md 逐项恢复。
 Get-ChildItem E:\restore\devconfig\_system\wifi\*.xml | % {
     netsh wlan add profile filename=$_.FullName }             # Wi-Fi
 Copy-Item E:\restore\devconfig\_system\hosts $env:WINDIR\System32\drivers\etc\hosts

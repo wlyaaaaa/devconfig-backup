@@ -3,10 +3,9 @@
   注册 DevConfig + WeChat 备份的计划任务（幂等，可重复运行）。
 .DESCRIPTION
   - DevConfigBackup-Local  : 每天 21:05 + 登录后20分钟 -> -Tier Local（仅本地硬盘·零流量·高频保护）
-  - DevConfigBackup-Weekly : 每周日 20:00             -> -Tier Usb,Drive（配置一周一次到U盘+Drive·有网才跑）
-  - DevConfigBackup-OnUSB  : 插入U盘事件        -> -Tier Usb（机会式即插即同步·不常插不磨损）
-  - WeChatBackup-Weekly    : 每周六 20:00      -> 微信完整聊天记录增量到U盘+Drive（含媒体）
-  说明: U盘是1TB闪存,为省写入寿命改为每周一次;Drive 依靠 rclone copy 自动跳过已存在文件。
+  - DevConfigBackup-Weekly : 每周日 20:00             -> -Tier Hot,Drive（G盘热备+Drive）
+  - WeChatBackup-Weekly    : 每周六 20:00             -> 微信完整聊天记录增量到G盘热备+Drive（含媒体）
+  说明: H盘是默认锁定的人工冷备，不注册自动写入任务；Drive 依靠 rclone copy 自动跳过已存在文件。
   以当前用户、仅登录时运行，无需密码与管理员权限。
 .NOTES
   计划任务动作固定走 wscript.exe + VBS hidden launcher，避免 PowerShell 窗口一闪而过。
@@ -72,31 +71,17 @@ Register-T 'DevConfigBackup-Local' `
     @((New-ScheduledTaskTrigger -Daily -At $DailyAt), $logonTrigger) `
     (New-Action $devWrapper 'Local') $s1 '配置备份：仅本地（每天/登录·零流量）'
 
-# ② U盘 + Drive：每周日晚上（配置一周一次；省U盘闪存写入+省海外流量；有网才跑、连不通下个窗口重试）
+# ② G盘热备 + Drive：每周日晚上（不以网络作为任务启动条件，确保G盘热备始终先执行）
 Register-T 'DevConfigBackup-Weekly' `
     (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeeklyDay -At $WeeklyAt) `
-    (New-Action $devWrapper 'Usb,Drive') $sNet '配置备份：U盘+Drive（每周晚间·一周一次）'
+    (New-Action $devWrapper 'Hot,Drive') $s4 '配置备份：G盘热备+Drive（每周晚间）'
 
-# ③ 插入U盘事件触发（NTFS 卷挂载 EventID 98；动作内再判断 H: 是否存在）
-try {
-    $sub = @"
-<QueryList><Query Id="0" Path="System"><Select Path="System">*[System[Provider[@Name='Microsoft-Windows-Ntfs'] and (EventID=98)]]</Select></Query></QueryList>
-"@
-    $cls  = Get-CimClass -Namespace Root/Microsoft/Windows/TaskScheduler -ClassName MSFT_TaskEventTrigger
-    $tEvt = New-CimInstance -CimClass $cls -ClientOnly
-    $tEvt.Enabled = $true
-    $tEvt.Subscription = $sub
-    Register-T 'DevConfigBackup-OnUSB' $tEvt (New-Action $devWrapper 'Usb') $s1 '开发配置备份：插入U盘即同步'
-} catch {
-    Write-Warning "U盘事件任务创建失败（不影响每天/登录的U盘同步）：$($_.Exception.Message)"
-}
-
-# ④ 微信聊天记录：每周六晚上增量到U盘（仅 H: 在时；脚本内判断）
+# ③ 微信聊天记录：每周六晚上增量到G盘热备+Drive
 if (Test-Path $wxScript) {
     if (-not (Test-Path $wxWrapper)) { throw "找不到 $wxWrapper" }
     Register-T 'WeChatBackup-Weekly' `
         (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeChatWeeklyDay -At $WeChatWeeklyAt) `
-        (New-Action $wxWrapper 'Usb,Drive') $s4 '微信聊天记录每周增量到U盘+Drive'
+        (New-Action $wxWrapper 'Hot,Drive') $s4 '微信聊天记录每周增量到G盘热备+Drive'
 }
 
 Write-Host "`n已注册的任务：" -ForegroundColor Cyan
