@@ -60,7 +60,7 @@ Assert-Text 'scheduled wrappers accept current hot targets without legacy Usb or
 Assert-Text 'local hot and Drive tasks are split with independent availability gates' (
     $setupText -match "DevConfigBackup-Local" -and
     $setupText -match "DevConfigBackup-Drive-Daily" -and
-    $setupText -match "WeChatBackup-Hot-Weekly" -and
+    $setupText -match "WeChatBackup-Hot-Daily" -and
     $setupText -match "WeChatBackup-Drive-Weekly" -and
     $setupText -match '\$sLocalHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries' -and
     $setupText -match '\$sDrive = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable' -and

@@ -54,7 +54,7 @@
 |---|---|---|---|
 | ① 本地 + G盘热备 | `DevConfigBackup-Local` (`-Tier Local,Hot`) | 每天 21:05 + 登录后20分钟；错过补跑、失败重试3次 | 无 |
 | ② Drive | `DevConfigBackup-Drive-Daily` (`-Tier Drive`) | 每天 22:00；有网才跑、失败重试5次 | 海外（sha 变化才传） |
-| 微信 G盘热备 | `WeChatBackup-Hot-Weekly` (`-Target Hot`) | 每周六 20:00；错过补跑、失败重试3次 | 无 |
+| 微信 G盘热备 | `WeChatBackup-Hot-Daily` (`-Target Hot`) | 每天 18:30；错过补跑、失败重试3次 | 无 |
 | 微信 Drive | `WeChatBackup-Drive-Weekly` (`-Target Drive`) | 每周日 20:00；有网才跑、失败重试5次 | 只传新增/变化文件并做内容校验 |
 
 > - **介质原则(2026-07调整)**：G盘是可直接访问的在线热备；H盘是默认 BitLocker 锁定的冷备，只在人工维护窗口刷新，不注册计划任务。
@@ -64,7 +64,7 @@
 > - **增量是自动的**：robocopy(`/E`) 先刷新静态快照，rclone(`copy --checksum`) 按内容 hash 判断是否变化；只传新增或内容变化的文件，数据库仍是**整文件级**增量。
 > - **内容校验是完成条件**：上传后执行普通 `rclone check`；`--size-only` 只能证明大小一致，不能证明内容一致。
 > - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑一次；② 代理/远端没就绪 → 脚本返回失败，由任务级重试继续；③ 传一半断 → `rclone copy` 幂等续传；④ 本地/G 与 Drive 分任务，离线不会阻断热备。
-> - **小时监控是临时工具**：`WeChatDrive-Monitor-Hourly` 只用于首次全量补齐，首次内容级校验通过后禁用；正常运行依赖 `WeChatBackup-Hot-Weekly` 与 `WeChatBackup-Drive-Weekly`。
+> - **小时监控是临时工具**：`WeChatDrive-Monitor-Hourly` 只用于首次全量补齐，首次内容级校验通过后禁用；正常运行依赖 `WeChatBackup-Hot-Daily` 与 `WeChatBackup-Drive-Weekly`。
 > - **看进度/日志**：`pwsh -File Backup-Status.ps1`。
 > - **H盘边界**：本项目不直接写 H。冷备由 `E:\PCConfig\tools\Invoke-HotToColdBackup.ps1` 在人工解锁窗口把固定 G 热备集合复制到 H，完成后重新锁定。
 

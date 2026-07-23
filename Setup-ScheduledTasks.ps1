@@ -4,7 +4,7 @@
 .DESCRIPTION
   - DevConfigBackup-Local        : 每天 21:05 + 登录后20分钟 -> -Tier Local,Hot（本地包+G盘热备）
   - DevConfigBackup-Drive-Daily  : 每天 22:00               -> -Tier Drive（Google Drive）
-  - WeChatBackup-Hot-Weekly      : 每周六 20:00             -> -Target Hot（G盘热备）
+  - WeChatBackup-Hot-Daily       : 每天 18:30               -> -Target Hot（G盘热备）
   - WeChatBackup-Drive-Weekly    : 每周日 20:00             -> -Target Drive（Google Drive）
   说明: 本地/G 热备与 Drive 拆成独立任务，离线不会阻断本地保护，Drive 失败会返回非零并自动重试。
   H盘是默认锁定的人工冷备，不注册自动写入任务；Drive 依靠 rclone copy 自动跳过已存在文件。
@@ -18,9 +18,7 @@
 param(
     [string] $DailyAt  = '21:05',
     [string] $DriveAt  = '22:00',
-    [ValidateSet('Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday')]
-    [string] $WeChatHotWeeklyDay = 'Saturday',
-    [string] $WeChatHotWeeklyAt = '20:00',
+    [string] $WeChatHotAt = '18:30',
     [ValidateSet('Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday')]
     [string] $WeChatDriveWeeklyDay = 'Sunday',
     [string] $WeChatDriveWeeklyAt = '20:00'
@@ -94,9 +92,9 @@ Register-T 'DevConfigBackup-Drive-Daily' `
 # ③ 微信聊天记录：G 热备与 Drive 分开调度、分别报告结果
 if (Test-Path $wxScript) {
     if (-not (Test-Path $wxWrapper)) { throw "找不到 $wxWrapper" }
-    Register-T 'WeChatBackup-Hot-Weekly' `
-        (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeChatHotWeeklyDay -At $WeChatHotWeeklyAt) `
-        (New-Action $wxWrapper 'Hot') $sWeChatHot '微信聊天记录：每周增量到G盘热备（失败重试3次）'
+    Register-T 'WeChatBackup-Hot-Daily' `
+        (New-ScheduledTaskTrigger -Daily -At $WeChatHotAt) `
+        (New-Action $wxWrapper 'Hot') $sWeChatHot '微信聊天记录：每日增量到G盘热备（失败重试3次）'
     Register-T 'WeChatBackup-Drive-Weekly' `
         (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeChatDriveWeeklyDay -At $WeChatDriveWeeklyAt) `
         (New-Action $wxWrapper 'Drive') $sWeChatDrive '微信聊天记录：每周增量到Drive（有网才跑·失败重试5次）'
