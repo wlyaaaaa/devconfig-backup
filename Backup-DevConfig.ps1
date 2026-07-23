@@ -28,6 +28,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+. (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
 
 # 归一化 Tier：兼容 -File 把 "Local,Hot" 当单串传入的情况
 $Tier = @($Tier) | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }
@@ -268,6 +269,7 @@ function Push-Hot {
 # ============================================================
 function Push-Drive {
     param($Pack)
+    Initialize-BackupNetwork | Out-Null
     if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) {
         Set-BackupFailure "rclone 未安装，Drive 备份失败"
         return

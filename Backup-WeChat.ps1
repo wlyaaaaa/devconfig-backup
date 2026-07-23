@@ -35,6 +35,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+. (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
 $Target = @($Target) | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 $invalidTargets = @($Target | Where-Object { $_ -notin @('Hot','Local','Drive') })
 if ($invalidTargets.Count -gt 0) { throw "Unsupported target: $($invalidTargets -join ','). H cold backup is owned by the PCConfig manual G-to-H workflow." }
@@ -72,6 +73,7 @@ foreach ($t in $Target) {
             Sync-Local $LocalRoot ([bool]$List)
         }
         'Drive' {
+            Initialize-BackupNetwork | Out-Null
             if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) {
                 Say "rclone 未安装，跳过 Drive" 'Red'
                 $overallExitCode = 1
