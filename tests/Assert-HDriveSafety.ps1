@@ -43,18 +43,43 @@ Assert-Text 'Backup-Status reports G hot backup' ($statusText -match 'G:\\80_Bac
 Assert-Text 'scheduled backups use G hot tier and never schedule H cold writes' (
     $devText -match 'G:\\80_Backup\\DevConfig' -and
     $wechatText -match 'G:\\80_Backup\\WeChat\\xwechat_files' -and
-    $setupText -match "'Hot,Drive'" -and
+    $setupText -match 'New-Action \$devWrapper ''Local,Hot''' -and
+    $setupText -match 'New-Action \$devWrapper ''Drive''' -and
+    $setupText -match 'New-Action \$wxWrapper ''Hot''' -and
+    $setupText -match 'New-Action \$wxWrapper ''Drive''' -and
     $setupText -notmatch 'DevConfigBackup-OnUSB|Usb,Drive'
 )
 Assert-Text 'scheduled wrappers accept current hot targets without legacy Usb or modal prompts' (
-    $devWrapperText -match '"hot,drive"' -and
-    $wechatWrapperText -match '"hot,drive"' -and
+    $devWrapperText -match '"local,hot"' -and
+    $devWrapperText -match '"drive"' -and
+    $wechatWrapperText -match '"hot"' -and
+    $wechatWrapperText -match '"drive"' -and
     $devWrapperText -notmatch '"usb"|WScript\.Echo' -and
     $wechatWrapperText -notmatch '"usb"|WScript\.Echo'
 )
-Assert-Text 'G hot backup is not gated on network availability' (
-    $setupText.Contains("(New-Action `$devWrapper 'Hot,Drive') `$s4") -and
-    -not $setupText.Contains("(New-Action `$devWrapper 'Hot,Drive') `$sNet")
+Assert-Text 'local hot and Drive tasks are split with independent availability gates' (
+    $setupText -match "DevConfigBackup-Local" -and
+    $setupText -match "DevConfigBackup-Drive-Daily" -and
+    $setupText -match "WeChatBackup-Hot-Weekly" -and
+    $setupText -match "WeChatBackup-Drive-Weekly" -and
+    $setupText -match '\$sLocalHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries' -and
+    $setupText -match '\$sDrive = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable' -and
+    $setupText -match '\$sWeChatHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries' -and
+    $setupText -match '\$sWeChatDrive = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable'
+)
+Assert-Text 'scheduled backup failures are retried and hidden launchers preserve exit codes' (
+    $setupText -match '-RestartCount 3' -and
+    $setupText -match '-RestartCount 5' -and
+    $devWrapperText -match 'shell\.Run\(command, 0, True\)' -and
+    $devWrapperText -match 'WScript\.Quit exitCode' -and
+    $wechatWrapperText -match 'shell\.Run\(command, 0, True\)' -and
+    $wechatWrapperText -match 'WScript\.Quit exitCode'
+)
+Assert-Text 'Drive skip and upload failures propagate to Task Scheduler' (
+    $devText -match 'Set-BackupFailure "Drive 不可达' -and
+    $devText -match 'exit \$overallExitCode' -and
+    $wechatText -match '\$overallExitCode = 1' -and
+    $wechatText -match 'exit \$overallExitCode'
 )
 Assert-Text 'README routes cold backup through PCConfig G to H' ($readmeText -match 'Invoke-HotToColdBackup.ps1' -and $readmeText -match 'G.*H')
 Assert-Text 'default DevConfig backup excludes Codex session history and log database' (

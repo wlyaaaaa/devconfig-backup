@@ -5,13 +5,13 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
 
 here = fso.GetParentFolderName(WScript.ScriptFullName)
-target = "Hot,Drive"
+target = "Hot"
 If WScript.Arguments.Count > 0 Then
     target = WScript.Arguments(0)
 End If
 
 Select Case LCase(target)
-    Case "hot,drive"
+    Case "hot", "drive"
     Case Else
         WScript.Quit 2
 End Select

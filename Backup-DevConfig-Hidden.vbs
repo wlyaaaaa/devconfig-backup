@@ -11,7 +11,7 @@ If WScript.Arguments.Count > 0 Then
 End If
 
 Select Case LCase(tier)
-    Case "local", "hot,drive"
+    Case "local", "local,hot", "hot", "drive"
     Case Else
         WScript.Quit 2
 End Select

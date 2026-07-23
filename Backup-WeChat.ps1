@@ -56,7 +56,9 @@ function Sync-Local([string]$dst, [bool]$listOnly, [int]$Threads = 16) {
     if ($listOnly) { $a += '/L' }       # /L = 只列出，不实际复制
     Say "robocopy -> $dst $(if($listOnly){'(干跑)'})"
     & robocopy @a | Out-Null
-    Say "  robocopy exit=$LASTEXITCODE (0-7 正常)" 'Green'
+    $copyExit = $LASTEXITCODE
+    Say "  robocopy exit=$copyExit (0-7 正常)" $(if($copyExit -lt 8){'Green'}else{'Red'})
+    if ($copyExit -ge 8) { $script:overallExitCode = 1 }
 }
 
 foreach ($t in $Target) {
@@ -98,7 +100,7 @@ foreach ($t in $Target) {
                 Sync-Local $LocalRoot $false
                 $rcloneSource = $LocalRoot
             }
-            # 连通性预检：代理/海外网络没就绪则优雅跳过，下次自动重试（rclone copy 幂等续传）
+            # 连通性预检：代理/海外网络没就绪则返回失败，交给计划任务重试（rclone copy 幂等续传）
             & rclone lsd "$GDriveRemote" --max-depth 1 --contimeout 15s --timeout 20s --retries 1 *> $null
             if ($LASTEXITCODE -ne 0) {
                 Say "Drive 不可达(代理/海外网络未就绪)，本轮失败，下次重试" 'Red'

@@ -52,10 +52,10 @@
 
 | 级 | 任务 | 周期/触发 | 流量 |
 |---|---|---|---|
-| ① 本地 | `DevConfigBackup-Local` (`-Tier Local`) | 每天 12:30 + 登录 | 无(仅本地硬盘) |
-| ② G盘热备 | `DevConfigBackup-Weekly` | 每周日 20:00 | 无 |
-| ③ Drive | `DevConfigBackup-Weekly` | 每周六 04:30；**连通预检 + sha变了才传 + 强重试** | 海外(配置~65MB,多数周近0) |
-| 微信 | `WeChatBackup-Weekly` (`-Target Hot,Drive`) | 每周六 20:00 | G盘无; Drive 只传新增/变化文件并做内容校验 |
+| ① 本地 + G盘热备 | `DevConfigBackup-Local` (`-Tier Local,Hot`) | 每天 21:05 + 登录后20分钟；错过补跑、失败重试3次 | 无 |
+| ② Drive | `DevConfigBackup-Drive-Daily` (`-Tier Drive`) | 每天 22:00；有网才跑、失败重试5次 | 海外（sha 变化才传） |
+| 微信 G盘热备 | `WeChatBackup-Hot-Weekly` (`-Target Hot`) | 每周六 20:00；错过补跑、失败重试3次 | 无 |
+| 微信 Drive | `WeChatBackup-Drive-Weekly` (`-Target Drive`) | 每周日 20:00；有网才跑、失败重试5次 | 只传新增/变化文件并做内容校验 |
 
 > - **介质原则(2026-07调整)**：G盘是可直接访问的在线热备；H盘是默认 BitLocker 锁定的冷备，只在人工维护窗口刷新，不注册计划任务。
 > - **配置保留**：G盘 / Drive 各保留 **3 份带日期**（`devconfig-YYYYMMDD-HHMMSS.zip`）+ 一份 `latest.zip`；H盘只接收 PCConfig 统一的 `G → H` 冷备。
@@ -63,8 +63,8 @@
 > - **微信完整历史上云**：微信 38GB 里大部分是已压缩媒体，压缩收益很小；因此不用全量压缩包，而是用 `rclone copy --checksum` 逐文件增量，已上传且内容未变的文件自动跳过。默认单次 Drive 上传有 **8G 流量保险丝**，防止异常情况下大额重传。
 > - **增量是自动的**：robocopy(`/E`) 先刷新静态快照，rclone(`copy --checksum`) 按内容 hash 判断是否变化；只传新增或内容变化的文件，数据库仍是**整文件级**增量。
 > - **内容校验是完成条件**：上传后执行普通 `rclone check`；`--size-only` 只能证明大小一致，不能证明内容一致。
-> - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑；② 代理没就绪 → 连通预检优雅跳过、下个窗口重试；③ 传一半断 → `rclone copy` 幂等续传；④ 每周任务失败时保留失败状态，下周继续。
-> - **小时监控是临时工具**：`WeChatDrive-Monitor-Hourly` 只用于首次全量补齐，首次内容级校验通过后禁用；正常运行只依赖 `WeChatBackup-Weekly`。
+> - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑一次；② 代理/远端没就绪 → 脚本返回失败，由任务级重试继续；③ 传一半断 → `rclone copy` 幂等续传；④ 本地/G 与 Drive 分任务，离线不会阻断热备。
+> - **小时监控是临时工具**：`WeChatDrive-Monitor-Hourly` 只用于首次全量补齐，首次内容级校验通过后禁用；正常运行依赖 `WeChatBackup-Hot-Weekly` 与 `WeChatBackup-Drive-Weekly`。
 > - **看进度/日志**：`pwsh -File Backup-Status.ps1`。
 > - **H盘边界**：本项目不直接写 H。冷备由 `E:\PCConfig\tools\Invoke-HotToColdBackup.ps1` 在人工解锁窗口把固定 G 热备集合复制到 H，完成后重新锁定。
 
@@ -190,9 +190,9 @@ cd E:\Projects\Backups\devconfig-backup
 ```powershell
 .\Setup-ScheduledTasks.ps1                  # 注册/重建常规备份任务
 Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*' | ft TaskName,State
-Start-ScheduledTask DevConfigBackup-Local   # 手动跑
+Start-ScheduledTask DevConfigBackup-Local   # 手动生成本地包并刷新G热备
 (Get-ScheduledTaskInfo DevConfigBackup-Local).LastTaskResult   # 0=成功
-Disable-ScheduledTask DevConfigBackup-Cloud # 临时停掉某个
+Start-ScheduledTask DevConfigBackup-Drive-Daily  # 手动补一次Drive
 ```
 
 ### 查看 Drive 上的备份

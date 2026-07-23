@@ -58,6 +58,13 @@ function Write-Log {
     Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8
 }
 
+$overallExitCode = 0
+function Set-BackupFailure {
+    param([string]$Message)
+    $script:overallExitCode = 1
+    if ($Message) { Write-Log $Message 'ERR' }
+}
+
 Write-Log "==== DevConfig backup start | Tier=$($Tier -join ',') | History=$IncludeHistory ===="
 
 # ---------- 载入源清单 ----------
@@ -79,7 +86,9 @@ function Invoke-Rc {
     $rcArgs = @($Src, $Dst, '/E','/R:1','/W:1','/MT:8','/NFL','/NDL','/NJH','/NJS','/NP','/XJ','/XD') + $Excl
     if ($ExclF) { $rcArgs += @('/XF') + $ExclF }
     & robocopy @rcArgs *> $null
-    if ($LASTEXITCODE -ge 8) { Write-Log "  robocopy 异常 exit=${LASTEXITCODE}: $Src" 'WARN' }
+    if ($LASTEXITCODE -ge 8) {
+        Set-BackupFailure "  robocopy 异常 exit=${LASTEXITCODE}: $Src"
+    }
 }
 function Copy-One {
     param([string]$Src, [string]$DstDir)
@@ -211,12 +220,24 @@ function Invoke-Pack {
     $zip = Join-Path $OutDir "devconfig-$stamp.zip"
     Write-Log "打包 -> $([IO.Path]::GetFileName($zip)) (staging $sizeMB MB) ..."
     & $SevenZip a -tzip -mx=5 -bso0 -bsp0 -- $zip "$Staging\*" *> $null
-    if (-not (Test-Path -LiteralPath $zip)) { Write-Log "打包失败" 'ERR'; return $null }
+    $packExit = $LASTEXITCODE
+    if ($packExit -ne 0 -or -not (Test-Path -LiteralPath $zip)) {
+        Set-BackupFailure "打包失败 exit=$packExit"
+        return $null
+    }
 
     $zipMB = [math]::Round((Get-Item $zip).Length/1MB, 2)
     $sha   = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
-    Copy-Item -LiteralPath $zip -Destination (Join-Path $OutDir 'latest.zip') -Force
-    Set-Content (Join-Path $StateDir 'latest.sha256') "$sha  devconfig-$stamp.zip" -Encoding ASCII
+    try {
+        $latestTemp = Join-Path $OutDir 'latest.zip.tmp'
+        Copy-Item -LiteralPath $zip -Destination $latestTemp -Force -ErrorAction Stop
+        Move-Item -LiteralPath $latestTemp -Destination (Join-Path $OutDir 'latest.zip') -Force -ErrorAction Stop
+        Set-Content (Join-Path $StateDir 'latest.sha256') "$sha  devconfig-$stamp.zip" -Encoding ASCII -ErrorAction Stop
+    }
+    catch {
+        Set-BackupFailure "latest 包发布失败: $($_.Exception.Message)"
+        return $null
+    }
     Write-Log "打包完成: $zipMB MB  sha256=$($sha.Substring(0,12))..." 'OK'
 
     Get-ChildItem $OutDir -Filter 'devconfig-*.zip' | Sort-Object LastWriteTime -Descending |
@@ -229,12 +250,17 @@ function Invoke-Pack {
 # ============================================================
 function Push-Hot {
     param($Pack)
-    New-Item -ItemType Directory -Path $HotRoot -Force | Out-Null
-    Copy-Item -LiteralPath $Pack.Zip -Destination $HotRoot -Force
-    Copy-Item -LiteralPath (Join-Path $OutDir 'latest.zip') -Destination $HotRoot -Force
-    Get-ChildItem $HotRoot -Filter 'devconfig-*.zip' | Sort-Object LastWriteTime -Descending |
-        Select-Object -Skip $KeepHot | Remove-Item -Force -ErrorAction SilentlyContinue
-    Write-Log "G盘热备同步完成 -> $HotRoot" 'OK'
+    try {
+        New-Item -ItemType Directory -Path $HotRoot -Force -ErrorAction Stop | Out-Null
+        Copy-Item -LiteralPath $Pack.Zip -Destination $HotRoot -Force -ErrorAction Stop
+        Copy-Item -LiteralPath (Join-Path $OutDir 'latest.zip') -Destination $HotRoot -Force -ErrorAction Stop
+        Get-ChildItem $HotRoot -Filter 'devconfig-*.zip' | Sort-Object LastWriteTime -Descending |
+            Select-Object -Skip $KeepHot | Remove-Item -Force -ErrorAction SilentlyContinue
+        Write-Log "G盘热备同步完成 -> $HotRoot" 'OK'
+    }
+    catch {
+        Set-BackupFailure "G盘热备同步失败: $($_.Exception.Message)"
+    }
 }
 
 # ============================================================
@@ -242,33 +268,51 @@ function Push-Hot {
 # ============================================================
 function Push-Drive {
     param($Pack)
-    if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) { Write-Log "rclone 未安装，跳过 Drive" 'WARN'; return }
+    if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) {
+        Set-BackupFailure "rclone 未安装，Drive 备份失败"
+        return
+    }
     # 远端解析：默认用 $GDriveRemote，不存在则回退到第一个已配置远端（适配任意命名）
     $remotes = @(& rclone listremotes 2>$null)
     if ($remotes -notcontains $GDriveRemote) {
         if ($remotes.Count) { $GDriveRemote = $remotes[0]; Write-Log "  默认远端不存在，改用 $GDriveRemote" }
-        else { Write-Log "rclone 无已配置远端，跳过 Drive" 'WARN'; return }
+        else {
+            Set-BackupFailure "rclone 无已配置远端，Drive 备份失败"
+            return
+        }
     }
     $lastFile = Join-Path $StateDir 'last-uploaded.sha256'
     $last = if (Test-Path $lastFile) { (Get-Content $lastFile -Raw).Trim() } else { '' }
     if (-not $Force -and $last -eq $Pack.Sha) { Write-Log "内容未变化(sha 相同)，跳过 Drive 上传" 'OK'; return }
 
-    # 连通性预检：代理没开/海外网络不通时优雅跳过（下次触发自动重试，不报错为失败）
+    # 连通性预检：代理没开/海外网络不通时返回失败，让任务计划程序按策略重试。
     & rclone lsd "$GDriveRemote" --max-depth 1 --contimeout 15s --timeout 20s --retries 1 --low-level-retries 2 *> $null
-    if ($LASTEXITCODE -ne 0) { Write-Log "Drive 不可达(代理/海外网络未就绪)，跳过本次，下次触发自动重试" 'WARN'; return }
+    if ($LASTEXITCODE -ne 0) {
+        Set-BackupFailure "Drive 不可达(代理/海外网络未就绪)，本轮失败并交给计划任务重试"
+        return
+    }
 
     $dest = "$GDriveRemote$GDriveFolder"
     Write-Log "rclone 上传 -> $dest/$($Pack.Name) (bwlimit=$BwLimit) ..."
     # 强重试 + 断点续传（rclone copy 幂等：进程被中断后再次运行自动跳过已传文件）
     & rclone copyto $Pack.Zip "$dest/$($Pack.Name)" --bwlimit $BwLimit --transfers 1 --retries 5 --retries-sleep 30s --low-level-retries 20 --timeout 120s
-    if ($LASTEXITCODE -eq 0) {
+    $datedCopyExit = $LASTEXITCODE
+    if ($datedCopyExit -eq 0) {
         & rclone copy (Join-Path $OutDir 'latest.zip') $dest --bwlimit $BwLimit --retries 3 *> $null
-        Set-Content $lastFile $Pack.Sha -Encoding ASCII
-        Set-Content (Join-Path $StateDir 'last-drive-success.txt') (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Encoding ASCII
+        $latestCopyExit = $LASTEXITCODE
+        if ($latestCopyExit -ne 0) {
+            Set-BackupFailure "Drive latest.zip 上传失败 exit=$latestCopyExit（日期包已保留，下次继续）"
+            return
+        }
+        Set-Content $lastFile $Pack.Sha -Encoding ASCII -ErrorAction Stop
+        Set-Content (Join-Path $StateDir 'last-drive-success.txt') (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Encoding ASCII -ErrorAction Stop
         $remote = (& rclone lsf $dest --include 'devconfig-*.zip' 2>$null) | Sort-Object -Descending
         if ($remote.Count -gt $KeepDrive) { $remote | Select-Object -Skip $KeepDrive | ForEach-Object { & rclone deletefile "$dest/$_" *> $null } }
         Write-Log "Drive 上传完成" 'OK'
-    } else { Write-Log "rclone 上传失败 exit=$LASTEXITCODE（部分已传，下次自动续传）" 'ERR' }
+    }
+    else {
+        Set-BackupFailure "rclone 上传失败 exit=$datedCopyExit（部分已传，下次自动续传）"
+    }
 }
 
 # ============================================================
@@ -288,9 +332,21 @@ if ($Tier -contains 'Local' -or $Tier -contains 'Hot') {
     }
     else { Write-Log "无 latest.zip，Drive 需先跑一次 Local" 'ERR'; exit 1 }
 }
-if ($pack) {
+if ($pack -and $overallExitCode -eq 0) {
     if ($Tier -contains 'Hot')   { Push-Hot   $pack }
     if ($Tier -contains 'Drive') { Push-Drive $pack }
 }
-Write-Log "==== 完成 ====" 'OK'
-exit 0
+elseif ($pack) {
+    Write-Log "采集或打包阶段存在失败，保留旧备份并跳过本轮分发" 'WARN'
+}
+else {
+    $overallExitCode = 1
+}
+
+if ($overallExitCode -eq 0) {
+    Write-Log "==== 完成：请求的备份层均成功 ====" 'OK'
+}
+else {
+    Write-Log "==== 失败：至少一个请求的备份层未完成，计划任务应继续重试 ====" 'ERR'
+}
+exit $overallExitCode

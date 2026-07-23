@@ -2,10 +2,12 @@
 .SYNOPSIS
   注册 DevConfig + WeChat 备份的计划任务（幂等，可重复运行）。
 .DESCRIPTION
-  - DevConfigBackup-Local  : 每天 21:05 + 登录后20分钟 -> -Tier Local（仅本地硬盘·零流量·高频保护）
-  - DevConfigBackup-Weekly : 每周日 20:00             -> -Tier Hot,Drive（G盘热备+Drive）
-  - WeChatBackup-Weekly    : 每周六 20:00             -> 微信完整聊天记录增量到G盘热备+Drive（含媒体）
-  说明: H盘是默认锁定的人工冷备，不注册自动写入任务；Drive 依靠 rclone copy 自动跳过已存在文件。
+  - DevConfigBackup-Local        : 每天 21:05 + 登录后20分钟 -> -Tier Local,Hot（本地包+G盘热备）
+  - DevConfigBackup-Drive-Daily  : 每天 22:00               -> -Tier Drive（Google Drive）
+  - WeChatBackup-Hot-Weekly      : 每周六 20:00             -> -Target Hot（G盘热备）
+  - WeChatBackup-Drive-Weekly    : 每周日 20:00             -> -Target Drive（Google Drive）
+  说明: 本地/G 热备与 Drive 拆成独立任务，离线不会阻断本地保护，Drive 失败会返回非零并自动重试。
+  H盘是默认锁定的人工冷备，不注册自动写入任务；Drive 依靠 rclone copy 自动跳过已存在文件。
   以当前用户、仅登录时运行，无需密码与管理员权限。
 .NOTES
   计划任务动作固定走 wscript.exe + VBS hidden launcher，避免 PowerShell 窗口一闪而过。
@@ -15,12 +17,13 @@
 [CmdletBinding()]
 param(
     [string] $DailyAt  = '21:05',
+    [string] $DriveAt  = '22:00',
     [ValidateSet('Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday')]
-    [string] $WeeklyDay = 'Sunday',
-    [string] $WeeklyAt = '20:00',
+    [string] $WeChatHotWeeklyDay = 'Saturday',
+    [string] $WeChatHotWeeklyAt = '20:00',
     [ValidateSet('Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday')]
-    [string] $WeChatWeeklyDay = 'Saturday',
-    [string] $WeChatWeeklyAt = '20:00'
+    [string] $WeChatDriveWeeklyDay = 'Sunday',
+    [string] $WeChatDriveWeeklyAt = '20:00'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,10 +37,6 @@ if (-not (Test-Path $devWrapper)) { throw "找不到 $devWrapper" }
 $launcher = Join-Path $env:WINDIR 'System32\wscript.exe'
 
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive -RunLevel Limited
-function New-Settings([int]$Hours) {
-    New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
-        -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours $Hours)
-}
 function New-Action([string]$Wrapper, [string]$ScriptArgs) {
     New-ScheduledTaskAction -Execute $launcher `
         -Argument "`"$Wrapper`" $ScriptArgs" `
@@ -49,11 +48,27 @@ function Register-T([string]$Name, $Triggers, $Action, $Settings, [string]$Desc)
     Write-Host "  [OK] $Name" -ForegroundColor Green
 }
 
-$s1 = New-Settings 1
-$s4 = New-Settings 4
-# Drive 兜底专用：仅有网络时跑 + 错过自动补跑（Drive 内部还会做代理连通性预检）
-$sNet = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -AllowStartIfOnBatteries `
-            -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+# 本地/G：关机错过后补跑；业务失败返回非零后再重试 3 次，不依赖网络。
+$sLocalHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
+    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 10)
+
+# Drive：仅网络可用时启动；代理或远端失败由脚本返回非零，再由任务重试。
+$sDrive = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
+    -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 15)
+
+$sWeChatHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
+    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 15)
+
+$sWeChatDrive = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 8) `
+    -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 30)
 
 # 重建前尽量清理旧任务（非管理员会遇到部分旧任务拒绝删除；不阻塞后续 -Force 覆盖）
 foreach ($oldTask in @(Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*' -ErrorAction SilentlyContinue)) {
@@ -64,24 +79,27 @@ foreach ($oldTask in @(Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBa
     }
 }
 
-# ① 本地：每天21:05 + 登录后20分钟（桌面机错过晚间窗口时补一份；不碰U盘闪存、不走海外流量）
+# ① 本地 + G 热备：每天21:05 + 登录后20分钟（桌面机错过晚间窗口时补一份；不走海外流量）
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $logonTrigger.Delay = 'PT20M'
 Register-T 'DevConfigBackup-Local' `
     @((New-ScheduledTaskTrigger -Daily -At $DailyAt), $logonTrigger) `
-    (New-Action $devWrapper 'Local') $s1 '配置备份：仅本地（每天/登录·零流量）'
+    (New-Action $devWrapper 'Local,Hot') $sLocalHot '配置备份：本地包+G盘热备（每天/登录·零流量·失败重试3次）'
 
-# ② G盘热备 + Drive：每周日晚上（不以网络作为任务启动条件，确保G盘热备始终先执行）
-Register-T 'DevConfigBackup-Weekly' `
-    (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeeklyDay -At $WeeklyAt) `
-    (New-Action $devWrapper 'Hot,Drive') $s4 '配置备份：G盘热备+Drive（每周晚间）'
+# ② Drive：与本地/G任务分离，离线或远端失败不会把热备链路一起拖住
+Register-T 'DevConfigBackup-Drive-Daily' `
+    (New-ScheduledTaskTrigger -Daily -At $DriveAt) `
+    (New-Action $devWrapper 'Drive') $sDrive '配置备份：Drive增量（每天·有网才跑·失败重试5次）'
 
-# ③ 微信聊天记录：每周六晚上增量到G盘热备+Drive
+# ③ 微信聊天记录：G 热备与 Drive 分开调度、分别报告结果
 if (Test-Path $wxScript) {
     if (-not (Test-Path $wxWrapper)) { throw "找不到 $wxWrapper" }
-    Register-T 'WeChatBackup-Weekly' `
-        (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeChatWeeklyDay -At $WeChatWeeklyAt) `
-        (New-Action $wxWrapper 'Hot,Drive') $s4 '微信聊天记录每周增量到G盘热备+Drive'
+    Register-T 'WeChatBackup-Hot-Weekly' `
+        (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeChatHotWeeklyDay -At $WeChatHotWeeklyAt) `
+        (New-Action $wxWrapper 'Hot') $sWeChatHot '微信聊天记录：每周增量到G盘热备（失败重试3次）'
+    Register-T 'WeChatBackup-Drive-Weekly' `
+        (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeChatDriveWeeklyDay -At $WeChatDriveWeeklyAt) `
+        (New-Action $wxWrapper 'Drive') $sWeChatDrive '微信聊天记录：每周增量到Drive（有网才跑·失败重试5次）'
 }
 
 Write-Host "`n已注册的任务：" -ForegroundColor Cyan
