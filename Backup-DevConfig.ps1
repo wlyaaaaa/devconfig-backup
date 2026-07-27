@@ -287,20 +287,25 @@ function Push-Drive {
     $last = if (Test-Path $lastFile) { (Get-Content $lastFile -Raw).Trim() } else { '' }
     if (-not $Force -and $last -eq $Pack.Sha) { Write-Log "内容未变化(sha 相同)，跳过 Drive 上传" 'OK'; return }
 
-    # 连通性预检：代理没开/海外网络不通时返回失败，让任务计划程序按策略重试。
-    & rclone lsd "$GDriveRemote" --max-depth 1 --contimeout 15s --timeout 20s --retries 1 --low-level-retries 2 *> $null
-    if ($LASTEXITCODE -ne 0) {
-        Set-BackupFailure "Drive 不可达(代理/海外网络未就绪)，本轮失败并交给计划任务重试"
+    # 连通性预检：容忍代理冷启动和 API 瞬态抖动；仅记录有界类别，不把原始错误写入日志。
+    $preflight = Invoke-RcloneDrivePreflight -Remote $GDriveRemote
+    if (-not $preflight.Success) {
+        Set-BackupFailure "Drive 预检失败 attempts=$($preflight.Attempts) category=$($preflight.Category) exit=$($preflight.ExitCode)，交给计划任务重试"
         return
     }
+    Write-Log "Drive 预检通过 attempts=$($preflight.Attempts)" 'OK'
 
     $dest = "$GDriveRemote$GDriveFolder"
     Write-Log "rclone 上传 -> $dest/$($Pack.Name) (bwlimit=$BwLimit) ..."
     # 强重试 + 断点续传（rclone copy 幂等：进程被中断后再次运行自动跳过已传文件）
-    & rclone copyto $Pack.Zip "$dest/$($Pack.Name)" --bwlimit $BwLimit --transfers 1 --retries 5 --retries-sleep 30s --low-level-retries 20 --timeout 120s
+    & rclone copyto $Pack.Zip "$dest/$($Pack.Name)" --bwlimit $BwLimit --transfers 1 `
+        --tpslimit 1 --tpslimit-burst 1 --drive-pacer-min-sleep 1s --drive-pacer-burst 1 `
+        --retries 5 --retries-sleep 30s --low-level-retries 20 --timeout 120s
     $datedCopyExit = $LASTEXITCODE
     if ($datedCopyExit -eq 0) {
-        & rclone copy (Join-Path $OutDir 'latest.zip') $dest --bwlimit $BwLimit --retries 3 *> $null
+        & rclone copy (Join-Path $OutDir 'latest.zip') $dest --bwlimit $BwLimit `
+            --tpslimit 1 --tpslimit-burst 1 --drive-pacer-min-sleep 1s --drive-pacer-burst 1 `
+            --retries 3 *> $null
         $latestCopyExit = $LASTEXITCODE
         if ($latestCopyExit -ne 0) {
             Set-BackupFailure "Drive latest.zip 上传失败 exit=$latestCopyExit（日期包已保留，下次继续）"
@@ -308,7 +313,9 @@ function Push-Drive {
         }
         Set-Content $lastFile $Pack.Sha -Encoding ASCII -ErrorAction Stop
         Set-Content (Join-Path $StateDir 'last-drive-success.txt') (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Encoding ASCII -ErrorAction Stop
-        $remote = (& rclone lsf $dest --include 'devconfig-*.zip' 2>$null) | Sort-Object -Descending
+        $remote = (& rclone lsf $dest --include 'devconfig-*.zip' `
+            --tpslimit 1 --tpslimit-burst 1 --drive-pacer-min-sleep 1s --drive-pacer-burst 1 2>$null) |
+            Sort-Object -Descending
         if ($remote.Count -gt $KeepDrive) { $remote | Select-Object -Skip $KeepDrive | ForEach-Object { & rclone deletefile "$dest/$_" *> $null } }
         Write-Log "Drive 上传完成" 'OK'
     }

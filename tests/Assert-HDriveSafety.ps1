@@ -76,7 +76,8 @@ Assert-Text 'scheduled backup failures are retried and hidden launchers preserve
     $wechatWrapperText -match 'WScript\.Quit exitCode'
 )
 Assert-Text 'Drive skip and upload failures propagate to Task Scheduler' (
-    $devText -match 'Set-BackupFailure "Drive 不可达' -and
+    $devText -match 'Set-BackupFailure "Drive 预检失败' -and
+    $devText -match '\$preflight\.Category' -and
     $devText -match 'exit \$overallExitCode' -and
     $wechatText -match '\$overallExitCode = 1' -and
     $wechatText -match 'exit \$overallExitCode'

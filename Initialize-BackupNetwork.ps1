@@ -65,3 +65,77 @@ function Initialize-BackupNetwork {
         return $false
     }
 }
+
+function Get-RcloneFailureCategory {
+    [CmdletBinding()]
+    param([string[]]$Output)
+
+    $message = ($Output -join "`n").ToLowerInvariant()
+    if ($message -match 'proxyconnect|proxy connect|connection refused.*127\.0\.0\.1|connectex.*127\.0\.0\.1') {
+        return 'proxy_connect'
+    }
+    if ($message -match 'context deadline exceeded|i/o timeout|timed out|timeout awaiting response') {
+        return 'timeout'
+    }
+    if ($message -match 'invalid_grant|invalid credentials|oauth|token.*expired|unauthorized|401') {
+        return 'oauth_auth'
+    }
+    if ($message -match 'rate.?limit|too many requests|quota exceeded|429') {
+        return 'rate_limit'
+    }
+    if ($message -match 'no such host|network is unreachable|connection reset|connection closed|tls handshake') {
+        return 'network'
+    }
+    if ($message -match 'didn.t find section|failed to create file system|config file') {
+        return 'config'
+    }
+    if ($message -match 'server returned|service unavailable|internal server error|bad gateway|502|503|504') {
+        return 'remote_api'
+    }
+    return 'unknown'
+}
+
+function Invoke-RcloneDrivePreflight {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Remote,
+        [ValidateRange(1, 10)]
+        [int]$Attempts = 5,
+        [ValidateRange(0, 300)]
+        [int]$DelaySeconds = 15,
+        [string]$ConnectTimeout = '20s',
+        [string]$Timeout = '60s'
+    )
+
+    $lastExitCode = 1
+    $lastCategory = 'unknown'
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        $output = @(& rclone lsd $Remote --max-depth 1 --contimeout $ConnectTimeout --timeout $Timeout `
+            --retries 1 --low-level-retries 3 `
+            --tpslimit 0.5 --tpslimit-burst 1 `
+            --drive-pacer-min-sleep 2s --drive-pacer-burst 1 2>&1 |
+            ForEach-Object { $_.ToString() })
+        $lastExitCode = $LASTEXITCODE
+        if ($lastExitCode -eq 0) {
+            return [pscustomobject]@{
+                Success  = $true
+                Attempts = $attempt
+                ExitCode = 0
+                Category = 'none'
+            }
+        }
+
+        $lastCategory = Get-RcloneFailureCategory -Output $output
+        if ($attempt -lt $Attempts -and $DelaySeconds -gt 0) {
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+
+    return [pscustomobject]@{
+        Success  = $false
+        Attempts = $Attempts
+        ExitCode = $lastExitCode
+        Category = $lastCategory
+    }
+}

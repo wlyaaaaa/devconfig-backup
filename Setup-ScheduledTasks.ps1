@@ -56,7 +56,7 @@ $sLocalHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBat
 $sDrive = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
-    -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 15)
+    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 15)
 
 $sWeChatHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
@@ -87,7 +87,7 @@ Register-T 'DevConfigBackup-Local' `
 # ② Drive：与本地/G任务分离，离线或远端失败不会把热备链路一起拖住
 Register-T 'DevConfigBackup-Drive-Daily' `
     (New-ScheduledTaskTrigger -Daily -At $DriveAt) `
-    (New-Action $devWrapper 'Drive') $sDrive '配置备份：Drive增量（每天·有网才跑·失败重试5次）'
+    (New-Action $devWrapper 'Drive') $sDrive '配置备份：Drive增量（每天·有网才跑·失败重试3次）'
 
 # ③ 微信聊天记录：G 热备与 Drive 分开调度、分别报告结果
 if (Test-Path $wxScript) {
