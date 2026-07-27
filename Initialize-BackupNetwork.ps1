@@ -38,31 +38,40 @@ function Resolve-BackupProxySettings {
 
 function Initialize-BackupNetwork {
     [CmdletBinding()]
-    param()
-
-    $hasHttpProxy = [Environment]::GetEnvironmentVariable('HTTP_PROXY', 'Process') -or
-                    [Environment]::GetEnvironmentVariable('http_proxy', 'Process')
-    $hasHttpsProxy = [Environment]::GetEnvironmentVariable('HTTPS_PROXY', 'Process') -or
-                     [Environment]::GetEnvironmentVariable('https_proxy', 'Process')
-    if ($hasHttpProxy -and $hasHttpsProxy) { return $false }
+    param(
+        [AllowNull()]
+        [string]$ProxyServerOverride
+    )
 
     try {
-        $settings = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
-        if ([int]$settings.ProxyEnable -ne 1) { return $false }
-        $resolved = Resolve-BackupProxySettings ([string]$settings.ProxyServer)
-        if (-not $resolved) { return $false }
+        if ($PSBoundParameters.ContainsKey('ProxyServerOverride')) {
+            $proxyServer = $ProxyServerOverride
+            $source = 'override'
+        } else {
+            $settings = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
+            if ([int]$settings.ProxyEnable -ne 1) {
+                return [pscustomobject]@{ Applied = $false; Source = 'direct'; Http = $null; Https = $null }
+            }
+            $proxyServer = [string]$settings.ProxyServer
+            $source = 'windows_user_proxy'
+        }
 
-        if (-not $hasHttpProxy -and $resolved.Http) {
-            [Environment]::SetEnvironmentVariable('HTTP_PROXY', $resolved.Http, 'Process')
-            [Environment]::SetEnvironmentVariable('http_proxy', $resolved.Http, 'Process')
+        $resolved = Resolve-BackupProxySettings $proxyServer
+        if (-not $resolved) {
+            return [pscustomobject]@{ Applied = $false; Source = 'unavailable'; Http = $null; Https = $null }
         }
-        if (-not $hasHttpsProxy -and $resolved.Https) {
-            [Environment]::SetEnvironmentVariable('HTTPS_PROXY', $resolved.Https, 'Process')
-            [Environment]::SetEnvironmentVariable('https_proxy', $resolved.Https, 'Process')
+
+        # Task Scheduler can retain stale process-level proxy variables. The current
+        # user's live Windows proxy is the authority for scheduled Drive backups.
+        foreach ($name in @('HTTP_PROXY', 'http_proxy')) {
+            [Environment]::SetEnvironmentVariable($name, $resolved.Http, 'Process')
         }
-        return $true
+        foreach ($name in @('HTTPS_PROXY', 'https_proxy')) {
+            [Environment]::SetEnvironmentVariable($name, $resolved.Https, 'Process')
+        }
+        return [pscustomobject]@{ Applied = $true; Source = $source; Http = $resolved.Http; Https = $resolved.Https }
     } catch {
-        return $false
+        return [pscustomobject]@{ Applied = $false; Source = 'unavailable'; Http = $null; Https = $null }
     }
 }
 
@@ -83,6 +92,12 @@ function Get-RcloneFailureCategory {
     if ($message -match 'rate.?limit|too many requests|quota exceeded|429') {
         return 'rate_limit'
     }
+    if ($message -match 'accessnotconfigured|api.*not.*enabled|has not been used.*project') {
+        return 'api_config'
+    }
+    if ($message -match 'forbidden|insufficient permission|permission denied|403') {
+        return 'permission'
+    }
     if ($message -match 'no such host|network is unreachable|connection reset|connection closed|tls handshake') {
         return 'network'
     }
@@ -95,34 +110,82 @@ function Get-RcloneFailureCategory {
     return 'unknown'
 }
 
+function ConvertTo-RcloneSafeDiagnostic {
+    [CmdletBinding()]
+    param([string[]]$Output)
+
+    $line = @(
+        $Output |
+            Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_) -and
+                $_ -notmatch '^\s*[\{\}\[\],]\s*$' -and
+                $_ -match '(?i)error|failed|fatal|critical|warning|unknown|usage'
+            } |
+            Select-Object -Last 1
+    )
+    if ($line.Count -eq 0) {
+        $line = @(
+            $Output |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_) -and
+                    $_ -notmatch '^\s*[\{\}\[\],]\s*$'
+                } |
+                Select-Object -Last 1
+        )
+    }
+    if ($line.Count -eq 0) { return 'no_output' }
+    $safe = [string]$line[0]
+    $safe = $safe -replace 'https?://\S+', '[url]'
+    $safe = $safe -replace '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+', '[account]'
+    $safe = $safe -replace '(?i)(token|code|secret|state)=\S+', '$1=[redacted]'
+    $safe = $safe -replace '(?i)\b[A-Za-z0-9_-]{24,}\b', '[redacted]'
+    $safe = $safe -replace '(?i)\b[A-Z]:\\[^""\r\n]+', '[path]'
+    if ($safe.Length -gt 240) { $safe = $safe.Substring(0, 240) }
+    return $safe
+}
+
 function Invoke-RcloneDrivePreflight {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Remote,
         [ValidateRange(1, 10)]
-        [int]$Attempts = 5,
+        [int]$Attempts = 3,
         [ValidateRange(0, 300)]
-        [int]$DelaySeconds = 15,
+        [int]$DelaySeconds = 5,
         [string]$ConnectTimeout = '20s',
-        [string]$Timeout = '60s'
+        [string]$Timeout = '45s'
     )
 
-    $lastExitCode = 1
+    $rcloneCommand = Get-Command rclone -ErrorAction SilentlyContinue
+    $rclonePath = if ($rcloneCommand) { [string]$rcloneCommand.Source } else { 'unavailable' }
+    $configOutput = @(& rclone config file 2>&1 | ForEach-Object { $_.ToString() })
+    $configPath = if ($LASTEXITCODE -eq 0 -and $configOutput.Count -gt 0) {
+        [string]$configOutput[-1]
+    } else {
+        'unavailable'
+    }
+
+    $lastNativeExitCode = 1
     $lastCategory = 'unknown'
+    $output = @()
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-        $output = @(& rclone lsd $Remote --max-depth 1 --contimeout $ConnectTimeout --timeout $Timeout `
+        $output = @(& rclone about $Remote --json --contimeout $ConnectTimeout --timeout $Timeout `
             --retries 1 --low-level-retries 3 `
-            --tpslimit 0.5 --tpslimit-burst 1 `
-            --drive-pacer-min-sleep 2s --drive-pacer-burst 1 2>&1 |
+            --tpslimit 2 --tpslimit-burst 2 `
+            --drive-pacer-min-sleep 1s --drive-pacer-burst 2 2>&1 |
             ForEach-Object { $_.ToString() })
-        $lastExitCode = $LASTEXITCODE
-        if ($lastExitCode -eq 0) {
+        $lastNativeExitCode = $LASTEXITCODE
+        if ($lastNativeExitCode -eq 0) {
             return [pscustomobject]@{
                 Success  = $true
                 Attempts = $attempt
                 ExitCode = 0
                 Category = 'none'
+                Diagnostic = 'none'
+                OutputLines = $output.Count
+                RclonePath = $rclonePath
+                ConfigPath = $configPath
             }
         }
 
@@ -135,7 +198,11 @@ function Invoke-RcloneDrivePreflight {
     return [pscustomobject]@{
         Success  = $false
         Attempts = $Attempts
-        ExitCode = $lastExitCode
+        ExitCode = $lastNativeExitCode
         Category = $lastCategory
+        Diagnostic = ConvertTo-RcloneSafeDiagnostic -Output $output
+        OutputLines = $output.Count
+        RclonePath = $rclonePath
+        ConfigPath = $configPath
     }
 }
