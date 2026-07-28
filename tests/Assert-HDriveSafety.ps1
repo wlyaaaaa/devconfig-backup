@@ -83,9 +83,21 @@ Assert-Text 'Drive skip and upload failures propagate to Task Scheduler' (
     $wechatText -match 'exit \$overallExitCode'
 )
 Assert-Text 'README routes cold backup through PCConfig G to H' ($readmeText -match 'Invoke-HotToColdBackup.ps1' -and $readmeText -match 'G.*H')
+Assert-Text 'Password Center Recovery Set remains an explicit PCConfig cold-backup set' (
+    (Get-Content -LiteralPath 'E:\PCConfig\tools\Invoke-HotToColdBackup.ps1' -Raw) -match
+        "'PasswordCenterRecoverySet'" -and
+    (Get-Content -LiteralPath 'E:\PCConfig\tools\Invoke-HotToColdBackup.ps1' -Raw) -match
+        'scheduled_task_allowed = \$false'
+)
 Assert-Text 'default DevConfig backup excludes Codex session history and log database' (
     $sourcesText -match "'sessions'" -and
     $sourcesText -match "'logs_2\.sqlite\*'" -and
     $devText -match 'HistoryFiles'
+)
+Assert-Text 'default DevConfig backup excludes plaintext secret staging' (
+    $sourcesText -match "'\.env', '\.env\.\*'" -and
+    $sourcesText -match "'auth\.json', 'client_secret\.json'" -and
+    $sourcesText -match "'memory-backup', 'secrets-backup'" -and
+    $sourcesText -match 'SpecialFiles\s*=\s*@\(\)'
 )
 Assert-Text 'old H backup path has no residual references' ($allText -notmatch 'H:\\My_Digital_Backup')

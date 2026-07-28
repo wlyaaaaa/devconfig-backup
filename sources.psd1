@@ -96,10 +96,9 @@
         @{ Src = 'E:\Scoop\persist'; Name = 'Scoop-persist' }
     )
 
-    # 特殊单文件（相对 home）
-    SpecialFiles = @(
-        '.openclaw\workspace\client_secret.json'
-    )
+    # 特殊单文件（相对 home）。凭据文件由 Password Center 独立恢复，
+    # 不进入 DevConfig 明文 staging。
+    SpecialFiles = @()
 
     # 始终排除的目录名（robocopy /XD）
     ExcludeDirs = @(
@@ -108,12 +107,15 @@
         'cache', 'caches', 'Cache', 'Cache_Data', 'GPUCache', 'DawnCache',
         'blob_storage', 'Crashpad', 'Code Cache', 'CacheStorage', 'Service Worker',
         'Session Storage', 'VideoDecodeStats', 'Shared Dictionary',
-        'logs', '.tmp', 'tmp', 'temp', '.git', 'History', 'OcrModel'
+        'logs', '.tmp', 'tmp', 'temp', '.git', 'History', 'OcrModel',
+        'memory-backup', 'secrets-backup'
     )
 
     # 始终排除的文件名（robocopy /XF，可重下的大数据文件）
     ExcludeFiles = @(
         '*.tmp',
+        '.env', '.env.*',
+        'auth.json', 'client_secret.json',
         'geoip.dat', 'geosite.dat', 'Country.mmdb',
         'Cookies', 'Cookies-journal', 'History', 'History-journal',
         'Favicons', 'Favicons-journal', 'Visited Links',
