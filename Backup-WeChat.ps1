@@ -1,11 +1,12 @@
 ﻿<#
 .SYNOPSIS
-  微信聊天记录增量备份（独立于 DevConfig 配置包）。
+  微信原应用数据增量备份（独立于 DevConfig 配置包）。
 .DESCRIPTION
-  仅备份"历史聊天记录"(msg/db_storage/business/config/resource/all_users/old_backup)，
-  剔除缓存/临时/小程序运行时(cache/temp/WMPF/apm_record)。
-  增量方式：robocopy /E（只增不删，历史永不丢失）+ rclone copy（Drive 只传新增/改动）。
-  首次运行为全量(~38GB)；之后仅复制变化的库与新增媒体。
+  按既定 source selection 原样复制 xwechat_files 的应用数据，剔除缓存/临时/小程序运行时
+  (cache/temp/WMPF/apm_record)。本地/G 热备路径不打开、不解密、不读取聊天、账号或媒体正文。
+  增量方式：robocopy /E（只增不删）+ rclone copy（Drive 只传新增/改动）。
+  首次运行为全量(~38GB)；之后仅复制变化的库与新增媒体。复制/远端校验只能证明备份
+  文件传输结果，不能证明微信在复制时未写入，也不能替代日后的官方客户端恢复验收。
   【Drive 流量安全】① 绝不直传微信源目录(运行时数据库边传边改→反复重传烧流量)，
     而是先 robocopy 到本地静态快照再从快照上传；② 上云排除 SQLite 运行时文件
     (.db-wal/.db-shm/.db-journal，恢复时自动重建)；③ rclone copy 自动跳过已上传文件。
@@ -13,7 +14,7 @@
   pwsh -File Backup-WeChat.ps1 -List           # 干跑，只估算将复制的量（强烈建议先跑）
   pwsh -File Backup-WeChat.ps1 -Target Hot      # 增量到G盘热备（零流量，自动任务主力）
   pwsh -File Backup-WeChat.ps1 -Target Local    # 增量到本地另一盘
-  pwsh -File Backup-WeChat.ps1 -Target Drive    # 完整聊天记录增量到 Google Drive（含媒体，默认8G封顶）
+  pwsh -File Backup-WeChat.ps1 -Target Drive    # 完整原应用数据增量到 Google Drive（含媒体，默认8G封顶）
   pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly # 仅数据库上云，媒体只留U盘（省流量模式）
 .NOTES
   38GB 首次上传 Drive 很费海外流量；完成后 rclone copy 会自动跳过已存在文件，后续只传增量。
@@ -110,12 +111,12 @@ foreach ($t in $Target) {
                 break
             }
             $dest = "$GDriveRemote$GDriveFolder"
-            # 默认上传完整聊天历史（db + 媒体），rclone copy 会自动跳过 Drive 已有文件。
+            # 默认上传完整原应用数据（db + 媒体），rclone copy 会自动跳过 Drive 已有文件。
             # 只有显式 -DbOnly 时才只上传 db_storage，用作临时省流量模式。
             if (-not $DbOnly -or $DriveFull) {
                 $filter  = $exclDirs | ForEach-Object { '--exclude'; "$_/**" }
                 $filter += @('--exclude','*.db-wal','--exclude','*.db-shm','--exclude','*.db-journal')
-                Say "  Drive范围: 完整聊天历史(db+媒体)" 'Yellow'
+                Say "  Drive范围: 完整原应用数据(db+媒体)" 'Yellow'
             } else {
                 # 只收 db_storage 下的库: 先排运行时文件, 再只收 db_storage, 其余(媒体等)全排
                 $filter = @('--filter','- *.db-wal','--filter','- *.db-shm','--filter','- *.db-journal',
@@ -158,24 +159,12 @@ foreach ($t in $Target) {
                 if ($checkExit -ne 0) { $overallExitCode = 1 }
             }
 
-            # 方案A: 上传解密密钥(几KB,恢复命门)——明文(用户授权,Drive 高级保护可信)
-            $keyDir = 'E:\WeChatBackup\_KEYS'
-            if (Test-Path $keyDir) {
-                $keyDest = "$GDriveRemote" + "Backups/WeChat/_KEYS"
-                $kc = @($keyDir, $keyDest, '--checksum', '--log-file', $log, '--log-level', 'INFO')
-                if ($List) { $kc += '--dry-run' }
-                Say "上传密钥 -> $keyDest $(if($List){'(干跑)'})" 'Cyan'
-                & rclone copy @kc
-                $keyExit = $LASTEXITCODE
-                Say "  密钥上传 exit=$keyExit" $(if($keyExit -eq 0){'Green'}else{'Red'})
-                if ($keyExit -ne 0) { $overallExitCode = 1 }
-            } else { Say "  未找到密钥目录 $keyDir，跳过密钥上传" 'Yellow' }
         }
         default { Say "未知 Target: $t" 'Yellow' }
     }
 }
 if ($overallExitCode -eq 0) {
-    Say "==== 完成：上传与内容校验均通过 ====" 'Green'
+    Say "==== 完成：备份复制与远端内容校验通过；这不等于官方微信已恢复可用 ====" 'Green'
 } else {
     Say "==== 失败：上传或内容校验未通过，下一次任务应继续重试 ====" 'Red'
 }

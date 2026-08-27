@@ -1,142 +1,279 @@
-﻿<#
+<#
 .SYNOPSIS
-  微信聊天记录恢复/合成（方案A的恢复侧）。
+  Restore a native WeChat application-data backup for use by the official client.
 .DESCRIPTION
-  默认把「U盘(媒体全量) + Google Drive(db_storage+密钥)」合成为完整的 xwechat_files，
-  也可以使用 -DriveOnly 直接从 Google Drive 恢复数据库、媒体和密钥，再用密钥解密查看。
-  默认恢复到本机微信目录。默认模式优先用 U盘(零流量、全量)，Drive 仅补更新的 db。
+  The default is a read-only plan and preflight.  Copying requires -Execute.
+  This script copies the backup's native xwechat_files layout; it does not open
+  databases, read accounts, extract keys, decrypt data, launch WeChat, or claim
+  that a successful copy has restored the application.
+
+  Before an overwrite, an existing non-empty target is moved beside itself as a
+  rollback directory.  That rollback is kept until the user has opened the
+  official client and confirmed the intended account and history themselves.
 .EXAMPLE
-  pwsh -File Restore-WeChat.ps1 -List          # 干跑,只看将合成什么,不实际写
-  pwsh -File Restore-WeChat.ps1                 # 合成到默认本机目录
-  pwsh -File Restore-WeChat.ps1 -Target D:\wx_restore   # 合成到指定目录
-  pwsh -File Restore-WeChat.ps1 -DriveOnly -Target D:\wx_restore # 仅从 Drive 全量恢复
-.NOTES
-  【恢复原理】db 是 SQLCipher 加密;密钥已固化在 _KEYS(亦泊 len133/WeFlow格式,root len64/wx_key裸hex)。
-  合成完数据后,用 WeFlow 或 wx_key「打开指定 db 路径 + 填入对应 decryptKey」即可解密查看/导出。
-  密钥一旦固化,解密只需「密钥+db文件」,不再依赖原设备 IMEI——任何机器都能解。
+  powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1
+  # Read-only preflight using the G: hot backup.  No files are changed.
+
+.EXAMPLE
+  powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -Execute
+  # Copy into an empty default target after the official client has been closed.
+
+.EXAMPLE
+  powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -Execute -ReplaceExisting
+  # Preserve a non-empty target as a sibling .pre-restore-* rollback, then copy.
+
+.EXAMPLE
+  powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -DriveOnly -Execute -Target E:\restore\xwechat_files
+  # Legacy compatibility path only.  Its remote configuration is not validated by this local/G recovery workflow.
 #>
 [CmdletBinding()]
 param(
-    [string] $Target       = 'E:\Documents\xwechat_files',
-    [string] $UsbRoot      = '',
-    [string] $UsbKeys      = '',
+    [string] $Target = 'E:\Documents\xwechat_files',
+    [Alias('UsbRoot', 'SourceRoot')]
+    [string] $BackupRoot = 'G:\80_Backup\WeChat\xwechat_files',
     [string] $GDriveRemote = 'gdrive:',
     [string] $GDriveFolder = 'Backups/WeChat/xwechat_files',
     [switch] $DriveOnly,
-    [switch] $List
+    [Alias('List')]
+    [switch] $Plan,
+    [switch] $Execute,
+    [switch] $ReplaceExisting,
+    [switch] $PassThru
 )
-$ErrorActionPreference = 'Continue'
-$restoreExitCode = 0
-$autoBackupDirName = '80_' + (-join @([char]0x81EA, [char]0x52A8, [char]0x5907, [char]0x4EFD, [char]0x533A))
-$usbWeChatRoot = Join-Path (Join-Path 'H:\' $autoBackupDirName) 'WeChat'
-if ([string]::IsNullOrWhiteSpace($UsbRoot)) { $UsbRoot = Join-Path $usbWeChatRoot 'xwechat_files' }
-if ([string]::IsNullOrWhiteSpace($UsbKeys)) { $UsbKeys = Join-Path $usbWeChatRoot '_KEYS' }
-function Say($m,$c='Gray'){ Write-Host ("{0} {1}" -f (Get-Date -Format 'HH:mm:ss'),$m) -ForegroundColor $c }
 
-Say "==== WeChat 恢复合成 -> $Target $(if($List){'(干跑)'}) ====" 'Cyan'
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'WeChat-Recovery.Common.ps1')
 
-# 1) U盘媒体+db 全量合成(零流量、最快、最全) —— 主力
-if ($DriveOnly) {
-    Say "① 已启用 DriveOnly，跳过 U盘全量合成" 'Cyan'
-} elseif (Test-Path $UsbRoot) {
-    $a = @($UsbRoot, $Target, '/E','/R:1','/W:1','/MT:16','/NDL','/NP')
-    if ($List) { $a += '/L' }
-    Say "① 从 U盘合成全量(媒体+db): $UsbRoot" 'Green'
-    & robocopy @a | Out-Null
-    $usbExit = $LASTEXITCODE
-    Say "   robocopy exit=$usbExit (0-7 正常)"
-    if ($usbExit -gt 7) { $restoreExitCode = 1 }
-} else {
-    Say "① U盘不在($UsbRoot)——跳过,只能靠 Drive(将缺媒体)" 'Yellow'
+function Say {
+    param([string] $Message, [string] $Color = 'Gray')
+    Write-Host ('{0} {1}' -f (Get-Date -Format 'HH:mm:ss'), $Message) -ForegroundColor $Color
 }
 
-# 2) Drive 补更新的 db_storage，或 DriveOnly 全量恢复
-if (Get-Command rclone -ErrorAction SilentlyContinue) {
+function Get-NativeWeChatDriveSource {
+    param([string] $Remote, [string] $Folder)
+
+    $normalizedRemote = $Remote.Trim()
+    if ([string]::IsNullOrWhiteSpace($normalizedRemote)) {
+        throw 'A Drive remote is required for -DriveOnly.'
+    }
+    if (-not $normalizedRemote.EndsWith(':')) {
+        $normalizedRemote += ':'
+    }
+    return $normalizedRemote + $Folder.Trim('/').Trim('\')
+}
+
+function Resolve-ExistingWeChatDriveRemote {
+    param([string] $Preferred)
+
     $remotes = @(& rclone listremotes 2>$null)
-    if ($remotes -and ($remotes -notcontains $GDriveRemote)) { $GDriveRemote = $remotes[0] }
-    & rclone lsd "$GDriveRemote" --max-depth 1 --contimeout 15s --timeout 20s --retries 1 *> $null
-    if ($LASTEXITCODE -eq 0) {
-        $src = "$GDriveRemote$GDriveFolder"
-        if ($DriveOnly) {
-            $restoreExcludes = @(
-                '--exclude','cache/**',
-                '--exclude','Cache/**',
-                '--exclude','temp/**',
-                '--exclude','Temp/**',
-                '--exclude','WMPF/**',
-                '--exclude','apm_record/**',
-                '--exclude','crash/**',
-                '--exclude','FileStorageTemp/**',
-                '--exclude','recommend_cover/**',
-                '--exclude','*.db-wal',
-                '--exclude','*.db-shm',
-                '--exclude','*.db-journal'
-            )
-            $rc = @($src, $Target, '--checksum','--transfers','8','--checkers','16','--fast-list') + $restoreExcludes
-        } else {
-            $rc = @($src, $Target, '--include','**/db_storage/**','--exclude','*','--update','--transfers','8','--checkers','16','--fast-list')
-        }
-        if ($List) { $rc += '--dry-run' }
-        if ($DriveOnly) {
-            $restoreLabel = '② 从 Drive 恢复完整聊天历史(数据库+媒体)'
-        } else {
-            $restoreLabel = '② 从 Drive 补更新的数据库(db_storage)'
-        }
-        Say $restoreLabel 'Green'
-        & rclone copy @rc
-        $driveExit = $LASTEXITCODE
-        Say "   rclone exit=$driveExit"
-        if ($driveExit -ne 0) { $restoreExitCode = 1 }
-    } else {
-        Say "② Drive 不可达(代理没开?)——跳过,U盘的 db 已够用" 'Yellow'
-        if ($DriveOnly) { $restoreExitCode = 1 }
+    if ($remotes -and ($remotes -notcontains $Preferred)) {
+        return $remotes[0]
     }
-} else {
-    Say "② rclone 未安装——跳过 Drive 补传" 'Yellow'
-    if ($DriveOnly) { $restoreExitCode = 1 }
+    return $Preferred
 }
 
-# 3) 释放密钥到恢复目录旁,并给出解密指引
-$keySrc = $null
-foreach ($k in @($UsbKeys, 'E:\WeChatBackup\_KEYS')) {
-    if (Test-Path $k) { $latest = Get-ChildItem $k -Filter 'wechat-keys-COMPLETE-*.json' -EA SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1; if ($latest) { $keySrc = $latest.FullName; break } }
-}
-if (-not $keySrc -and $DriveOnly -and (Get-Command rclone -ErrorAction SilentlyContinue) -and -not $List) {
-    $keyStage = Join-Path ([IO.Path]::GetTempPath()) ('wechat-keys-' + [guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $keyStage -Force | Out-Null
-    $keyRemote = "$GDriveRemote" + 'Backups/WeChat/_KEYS'
-    & rclone copy $keyRemote $keyStage --include 'wechat-keys-COMPLETE-*.json' --checksum --fast-list
-    $keyDriveExit = $LASTEXITCODE
-    if ($keyDriveExit -eq 0) {
-        $latest = Get-ChildItem $keyStage -Filter 'wechat-keys-COMPLETE-*.json' -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 1
-        if ($latest) { $keySrc = $latest.FullName }
-    } else {
-        $restoreExitCode = 1
-        Say "③ 从 Drive 下载密钥失败，exit=$keyDriveExit" 'Red'
+function Invoke-NativeWeChatDriveCopy {
+    param(
+        [string] $Remote,
+        [string] $Folder,
+        [string] $Destination
+    )
+
+    if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) {
+        throw 'rclone is required for -DriveOnly, but it is not available on PATH.'
+    }
+
+    $destinationState = Assert-NativeWeChatTargetPath -Target $Destination
+    New-Item -ItemType Directory -Path $destinationState.Path -Force -ErrorAction Stop | Out-Null
+    $resolvedRemote = Resolve-ExistingWeChatDriveRemote -Preferred $Remote
+    $source = Get-NativeWeChatDriveSource -Remote $resolvedRemote -Folder $Folder
+    $excludes = @(
+        '--exclude', 'cache/**',
+        '--exclude', 'Cache/**',
+        '--exclude', 'temp/**',
+        '--exclude', 'Temp/**',
+        '--exclude', 'WMPF/**',
+        '--exclude', 'apm_record/**',
+        '--exclude', 'crash/**',
+        '--exclude', 'FileStorageTemp/**',
+        '--exclude', 'recommend_cover/**',
+        '--exclude', '*.db-wal',
+        '--exclude', '*.db-shm',
+        '--exclude', '*.db-journal'
+    )
+    $arguments = @('copy', $source, $destinationState.Path, '--checksum', '--transfers', '8', '--checkers', '16', '--fast-list') + $excludes
+    & rclone @arguments
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "rclone failed while copying the native WeChat backup (exit=$exitCode)."
+    }
+
+    return [pscustomobject]@{
+        Method = 'rclone'
+        ExitCode = $exitCode
     }
 }
-if ($keySrc -and -not $List) {
-    $keyDst = Join-Path (Split-Path $Target -Parent) ('_WeChat_KEYS_' + (Split-Path $keySrc -Leaf))
-    Copy-Item -LiteralPath $keySrc -Destination $keyDst -Force
-    Say "③ 密钥已就位: $keyDst" 'Green'
-} elseif ($keySrc) { Say "③ 密钥可用: $keySrc (干跑不复制)" 'Green' }
-else {
-    Say "③ 未找到密钥文件(_KEYS\wechat-keys-COMPLETE-*.json)!没有密钥无法解密" 'Red'
-    $restoreExitCode = 1
+
+function Write-NativeWeChatPreflight {
+    param(
+        $TargetState,
+        $ClientState,
+        [object[]] $ClientCandidates,
+        [string] $SourceDescription,
+        [string[]] $ExecutionBlockers
+    )
+
+    Say 'MODE=PLAN: no application data is copied or changed.' 'Cyan'
+    Say "Backup source: $SourceDescription"
+    Say ("Target: {0}; exists={1}; directory={2}; nonEmpty={3}; reparsePointPath={4}" -f $TargetState.Path, $TargetState.Exists, $TargetState.IsDirectory, $TargetState.HasEntries, $TargetState.ReparsePointPath)
+    if ($ClientState.Detected) {
+        Say ("Official WeChat process detected: {0}. -Execute will refuse; close it yourself first." -f ($ClientState.ProcessNames -join ', ')) 'Yellow'
+    } else {
+        Say 'Known official WeChat process names were not detected. This does not prove there are no file locks.' 'Yellow'
+    }
+    if ($ClientCandidates.Count -gt 0) {
+        foreach ($candidate in $ClientCandidates) {
+            Say ("Detected client candidate: {0}; version={1}" -f $candidate.Path, $candidate.Version)
+        }
+    } else {
+        Say 'Installed official-client version was not found in the standard locations; compatibility remains unverified.' 'Yellow'
+    }
+    Say 'Account state is deliberately not read. Databases are deliberately not opened.'
+
+    if ($ExecutionBlockers.Count -gt 0) {
+        Say 'Execution blockers:' 'Red'
+        foreach ($blocker in $ExecutionBlockers) {
+            Say ("  - {0}" -f $blocker) 'Red'
+        }
+    } else {
+        Say 'Preflight has no local blocker. Use -Execute only after closing the official client.' 'Green'
+    }
 }
 
-if ($keyStage -and (Test-Path $keyStage)) { Remove-Item -LiteralPath $keyStage -Recurse -Force -ErrorAction SilentlyContinue }
-if ($restoreExitCode -eq 0) {
-    Say "==== 数据合成完成 ====" 'Green'
-} else {
-    Say "==== 数据合成失败或不完整 ====" 'Red'
+function Write-NativeWeChatAcceptanceInstructions {
+    param([string] $RollbackPath)
+
+    Say 'COPY_COMPLETE_AWAITING_HUMAN_ACCEPTANCE' 'Green'
+    Say 'The copy result is not evidence that the official client has recovered.' 'Yellow'
+    Say 'Next: start the official WeChat client yourself, sign in to the intended account if prompted, and verify that the expected history is visible.' 'Yellow'
+    Say 'Keep the backup source and any .pre-restore-* directory until that human acceptance is complete.' 'Yellow'
+    if ($RollbackPath) {
+        Say "Rollback preserved: $RollbackPath" 'Yellow'
+        Say 'If the client does not show the intended data, close it and restore that directory with the same explicit -Execute workflow; do not overwrite it in place.' 'Yellow'
+    }
 }
-Say ""
-Say "【下一步·解密查看】" 'Cyan'
-Say "  1. 安装 WeFlow(或用 _tools\wx_key) —— 任意机器均可,不依赖原设备"
-Say "  2. 在工具里「指定数据目录=$Target」"
-Say "  3. 手动填入对应账号的 decryptKey(见上面③的密钥文件):"
-Say "     (各账号 wxid 与密钥/格式见 _KEYS\wechat-keys-COMPLETE-*.json 的 keyFormat 字段)"
-Say "     注意: 不同账号 decryptKey 格式可能不同(WeFlow格式 vs wx_key裸hex),按文件对应使用"
-Say "  4. 即可解密查看/导出聊天记录(HTML/JSON等)"
-exit $restoreExitCode
+
+if ($Plan -and $Execute) {
+    throw '-Plan (or legacy -List) cannot be combined with -Execute.'
+}
+if (-not $Execute) {
+    $Plan = $true
+}
+
+$targetState = Get-NativeWeChatPathState -Path $Target
+$clientState = Get-NativeWeChatClientState
+$clientCandidates = @(Get-NativeWeChatClientCandidates)
+$executionBlockers = @()
+$sourceDescription = $null
+$sourceState = $null
+
+if (-not $targetState.IsDirectory -and $targetState.Exists) {
+    $executionBlockers += 'The target exists but is not a directory.'
+}
+if (-not [string]::IsNullOrWhiteSpace($targetState.ReparsePointPath)) {
+    $executionBlockers += "The target path or one of its parents is a reparse point: $($targetState.ReparsePointPath)"
+}
+if ($targetState.HasEntries -and -not $ReplaceExisting) {
+    $executionBlockers += 'The target is non-empty. Re-run with -ReplaceExisting to preserve it as a rollback before copying.'
+}
+if ($clientState.Detected) {
+    $executionBlockers += 'An official WeChat process is running. Close it yourself before executing a restore.'
+}
+
+if ($DriveOnly) {
+    $sourceDescription = 'unverified Drive compatibility source: ' + (Get-NativeWeChatDriveSource -Remote $GDriveRemote -Folder $GDriveFolder)
+    if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) {
+        $executionBlockers += 'rclone is not available for the requested -DriveOnly restore.'
+    }
+} else {
+    $sourceState = Get-NativeWeChatPathState -Path $BackupRoot
+    $sourceDescription = $sourceState.Path
+    if (-not [string]::IsNullOrWhiteSpace($sourceState.ReparsePointPath)) {
+        $executionBlockers += "The backup source path or one of its parents is a reparse point: $($sourceState.ReparsePointPath)"
+    }
+    if (Test-NativeWeChatPathsOverlap -Left $sourceState.Path -Right $targetState.Path) {
+        $executionBlockers += 'The backup source and target are equal or one contains the other.'
+    }
+    if (-not $sourceState.Exists -or -not $sourceState.IsDirectory -or -not $sourceState.HasEntries) {
+        $executionBlockers += 'The local backup source is missing, not a directory, or empty.'
+    }
+}
+
+Write-NativeWeChatPreflight -TargetState $targetState -ClientState $clientState -ClientCandidates $clientCandidates -SourceDescription $sourceDescription -ExecutionBlockers $executionBlockers
+
+if ($Plan) {
+    $planResult = [pscustomobject]@{
+        Mode = 'plan'
+        Source = $sourceDescription
+        Target = $targetState.Path
+        ClientProcessDetected = $clientState.Detected
+        ClientVersions = @($clientCandidates | ForEach-Object { $_.Version })
+        AccountState = 'not_read'
+        DatabaseState = 'not_opened'
+        ExecutionBlockers = $executionBlockers
+    }
+    if ($PassThru) { $planResult }
+    if ($executionBlockers | Where-Object { $_ -notmatch '^An official WeChat process is running' }) {
+        exit 2
+    }
+    exit 0
+}
+
+if ($executionBlockers.Count -gt 0) {
+    throw ('Restore preflight failed: ' + ($executionBlockers -join ' '))
+}
+
+$rollbackPath = $null
+try {
+    if ($targetState.HasEntries) {
+        $rollbackPath = Get-NativeWeChatSiblingPath -Target $targetState.Path -Kind 'pre-restore'
+        Say "Preserving the existing target as rollback: $rollbackPath" 'Yellow'
+        Move-NativeWeChatTargetToRollback -Target $targetState.Path -Rollback $rollbackPath
+    }
+
+    if ($DriveOnly) {
+        $copyResult = Invoke-NativeWeChatDriveCopy -Remote $GDriveRemote -Folder $GDriveFolder -Destination $targetState.Path
+    } else {
+        $copyResult = Invoke-NativeWeChatLocalCopy -Source $sourceState.Path -Target $targetState.Path
+    }
+
+    $restoredTargetState = Get-NativeWeChatPathState -Path $targetState.Path
+    if (-not $restoredTargetState.IsDirectory -or -not $restoredTargetState.HasEntries) {
+        throw 'The copy command returned without a usable non-empty target directory.'
+    }
+} catch {
+    $originalError = $_
+    if ($rollbackPath -and (Test-Path -LiteralPath $rollbackPath -PathType Container)) {
+        try {
+            $rollbackResult = Restore-NativeWeChatRollback -Target $targetState.Path -Rollback $rollbackPath
+            Say "Copy failed; the prior target was restored from rollback. Partial copy retained at: $($rollbackResult.FailedRestorePath)" 'Red'
+        } catch {
+            throw ("Copy failed and automatic rollback also failed. Original error: {0}; rollback error: {1}" -f $originalError.Exception.Message, $_.Exception.Message)
+        }
+    }
+    throw $originalError
+}
+
+Write-NativeWeChatAcceptanceInstructions -RollbackPath $rollbackPath
+$executeResult = [pscustomobject]@{
+    Mode = 'execute'
+    CopyMethod = $copyResult.Method
+    CopyExitCode = $copyResult.ExitCode
+    Target = $targetState.Path
+    RollbackPath = $rollbackPath
+    RecoveryStatus = 'copy_complete_awaiting_human_acceptance'
+    AccountState = 'not_read'
+    DatabaseState = 'not_opened'
+}
+if ($PassThru) { $executeResult }
+exit 0

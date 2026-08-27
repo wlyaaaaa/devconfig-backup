@@ -102,29 +102,47 @@ rclone config        # 新建名为 gdrive 的 Google Drive 远端（OAuth，需
 
 ---
 
-## 4. 微信聊天记录备份（独立流）
+## 4. 微信原应用数据备份与恢复（独立流）
 
-聊天历史 ~**38 GB**（媒体是历史本体），太大不进配置包，单独走 [Backup-WeChat.ps1](Backup-WeChat.ps1)。
-⚠️ **微信 db 是 SQLCipher 加密——没有密钥，备份的 db 只是一堆乱码**（见下「解密密钥」）。
+微信应用数据约 **38 GB**（媒体也是原应用数据的一部分），太大不进配置包，单独走 [Backup-WeChat.ps1](Backup-WeChat.ps1)。本地/G 的原生恢复路径保留 `xwechat_files` 的原生目录布局，目标是让官方微信客户端有机会继续使用该数据；本次恢复流程不是个人保险库、解密工具或聊天导出工具。
 
 ```powershell
 pwsh -File Backup-WeChat.ps1 -List          # 干跑:刷新本地快照后列出待传量
 pwsh -File Backup-WeChat.ps1 -Target Hot     # 全量到G盘热备(robocopy /E,只增不删,零流量;主力)
-pwsh -File Backup-WeChat.ps1 -Target Drive   # 完整聊天记录增量到Drive(含媒体;已传自动跳过;默认8G封顶)
+pwsh -File Backup-WeChat.ps1 -Target Drive   # 完整原应用数据增量到Drive(含媒体;已传自动跳过;默认8G封顶)
 pwsh -File Backup-WeChat.ps1 -Target Drive -MaxTransfer 0   # 一次性补齐模式(关闭封顶,需人工看进度)
 pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只传db_storage
 ```
 
-**当前策略：完整聊天记录逐文件增量上云**：
-- **Drive 全量历史**：`xwechat_files` 剔除 cache/temp/WMPF/apm_record 和 SQLite 运行时 wal/shm/journal 后，聊天数据库与媒体都上云。
-- **G盘全量历史**：同样保留完整聊天记录，是零流量热备主力；H盘仅人工冷备。
-**增量机制**：`robocopy /E` 刷新静态快照，`rclone copy --checksum` 自动跳过内容未变化文件；首次是全量，之后只传新增/变化。即使文件大小和修改时间不变，只要内容变化也会被识别。
-
-**解密密钥（恢复命门）**：微信4.x db 用 SQLCipher，密钥 = IMEI+UIN 派生、不随版本变、**必须本机提取**。已提取两账号密钥固化到 `_KEYS`(U盘 + 本地 `E:\WeChatBackup`，**不进git**)。**绝不可丢**：当前 4.1.10 版本下 WeFlow GUI 提取已被封、wx_key 也已停更，丢了难重提；wx_key v2.1.8 工具留存于 `E:\WeChatBackup\_tools`。
+**当前策略：完整原应用数据逐文件增量备份**：
+- **G盘热备**：`Backup-WeChat.ps1 -Target Hot` 原样复制所选 `xwechat_files` 目录到 `G:\80_Backup\WeChat\xwechat_files`，是零流量恢复主力；H盘仅人工冷备。
+- **USB 人工冷备**：可把其 `xwechat_files` 路径显式传给恢复脚本的 `-BackupRoot`；不会自动扫盘或选择介质。
+- **Drive 副本**：保留为既有远端分支，但本次没有验证远端、账号、fallback 或 `-DriveOnly` 的实际可用性，不能据此声称云端恢复已闭合。
+- **增量机制**：`robocopy /E` 和 `rclone copy --checksum` 只复制新增/内容变化文件；文件大小和修改时间相同但内容变化时也会被识别。
 
 **流量护栏**：静态快照上传(不直传使用中源目录，杜绝"边传边改"反复重传)、排除 wal/shm、`-MaxTransfer 8G` 默认硬封顶。checksum 扫描增加本地哈希计算和 Drive 元数据读取，但不会把未变化文件重新上传。db 是**整文件级**增量，故 Drive **每周一次**即可。
 
-本次首次补齐曾发现 14 个同大小同时间但内容不同的配置/MMKV 文件；修复后以普通 `rclone check` 的 0 differences 为最终证据，不再使用 `--size-only` 作为完成证明。
+**运行中一致性边界**：传输成功和 `rclone check` 只证明备份副本可比对，不证明微信在复制期间没有写入，也不证明日后官方客户端一定能接受它。该不确定性会如实保留；应用 owner 负责后续版本/账号兼容与真实恢复验收，不能因此停掉每日备份。
+
+**恢复流程（默认不写入）**：
+
+```powershell
+# 先只读预检：检查备份源、目标保护、已知微信进程和可见客户端版本
+powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -Target E:\Documents\xwechat_files
+
+# 确认官方微信已由你手动关闭，且目标为空后，才显式回填 G 盘热备
+powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -Execute -Target E:\Documents\xwechat_files
+
+# 目标已有数据时，显式要求保留为同级 .pre-restore-* 回滚目录
+powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -Execute -ReplaceExisting -Target E:\Documents\xwechat_files
+
+# 使用已人工确认的 USB 原生备份时，明确给出其目录；默认仍只做预检
+powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -BackupRoot <USB-xwechat_files-path> -Target E:\Documents\xwechat_files
+```
+
+`COPY_COMPLETE_AWAITING_HUMAN_ACCEPTANCE` 只表示原生目录已复制，不表示“微信已恢复”。此后由用户自行启动官方微信、按提示登录目标账号并确认预期历史可见；在此之前必须保留备份源与 `.pre-restore-*` 回滚目录。脚本不读取账号、数据库、聊天、媒体或密钥正文，也不自动关闭或启动微信。
+
+本次闭合的范围是本地/G/人工指定 USB 的原生目录恢复；既有云端远端选择与 `-DriveOnly` 只保留兼容入口，未做联网验收，也不应从本次结果推导为可用或已恢复。
 
 ---
 
@@ -145,7 +163,8 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 | 文件 | 作用 |
 |---|---|
 | `Backup-DevConfig.ps1` | 主脚本：采集→系统导出→清单→打包→分层分发（`-Tier Local/Hot/Drive`） |
-| `Backup-WeChat.ps1` | 微信聊天记录增量备份 |
+| `Backup-WeChat.ps1` | 微信原应用数据增量备份 |
+| `Restore-WeChat.ps1` | 默认只读预检、显式原生目录回填与回滚保护；官方客户端验收仍由用户完成 |
 | `Initialize-BackupNetwork.ps1` | 让无窗口计划任务在缺少进程代理变量时继承当前用户已启用的 Windows 代理，不保存固定代理地址 |
 | `Monitor-WeChatDrive.ps1` | 每小时监控微信 Drive 备份进度；未完成且无上传进程时自动续传；成功后自动禁用监控任务 |
 | `Install-WeChatDriveMonitor.ps1` | 注册/刷新微信 Drive 小时监控任务；直接运行 PowerShell，30 分钟硬超时，避免监控实例卡住 |
@@ -153,6 +172,7 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 | `sources.psd1` | 备份源清单 + 排除规则（数据，改这里即可） |
 | `AGENTS.md` | 仓库边界、PCConfig 分工、公开安全规则 |
 | `tests/Assert-NoBackupArtifacts.ps1` | 检查 Git 候选文件中没有备份包、注册表导出、密钥容器、`.env` 或微信数据库 |
+| `tests/Assert-WeChatNativeRecovery.ps1` | 合成 fixture 验证默认预检、回滚保护与“已复制/待官方客户端验收”状态区分 |
 | `tests/Assert-ScheduledDriveProxy.ps1` | 检查后台 Drive 任务的代理继承与脚本接线 |
 | `out/ staging/ state/ logs/` | 运行产物，**已 gitignore** |
 
@@ -239,16 +259,17 @@ Get-ChildItem E:\restore\devconfig\_system\wifi\*.xml | % {
     netsh wlan add profile filename=$_.FullName }             # Wi-Fi
 Copy-Item E:\restore\devconfig\_system\hosts $env:WINDIR\System32\drivers\etc\hosts
 
-# 6. 取回微信（可选，约 38G）
-#    只有 Drive 时，下载完整数据库+媒体+配置（缓存和 SQLite 运行时文件会排除）
-powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -DriveOnly -Target E:\restore\xwechat_files
-#    有 U 盘时，默认模式先合并 U 盘全量，再从 Drive 补更新 db_storage
+# 6. 取回微信原应用数据（可选，约 38G）
+#    默认先做只读预检；确认官方微信已手动关闭后才显式复制。
 powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -Target E:\restore\xwechat_files
+#    G 热备可用时用默认源；已有目标须显式保留回滚。
+powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -Execute -ReplaceExisting -Target E:\restore\xwechat_files
+#    云端 `-DriveOnly` 在本次未联网验收；不要把它当作本地/G 恢复闭环的一部分。
 
 # 7. 重挂备份任务 + 重配 Drive
 rclone config        # 建 Google Drive 远端（脚本会自动探测名字）
 .\Setup-ScheduledTasks.ps1
 ```
-`Restore-WeChat.ps1 -DriveOnly` 会把 `_KEYS` 下载到恢复目录旁边；恢复后使用 WeFlow 或 `wx_key` 指定数据目录并填入对应 decryptKey。它用于解密查看和导出聊天记录，不保证可以直接导入官方微信客户端。
+复制完成后仍须由用户启动官方微信、登录目标账号并确认历史可见；在人工确认前保留备份源和脚本创建的 `.pre-restore-*` 目录。复制 exit code 或文件清单不能替代这一步。
 
 > ⚠️ 恢复两大陷阱（详见 §3）：① 重设 Documents 指向 `E:\Documents`；② 新用户名保持 `10979`。
