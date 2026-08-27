@@ -62,7 +62,7 @@
 > - **rclone 远端必须明确**：显式 `-GDriveRemote` 优先；否则读取本机非秘密 binding，最后才尝试字面 `gdrive:`。候选 remote 不存在就失败并等待重试，绝不改用第一个已配置远端。binding 会作为单个 `_manifestsclone-remote-binding.json` 随 DevConfig 备份，不含 OAuth、token 或账号配置。
 > - **微信完整历史上云**：微信 38GB 里大部分是已压缩媒体，压缩收益很小；因此不用全量压缩包，而是用 `rclone copy --checksum` 逐文件增量，已上传且内容未变的文件自动跳过。默认单次 Drive 上传有 **8G 流量保险丝**，防止异常情况下大额重传。
 > - **增量是自动的**：robocopy(`/E`) 先刷新静态快照，rclone(`copy --checksum`) 按内容 hash 判断是否变化；只传新增或内容变化的文件，数据库仍是**整文件级**增量。
-> - **内容校验是完成条件**：上传后执行普通 `rclone check`；`--size-only` 只能证明大小一致，不能证明内容一致。
+> - **内容校验是完成条件**：DevConfig 对日期包和 `latest.zip` 分别核对远端大小/MD5，微信目录使用 `rclone check`；只比较大小不算内容一致。两个 DevConfig 名称始终来自同一个 hash 已验证的日期包，不能在上传中重新读取会变化的本地 `latest.zip`。
 > - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑一次；② 后台任务没有显式代理变量时，自动继承当前用户已启用的 Windows 代理；代理/远端仍没就绪则返回失败，由任务级重试继续；③ 传一半断 → `rclone copy` 幂等续传；④ 本地/G 与 Drive 分任务，离线不会阻断热备。
 > - **小时监控是临时工具**：`WeChatDrive-Monitor-Hourly` 只用于首次全量补齐，首次内容级校验通过后禁用；正常运行依赖 `WeChatBackup-Hot-Daily` 与 `WeChatBackup-Drive-Weekly`。
 > - **看进度/日志**：`pwsh -File Backup-Status.ps1`。

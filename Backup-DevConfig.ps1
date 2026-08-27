@@ -299,7 +299,9 @@ function Push-Drive {
 
     $dest = "$GDriveRemote$GDriveFolder"
     $lastFile = Join-Path $StateDir 'last-uploaded.json'
-    $latestPath = Join-Path $OutDir 'latest.zip'
+    # Both cloud names must describe one immutable package, even while Local
+    # publishes a new latest.zip concurrently.
+    $latestPath = $Pack.Zip
     $uploadState = Get-DriveUploadState -Path $lastFile
     if (-not $Force) {
         $skip = Test-DriveUploadSkipEligibility -State $uploadState -Sha256 $Pack.Sha `
@@ -314,12 +316,12 @@ function Push-Drive {
 
     Write-Log "rclone 上传 -> $dest/$($Pack.Name) (bwlimit=$BwLimit) ..."
     # 强重试 + 断点续传（rclone copy 幂等：进程被中断后再次运行自动跳过已传文件）
-    & rclone copyto $Pack.Zip "$dest/$($Pack.Name)" --bwlimit $BwLimit --transfers 1 `
+    & rclone copyto $Pack.Zip "$dest/$($Pack.Name)" --checksum --bwlimit $BwLimit --transfers 1 `
         --tpslimit 8 --tpslimit-burst 8 --drive-pacer-min-sleep 100ms --drive-pacer-burst 8 `
         --retries 5 --retries-sleep 30s --low-level-retries 20 --timeout 120s
     $datedCopyExit = $LASTEXITCODE
     if ($datedCopyExit -eq 0) {
-        & rclone copy $latestPath $dest --bwlimit $BwLimit `
+        & rclone copyto $latestPath "$dest/latest.zip" --checksum --bwlimit $BwLimit `
             --tpslimit 8 --tpslimit-burst 8 --drive-pacer-min-sleep 100ms --drive-pacer-burst 8 `
             --retries 3 *> $null
         $latestCopyExit = $LASTEXITCODE
@@ -355,14 +357,8 @@ if ($Tier -contains 'Local' -or $Tier -contains 'Hot') {
     Invoke-Gather; Invoke-SystemExport; Invoke-Manifests
     $pack = Invoke-Pack
 } else {
-    $lz = Join-Path $OutDir 'latest.zip'
-    if (Test-Path $lz) {
-        # 从 state 解析带日期的文件名（用于在 Drive 存日期版）
-        $sf = Join-Path $StateDir 'latest.sha256'
-        $datedName = if (Test-Path $sf) { ((Get-Content $sf -Raw).Trim() -split '\s+')[-1] } else { "devconfig-$stamp.zip" }
-        $pack = [pscustomobject]@{ Zip = $lz; Sha = (Get-FileHash $lz -Algorithm SHA256).Hash; MB = [math]::Round((Get-Item $lz).Length/1MB,2); Name = $datedName }
-    }
-    else { Write-Log "无 latest.zip，Drive 需先跑一次 Local" 'ERR'; exit 1 }
+    try { $pack = Get-DrivePackageSnapshot -OutDir $OutDir -StateDir $StateDir }
+    catch { Write-Log 'Drive 缺少完整、hash匹配的日期包；先完成 Local，现有云备份不变。' 'ERR'; exit 1 }
 }
 if ($pack -and $overallExitCode -eq 0) {
     if ($Tier -contains 'Hot')   { Push-Hot   $pack }

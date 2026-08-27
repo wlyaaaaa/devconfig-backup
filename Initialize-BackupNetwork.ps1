@@ -190,14 +190,58 @@ function Test-RcloneRemoteFileMatchesLocal {
     if (-not (Test-Path -LiteralPath $LocalPath -PathType Leaf)) {
         return [pscustomobject]@{ Matches = $false; Reason = 'local_file_missing'; ExitCode = -1 }
     }
-    & rclone check $LocalPath $RemotePath --one-way --checksum --fast-list --checkers 4 `
-        --retries 2 --low-level-retries 4 *> $null
-    $exitCode = $LASTEXITCODE
+    # check compares directory trees; lsjson --stat addresses one exact object,
+    # including a dated remote name whose local source is latest.zip.
+    try {
+        $metadata = @(& rclone lsjson $RemotePath --stat --hash --hash-type MD5 `
+            --contimeout 15s --timeout 30s --retries 2 --low-level-retries 4 2>$null)
+        $exitCode = $LASTEXITCODE
+    } catch {
+        return [pscustomobject]@{ Matches = $false; Reason = 'remote_object_query_failed'; ExitCode = -1 }
+    }
+    if ($exitCode -ne 0) {
+        return [pscustomobject]@{ Matches = $false; Reason = 'remote_object_query_failed'; ExitCode = $exitCode }
+    }
+    try {
+        $remote = ($metadata -join "`n") | ConvertFrom-Json -ErrorAction Stop
+        if ($null -eq $remote -or $remote.IsDir -ne $false -or
+            $null -eq $remote.PSObject.Properties['Size'] -or
+            $null -eq $remote.PSObject.Properties['Hashes'] -or
+            $null -eq $remote.Hashes.PSObject.Properties['md5'] -or
+            [string]$remote.Hashes.md5 -notmatch '^[a-fA-F0-9]{32}$') {
+            throw 'remote_object_hash_unavailable'
+        }
+        $before = Get-Item -LiteralPath $LocalPath -ErrorAction Stop
+        $hash = (Get-FileHash -LiteralPath $LocalPath -Algorithm MD5 -ErrorAction Stop).Hash
+        $after = Get-Item -LiteralPath $LocalPath -ErrorAction Stop
+        $sameObject = [long]$remote.Size -eq $after.Length -and
+            $before.Length -eq $after.Length -and
+            $before.LastWriteTimeUtc.Ticks -eq $after.LastWriteTimeUtc.Ticks -and
+            [string]::Equals($hash, [string]$remote.Hashes.md5, [StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return [pscustomobject]@{ Matches = $false; Reason = 'remote_object_hash_unavailable'; ExitCode = $exitCode }
+    }
     return [pscustomobject]@{
-        Matches = ($exitCode -eq 0)
-        Reason = if ($exitCode -eq 0) { 'remote_object_matches' } else { 'remote_object_missing_or_mismatch' }
+        Matches = $sameObject
+        Reason = if ($sameObject) { 'remote_object_matches' } else { 'remote_object_missing_or_mismatch' }
         ExitCode = $exitCode
     }
+}
+
+function Get-DrivePackageSnapshot {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$OutDir, [Parameter(Mandatory)][string]$StateDir)
+    $recordPath = Join-Path $StateDir 'latest.sha256'
+    if (-not (Test-Path -LiteralPath $recordPath -PathType Leaf)) { throw 'local_snapshot_manifest_missing' }
+    $record = (Get-Content -LiteralPath $recordPath -Raw -Encoding ASCII).Trim()
+    if ($record -notmatch '^([a-fA-F0-9]{64})\s+(devconfig-[0-9-]+\.zip)$') { throw 'local_snapshot_manifest_invalid' }
+    $expectedHash = $Matches[1]
+    $name = $Matches[2]
+    $zip = Join-Path $OutDir $name
+    if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { throw 'local_snapshot_file_missing' }
+    $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256 -ErrorAction Stop).Hash
+    if ($hash -ine $expectedHash) { throw 'local_snapshot_hash_mismatch' }
+    [pscustomobject]@{ Zip = $zip; Sha = $hash; Name = $name; MB = [math]::Round((Get-Item -LiteralPath $zip).Length / 1MB, 2) }
 }
 
 function Get-DriveUploadState {
