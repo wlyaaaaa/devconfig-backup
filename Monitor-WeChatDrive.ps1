@@ -21,6 +21,9 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $Root = $PSScriptRoot
+. (Join-Path $Root 'Initialize-BackupNetwork.ps1')
+$script:GDriveRemoteWasExplicit = $PSBoundParameters.ContainsKey('GDriveRemote')
+$StateDir = Join-Path $Root 'state'
 $LogDir = Join-Path $Root 'logs'
 if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
 $LogFile = Join-Path $LogDir 'wechat-drive-monitor.log'
@@ -29,17 +32,6 @@ function Write-MonitorLog([string]$Message, [string]$Level = 'INFO') {
     $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
     Write-Host $line
     Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8
-}
-
-function Resolve-RcloneRemote {
-    param([string]$Preferred)
-    $remotes = @(& rclone listremotes 2>$null)
-    if ($remotes -contains $Preferred) { return $Preferred }
-    if ($remotes.Count -gt 0) {
-        Write-MonitorLog "默认远端不存在，改用第一个已配置远端: $($remotes[0])"
-        return $remotes[0]
-    }
-    return $null
 }
 
 function Invoke-RcloneWithTimeout {
@@ -132,10 +124,7 @@ $excludes = @(
     '--exclude','apm_record/**',
     '--exclude','crash/**',
     '--exclude','FileStorageTemp/**',
-    '--exclude','recommend_cover/**',
-    '--exclude','*.db-wal',
-    '--exclude','*.db-shm',
-    '--exclude','*.db-journal'
+    '--exclude','recommend_cover/**'
 )
 
 Write-MonitorLog "==== WeChat Drive monitor start PID=$PID ===="
@@ -148,11 +137,14 @@ if (-not (Test-Path -LiteralPath $LocalRoot)) {
     exit 1
 }
 
-$remote = Resolve-RcloneRemote $GDriveRemote
-if (-not $remote) {
-    Write-MonitorLog '未发现 rclone 远端，跳过本轮监控' 'WARN'
-    exit 0
+$remoteResolution = Resolve-ConfiguredRcloneRemote -Remote $GDriveRemote `
+    -RemoteWasExplicit $script:GDriveRemoteWasExplicit `
+    -BindingPath (Join-Path $StateDir 'rclone-remote-binding.json')
+if (-not $remoteResolution.Success) {
+    Write-MonitorLog "配置的 Drive 远端不可用 reason=$($remoteResolution.Reason)，本轮失败以便任务重试" 'ERR'
+    exit 1
 }
+$remote = $remoteResolution.Remote
 $dest = "$remote$GDriveFolder"
 
 $local = Get-RcloneSizeJson -Path $LocalRoot -ExtraArgs $excludes

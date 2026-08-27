@@ -29,6 +29,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
+$script:GDriveRemoteWasExplicit = $PSBoundParameters.ContainsKey('GDriveRemote')
 
 # 归一化 Tier：兼容 -File 把 "Local,Hot" 当单串传入的情况
 $Tier = @($Tier) | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }
@@ -187,6 +188,10 @@ function Invoke-Manifests {
     $man = Join-Path $Staging '_manifests'
     New-Item -ItemType Directory -Path $man -Force | Out-Null
 
+    if (Copy-RcloneRemoteBindingToManifest -BindingPath (Join-Path $StateDir 'rclone-remote-binding.json') -ManifestDirectory $man) {
+        Write-Log '已加入非秘密 rclone remote binding 到 _manifests' 'OK'
+    }
+
     try { & scoop export *> (Join-Path $man 'scoop.json') } catch {}
     try { & winget export -o (Join-Path $man 'winget.json') --accept-source-agreements *> $null } catch {}
     try { & code   --list-extensions *> (Join-Path $man 'vscode-extensions.txt') }  catch {}
@@ -275,18 +280,14 @@ function Push-Drive {
         Set-BackupFailure "rclone 未安装，Drive 备份失败"
         return
     }
-    # 远端解析：默认用 $GDriveRemote，不存在则回退到第一个已配置远端（适配任意命名）
-    $remotes = @(& rclone listremotes 2>$null)
-    if ($remotes -notcontains $GDriveRemote) {
-        if ($remotes.Count) { $GDriveRemote = $remotes[0]; Write-Log "  默认远端不存在，改用 $GDriveRemote" }
-        else {
-            Set-BackupFailure "rclone 无已配置远端，Drive 备份失败"
-            return
-        }
+    $remoteResolution = Resolve-ConfiguredRcloneRemote -Remote $GDriveRemote `
+        -RemoteWasExplicit $script:GDriveRemoteWasExplicit `
+        -BindingPath (Join-Path $StateDir 'rclone-remote-binding.json')
+    if (-not $remoteResolution.Success) {
+        Set-BackupFailure "配置的 Drive 远端不可用 reason=$($remoteResolution.Reason)，Drive 备份失败"
+        return
     }
-    $lastFile = Join-Path $StateDir 'last-uploaded.sha256'
-    $last = if (Test-Path $lastFile) { (Get-Content $lastFile -Raw).Trim() } else { '' }
-    if (-not $Force -and $last -eq $Pack.Sha) { Write-Log "内容未变化(sha 相同)，跳过 Drive 上传" 'OK'; return }
+    $GDriveRemote = $remoteResolution.Remote
 
     # 连通性预检：容忍代理冷启动和 API 瞬态抖动；仅记录有界类别，不把原始错误写入日志。
     $preflight = Invoke-RcloneDrivePreflight -Remote $GDriveRemote
@@ -297,6 +298,20 @@ function Push-Drive {
     Write-Log "Drive 预检通过 attempts=$($preflight.Attempts)" 'OK'
 
     $dest = "$GDriveRemote$GDriveFolder"
+    $lastFile = Join-Path $StateDir 'last-uploaded.json'
+    $latestPath = Join-Path $OutDir 'latest.zip'
+    $uploadState = Get-DriveUploadState -Path $lastFile
+    if (-not $Force) {
+        $skip = Test-DriveUploadSkipEligibility -State $uploadState -Sha256 $Pack.Sha `
+            -Remote $GDriveRemote -Folder $GDriveFolder -DatedName $Pack.Name `
+            -DatedLocalPath $Pack.Zip -LatestLocalPath $latestPath
+        if ($skip.Eligible) {
+            Write-Log "内容与目的地均已核对，跳过 Drive 上传" 'OK'
+            return
+        }
+        if ($null -ne $uploadState) { Write-Log "Drive 缓存状态不可复用 reason=$($skip.Reason)，继续核对/上传" 'WARN' }
+    }
+
     Write-Log "rclone 上传 -> $dest/$($Pack.Name) (bwlimit=$BwLimit) ..."
     # 强重试 + 断点续传（rclone copy 幂等：进程被中断后再次运行自动跳过已传文件）
     & rclone copyto $Pack.Zip "$dest/$($Pack.Name)" --bwlimit $BwLimit --transfers 1 `
@@ -304,7 +319,7 @@ function Push-Drive {
         --retries 5 --retries-sleep 30s --low-level-retries 20 --timeout 120s
     $datedCopyExit = $LASTEXITCODE
     if ($datedCopyExit -eq 0) {
-        & rclone copy (Join-Path $OutDir 'latest.zip') $dest --bwlimit $BwLimit `
+        & rclone copy $latestPath $dest --bwlimit $BwLimit `
             --tpslimit 8 --tpslimit-burst 8 --drive-pacer-min-sleep 100ms --drive-pacer-burst 8 `
             --retries 3 *> $null
         $latestCopyExit = $LASTEXITCODE
@@ -312,7 +327,14 @@ function Push-Drive {
             Set-BackupFailure "Drive latest.zip 上传失败 exit=$latestCopyExit（日期包已保留，下次继续）"
             return
         }
-        Set-Content $lastFile $Pack.Sha -Encoding ASCII -ErrorAction Stop
+        $datedVerification = Test-RcloneRemoteFileMatchesLocal -LocalPath $Pack.Zip -RemotePath "$dest/$($Pack.Name)"
+        $latestVerification = Test-RcloneRemoteFileMatchesLocal -LocalPath $latestPath -RemotePath "$dest/latest.zip"
+        if (-not $datedVerification.Matches -or -not $latestVerification.Matches) {
+            Set-BackupFailure "Drive 上传后对象核对失败 dated=$($datedVerification.Reason) latest=$($latestVerification.Reason)"
+            return
+        }
+        $newState = New-DriveUploadState -Sha256 $Pack.Sha -Remote $GDriveRemote -Folder $GDriveFolder -DatedName $Pack.Name
+        Set-Content $lastFile ($newState | ConvertTo-Json -Compress) -Encoding UTF8 -ErrorAction Stop
         Set-Content (Join-Path $StateDir 'last-drive-success.txt') (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Encoding ASCII -ErrorAction Stop
         $remote = (& rclone lsf $dest --include 'devconfig-*.zip' `
             --tpslimit 8 --tpslimit-burst 8 --drive-pacer-min-sleep 100ms --drive-pacer-burst 8 2>$null) |

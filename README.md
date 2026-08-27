@@ -59,14 +59,14 @@
 
 > - **介质原则(2026-07调整)**：G盘是可直接访问的在线热备；H盘是默认 BitLocker 锁定的冷备，只在人工维护窗口刷新，不注册计划任务。
 > - **配置保留**：G盘 / Drive 各保留 **3 份带日期**（`devconfig-YYYYMMDD-HHMMSS.zip`）+ 一份 `latest.zip`；H盘只接收 PCConfig 统一的 `G → H` 冷备。
-> - **rclone 远端名自动探测**：脚本默认找 `gdrive:`，没有就用第一个已配置远端（本机实为 `<邮箱>:`）。
+> - **rclone 远端必须明确**：显式 `-GDriveRemote` 优先；否则读取本机非秘密 binding，最后才尝试字面 `gdrive:`。候选 remote 不存在就失败并等待重试，绝不改用第一个已配置远端。binding 会作为单个 `_manifestsclone-remote-binding.json` 随 DevConfig 备份，不含 OAuth、token 或账号配置。
 > - **微信完整历史上云**：微信 38GB 里大部分是已压缩媒体，压缩收益很小；因此不用全量压缩包，而是用 `rclone copy --checksum` 逐文件增量，已上传且内容未变的文件自动跳过。默认单次 Drive 上传有 **8G 流量保险丝**，防止异常情况下大额重传。
 > - **增量是自动的**：robocopy(`/E`) 先刷新静态快照，rclone(`copy --checksum`) 按内容 hash 判断是否变化；只传新增或内容变化的文件，数据库仍是**整文件级**增量。
 > - **内容校验是完成条件**：上传后执行普通 `rclone check`；`--size-only` 只能证明大小一致，不能证明内容一致。
 > - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑一次；② 后台任务没有显式代理变量时，自动继承当前用户已启用的 Windows 代理；代理/远端仍没就绪则返回失败，由任务级重试继续；③ 传一半断 → `rclone copy` 幂等续传；④ 本地/G 与 Drive 分任务，离线不会阻断热备。
 > - **小时监控是临时工具**：`WeChatDrive-Monitor-Hourly` 只用于首次全量补齐，首次内容级校验通过后禁用；正常运行依赖 `WeChatBackup-Hot-Daily` 与 `WeChatBackup-Drive-Weekly`。
 > - **看进度/日志**：`pwsh -File Backup-Status.ps1`。
-> - **H盘边界**：本项目不直接写 H。冷备由 `E:\PCConfig\tools\Invoke-HotToColdBackup.ps1` 在人工解锁窗口把固定 G 热备集合复制到 H，完成后重新锁定。
+> - **H盘边界**：本项目不直接写 H。冷备由 PCConfig 的 `Invoke-CoreRecoveryMaintenance.ps1 -Mode Cold -Execute -Json` 按已验证 Hot 上下文和其自身安全合同执行；本仓库不替代或重建该流程。
 
 ---
 
@@ -91,7 +91,10 @@ pwsh -File Setup-ScheduledTasks.ps1     # 或 powershell -File（兼容 5.1）
 
 # 4) Drive：装 rclone 并配置远端
 scoop install rclone
-rclone config        # 新建名为 gdrive 的 Google Drive 远端（OAuth，需挂代理）
+rclone config        # 配置已选的 Google Drive 远端（OAuth，需挂代理）
+# 如备份内有 _manifestsclone-remote-binding.json，只回填这一个非秘密 alias 选择：
+New-Item -ItemType Directory -Force E:\Projects\Backups\devconfig-backup\state
+Copy-Item _manifests\rclone-remote-binding.json E:\Projects\Backups\devconfig-backup\state\rclone-remote-binding.json
 ```
 
 > ⚠️ **两个恢复陷阱**（务必注意）：
@@ -117,10 +120,10 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只
 **当前策略：完整原应用数据逐文件增量备份**：
 - **G盘热备**：`Backup-WeChat.ps1 -Target Hot` 原样复制所选 `xwechat_files` 目录到 `G:\80_Backup\WeChat\xwechat_files`，是零流量恢复主力；H盘仅人工冷备。
 - **USB 人工冷备**：可把其 `xwechat_files` 路径显式传给恢复脚本的 `-BackupRoot`；不会自动扫盘或选择介质。
-- **Drive 副本**：保留为既有远端分支，但本次没有验证远端、账号、fallback 或 `-DriveOnly` 的实际可用性，不能据此声称云端恢复已闭合。
+- **Drive 副本**：代码只使用用户已选 remote，远端缺失、对象缺失或对象不一致都会失败关闭；本次没有实际上传、改账号或修改现有云端对象，不能据此声称云端恢复已验收。
 - **增量机制**：`robocopy /E` 和 `rclone copy --checksum` 只复制新增/内容变化文件；文件大小和修改时间相同但内容变化时也会被识别。
 
-**流量护栏**：静态快照上传(不直传使用中源目录，杜绝"边传边改"反复重传)、排除 wal/shm、`-MaxTransfer 8G` 默认硬封顶。checksum 扫描增加本地哈希计算和 Drive 元数据读取，但不会把未变化文件重新上传。db 是**整文件级**增量，故 Drive **每周一次**即可。
+**流量护栏**：静态快照上传(不直传使用中源目录，杜绝"边传边改"反复重传)、`-MaxTransfer 8G` 默认硬封顶。SQLite 的 `-wal`、`-shm` 与 journal 伴随文件会随原生目录保留；SQLite 明确说明 WAL 是数据库持久状态的一部分，分离时可能丢失已提交事务或损坏数据库，[官方说明](https://sqlite.org/wal.html#the_wal_file)。脚本不替应用做 checkpoint，也不把运行中复制称为一致快照。
 
 **运行中一致性边界**：传输成功和 `rclone check` 只证明备份副本可比对，不证明微信在复制期间没有写入，也不证明日后官方客户端一定能接受它。该不确定性会如实保留；应用 owner 负责后续版本/账号兼容与真实恢复验收，不能因此停掉每日备份。
 
@@ -142,7 +145,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -BackupRo
 
 `COPY_COMPLETE_AWAITING_HUMAN_ACCEPTANCE` 只表示原生目录已复制，不表示“微信已恢复”。此后由用户自行启动官方微信、按提示登录目标账号并确认预期历史可见；在此之前必须保留备份源与 `.pre-restore-*` 回滚目录。脚本不读取账号、数据库、聊天、媒体或密钥正文，也不自动关闭或启动微信。
 
-本次闭合的范围是本地/G/人工指定 USB 的原生目录恢复；既有云端远端选择与 `-DriveOnly` 只保留兼容入口，未做联网验收，也不应从本次结果推导为可用或已恢复。
+本次闭合的范围是本地/G/人工指定 USB 的原生目录恢复，以及云端代码的失败关闭逻辑；`-DriveOnly` 与上传链路没有做真实联网验收，也不应从本次结果推导为云端已恢复或可用。
 
 ---
 
@@ -267,7 +270,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -Execute 
 #    云端 `-DriveOnly` 在本次未联网验收；不要把它当作本地/G 恢复闭环的一部分。
 
 # 7. 重挂备份任务 + 重配 Drive
-rclone config        # 建 Google Drive 远端（脚本会自动探测名字）
+rclone config        # 建并明确选择 Google Drive 远端；脚本不会自动改用其他名字
+# 如 _manifests 中有 binding，只回填到这个固定本机位置；它不含 OAuth/token：
+New-Item -ItemType Directory -Force E:\Projects\Backups\devconfig-backup\state
+Copy-Item E:\restore\devconfig\_manifests\rclone-remote-binding.json E:\Projects\Backups\devconfig-backup\state\rclone-remote-binding.json
 .\Setup-ScheduledTasks.ps1
 ```
 复制完成后仍须由用户启动官方微信、登录目标账号并确认历史可见；在人工确认前保留备份源和脚本创建的 `.pre-restore-*` 目录。复制 exit code 或文件清单不能替代这一步。

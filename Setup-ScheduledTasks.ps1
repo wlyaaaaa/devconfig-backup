@@ -74,6 +74,7 @@ $taskDefinitions = @(
         Name = 'DevConfigBackup-Local'
         Triggers = @((New-ScheduledTaskTrigger -Daily -At $DailyAt), $logonTrigger)
         Action = New-Action $devWrapper 'Local,Hot'
+        Principal = $principal
         Settings = $sLocalHot
         Description = '配置备份：本地包+G盘热备（每天/登录·零流量·失败重试3次）'
     },
@@ -81,6 +82,7 @@ $taskDefinitions = @(
         Name = 'DevConfigBackup-Drive-Daily'
         Triggers = @((New-ScheduledTaskTrigger -Daily -At $DriveAt))
         Action = New-Action $devWrapper 'Drive'
+        Principal = $principal
         Settings = $sDrive
         Description = '配置备份：Drive增量（每天·有网才跑·失败重试3次）'
     },
@@ -88,6 +90,7 @@ $taskDefinitions = @(
         Name = 'WeChatBackup-Hot-Daily'
         Triggers = @((New-ScheduledTaskTrigger -Daily -At $WeChatHotAt))
         Action = New-Action $wxWrapper 'Hot'
+        Principal = $principal
         Settings = $sWeChatHot
         Description = '微信聊天记录：每日增量到G盘热备（失败重试3次）'
     },
@@ -95,6 +98,7 @@ $taskDefinitions = @(
         Name = 'WeChatBackup-Drive-Weekly'
         Triggers = @((New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeChatDriveWeeklyDay -At $WeChatDriveWeeklyAt))
         Action = New-Action $wxWrapper 'Drive'
+        Principal = $principal
         Settings = $sWeChatDrive
         Description = '微信聊天记录：每周增量到Drive（有网才跑·失败重试5次）'
     }
@@ -103,7 +107,19 @@ $taskDefinitions = @(
 $nativeTaskApi = @{
     GetTask = {
         param([string] $Name)
-        @(Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction SilentlyContinue) | Select-Object -First 1
+        try {
+            $tasks = @(Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction Stop)
+            if ($tasks.Count -eq 0) {
+                return [pscustomobject]@{ Status = 'absent'; Task = $null }
+            }
+            if ($tasks.Count -ne 1) { throw "Scheduled task lookup is ambiguous: $Name" }
+            return [pscustomobject]@{ Status = 'found'; Task = $tasks[0] }
+        } catch {
+            $notFound = $_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound -or
+                $_.Exception.HResult -eq -2147024894
+            if ($notFound) { return [pscustomobject]@{ Status = 'absent'; Task = $null } }
+            throw
+        }
     }
     ExportTask = {
         param([string] $Name)
@@ -115,13 +131,22 @@ $nativeTaskApi = @{
     }
     RegisterXml = {
         param([string] $Name, [string] $Xml)
-        Register-ScheduledTask -TaskName $Name -TaskPath '\' -Xml $Xml -ErrorAction Stop | Out-Null
+        Register-ScheduledTask -TaskName $Name -TaskPath '\' -Xml $Xml -Force -ErrorAction Stop | Out-Null
     }
     RegisterDefinition = {
-        param($Definition)
-        Register-ScheduledTask -TaskName $Definition.Name -TaskPath '\' `
-            -Action $Definition.Action -Trigger $Definition.Triggers -Principal $principal `
-            -Settings $Definition.Settings -Description $Definition.Description -ErrorAction Stop | Out-Null
+        param($Definition, [bool] $ReplaceExisting)
+        $registerArgs = @{
+            TaskName = $Definition.Name
+            TaskPath = '\'
+            Action = $Definition.Action
+            Trigger = $Definition.Triggers
+            Principal = $Definition.Principal
+            Settings = $Definition.Settings
+            Description = $Definition.Description
+            ErrorAction = 'Stop'
+        }
+        if ($ReplaceExisting) { $registerArgs['Force'] = $true }
+        Register-ScheduledTask @registerArgs | Out-Null
     }
 }
 

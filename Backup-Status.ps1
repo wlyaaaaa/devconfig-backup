@@ -7,11 +7,13 @@
   # 实时跟最新日志：  Get-Content (gci E:\Projects\Backups\devconfig-backup\logs\*.log | sort LastWriteTime)[-1] -Wait -Tail 20
 #>
 [CmdletBinding()]
-param([int]$LogLines = 12, [switch]$NoDrive)
+param([int]$LogLines = 12, [switch]$NoDrive, [string]$GDriveRemote = 'gdrive:')
 
 $dir   = $PSScriptRoot
 $state = Join-Path $dir 'state'
 $logs  = Join-Path $dir 'logs'
+. (Join-Path $dir 'Initialize-BackupNetwork.ps1')
+$script:GDriveRemoteWasExplicit = $PSBoundParameters.ContainsKey('GDriveRemote')
 function GB($b){ '{0:N2} GB' -f ($b/1GB) }
 function Age($t){ if(-not $t){return '—'}; $d=(Get-Date)-$t; if($d.TotalDays -ge 1){'{0:N0} 天前' -f $d.TotalDays}elseif($d.TotalHours -ge 1){'{0:N0} 小时前' -f $d.TotalHours}else{'{0:N0} 分钟前' -f $d.TotalMinutes} }
 function Line(){ Write-Host ('-'*60) -ForegroundColor DarkGray }
@@ -47,8 +49,16 @@ if (-not $NoDrive) {
     $ds = Join-Path $state 'last-drive-success.txt'
     if (Test-Path $ds) { $t=[datetime]::Parse((Get-Content $ds -Raw).Trim()); Write-Host ("配置上次成功上云: {0}  ({1})" -f $t.ToString('yyyy-MM-dd HH:mm'), (Age $t)) -ForegroundColor Green }
     else { Write-Host '配置上次成功上云: 无记录' -ForegroundColor DarkGray }
-    $remote = (& rclone listremotes 2>$null | Select-Object -First 1)
-    if ($remote) {
+    if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) {
+        Write-Host 'rclone 未安装，无法核对配置的 Drive 远端' -ForegroundColor DarkGray
+    } else {
+        $remoteResolution = Resolve-ConfiguredRcloneRemote -Remote $GDriveRemote `
+            -RemoteWasExplicit $script:GDriveRemoteWasExplicit `
+            -BindingPath (Join-Path $state 'rclone-remote-binding.json')
+        if (-not $remoteResolution.Success) {
+            Write-Host "配置的 Drive 远端不可用 reason=$($remoteResolution.Reason)" -ForegroundColor Red
+        } else {
+            $remote = $remoteResolution.Remote
         Write-Host "连通性测试 ..." -NoNewline
         & rclone lsd "$remote" --max-depth 1 --contimeout 10s --timeout 15s --retries 1 *> $null
         if ($LASTEXITCODE -eq 0) {
@@ -57,8 +67,9 @@ if (-not $NoDrive) {
             "  配置: $(($cfg | Where-Object {$_ -match 'devconfig'}).Count) 份带日期 + latest.zip"
             $wxsz = (& rclone size "${remote}Backups/WeChat/xwechat_files" --json 2>$null | ConvertFrom-Json)
             if ($wxsz) { "  微信: {0} / ~38 GB ({1} 文件)  {2}" -f (GB $wxsz.bytes), $wxsz.count, $(if($wxsz.bytes -lt 37GB){'⏳上传中'}else{'✓'}) }
-        } else { Write-Host " 不可达（代理没开/网络断）——下次触发会自动重试" -ForegroundColor Red }
-    } else { Write-Host 'rclone 无已配置远端' -ForegroundColor DarkGray }
+            } else { Write-Host " 不可达（代理没开/网络断）——下次触发会自动重试" -ForegroundColor Red }
+        }
+    }
 }
 
 # 4) 微信→Drive 首次全量进度（若日志存在）

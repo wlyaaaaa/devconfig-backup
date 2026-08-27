@@ -43,6 +43,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'WeChat-Recovery.Common.ps1')
+. (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
+$script:GDriveRemoteWasExplicit = $PSBoundParameters.ContainsKey('GDriveRemote')
 
 function Say {
     param([string] $Message, [string] $Color = 'Gray')
@@ -62,16 +64,6 @@ function Get-NativeWeChatDriveSource {
     return $normalizedRemote + $Folder.Trim('/').Trim('\')
 }
 
-function Resolve-ExistingWeChatDriveRemote {
-    param([string] $Preferred)
-
-    $remotes = @(& rclone listremotes 2>$null)
-    if ($remotes -and ($remotes -notcontains $Preferred)) {
-        return $remotes[0]
-    }
-    return $Preferred
-}
-
 function Invoke-NativeWeChatDriveCopy {
     param(
         [string] $Remote,
@@ -85,8 +77,13 @@ function Invoke-NativeWeChatDriveCopy {
 
     $destinationState = Assert-NativeWeChatTargetPath -Target $Destination
     New-Item -ItemType Directory -Path $destinationState.Path -Force -ErrorAction Stop | Out-Null
-    $resolvedRemote = Resolve-ExistingWeChatDriveRemote -Preferred $Remote
-    $source = Get-NativeWeChatDriveSource -Remote $resolvedRemote -Folder $Folder
+    $remoteResolution = Resolve-ConfiguredRcloneRemote -Remote $Remote `
+        -RemoteWasExplicit $script:GDriveRemoteWasExplicit `
+        -BindingPath (Join-Path (Join-Path $PSScriptRoot 'state') 'rclone-remote-binding.json')
+    if (-not $remoteResolution.Success) {
+        throw "Configured Drive remote is unavailable: $($remoteResolution.Reason)"
+    }
+    $source = Get-NativeWeChatDriveSource -Remote $remoteResolution.Remote -Folder $Folder
     $excludes = @(
         '--exclude', 'cache/**',
         '--exclude', 'Cache/**',
@@ -96,10 +93,7 @@ function Invoke-NativeWeChatDriveCopy {
         '--exclude', 'apm_record/**',
         '--exclude', 'crash/**',
         '--exclude', 'FileStorageTemp/**',
-        '--exclude', 'recommend_cover/**',
-        '--exclude', '*.db-wal',
-        '--exclude', '*.db-shm',
-        '--exclude', '*.db-journal'
+        '--exclude', 'recommend_cover/**'
     )
     $arguments = @('copy', $source, $destinationState.Path, '--checksum', '--transfers', '8', '--checkers', '16', '--fast-list') + $excludes
     & rclone @arguments

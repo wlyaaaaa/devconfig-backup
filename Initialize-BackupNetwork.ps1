@@ -75,6 +75,217 @@ function Initialize-BackupNetwork {
     }
 }
 
+function Normalize-ConfiguredRcloneRemote {
+    param([string] $Remote)
+
+    $normalized = if ($null -eq $Remote) { '' } else { $Remote.Trim() }
+    if ([string]::IsNullOrWhiteSpace($normalized)) { return $null }
+    if (-not $normalized.EndsWith(':')) { $normalized += ':' }
+    return $normalized
+}
+
+function Get-RcloneRemoteBinding {
+    [CmdletBinding()]
+    param([string] $Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    try {
+        $binding = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+        $expected = @('schema', 'remote')
+        $actual = @($binding.PSObject.Properties | ForEach-Object { $_.Name })
+        if (@(Compare-Object -ReferenceObject $expected -DifferenceObject $actual).Count -ne 0 -or
+            [string]$binding.schema -cne 'devconfig-backup.rclone-remote-binding.v1') {
+            return $null
+        }
+        $remote = Normalize-ConfiguredRcloneRemote -Remote ([string]$binding.remote)
+        if ($null -eq $remote) { return $null }
+        return [pscustomobject]@{ Remote = $remote; Source = 'local_binding' }
+    } catch {
+        return $null
+    }
+}
+
+function Set-RcloneRemoteBinding {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [string] $Remote
+    )
+
+    $normalized = Normalize-ConfiguredRcloneRemote -Remote $Remote
+    if ($null -eq $normalized) { throw 'rclone_remote_binding_invalid' }
+    $parent = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force -ErrorAction Stop | Out-Null }
+    [pscustomobject]@{
+        schema = 'devconfig-backup.rclone-remote-binding.v1'
+        remote = $normalized
+    } | ConvertTo-Json -Compress | Set-Content -LiteralPath $Path -Encoding UTF8 -ErrorAction Stop
+}
+
+function Copy-RcloneRemoteBindingToManifest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $BindingPath,
+        [Parameter(Mandatory)] [string] $ManifestDirectory
+    )
+
+    $binding = Get-RcloneRemoteBinding -Path $BindingPath
+    if ($null -eq $binding) { return $false }
+    New-Item -ItemType Directory -Path $ManifestDirectory -Force -ErrorAction Stop | Out-Null
+    $destination = Join-Path $ManifestDirectory 'rclone-remote-binding.json'
+    Copy-Item -LiteralPath $BindingPath -Destination $destination -Force -ErrorAction Stop
+    if ($null -eq (Get-RcloneRemoteBinding -Path $destination)) {
+        throw 'rclone_remote_binding_manifest_copy_invalid'
+    }
+    return $true
+}
+
+function Resolve-ConfiguredRcloneRemote {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Remote,
+        [bool] $RemoteWasExplicit = $false,
+        [string] $BindingPath = '',
+        [string] $LiteralDefault = 'gdrive:'
+    )
+
+    $requested = $null
+    $source = $null
+    if ($RemoteWasExplicit) {
+        $requested = Normalize-ConfiguredRcloneRemote -Remote $Remote
+        $source = 'explicit_parameter'
+        if ($null -eq $requested) {
+            return [pscustomobject]@{ Success = $false; Remote = $null; Reason = 'explicit_remote_missing'; Source = $source }
+        }
+    } else {
+        $binding = Get-RcloneRemoteBinding -Path $BindingPath
+        if ($null -ne $binding) {
+            $requested = $binding.Remote
+            $source = $binding.Source
+        } else {
+            $requested = Normalize-ConfiguredRcloneRemote -Remote $LiteralDefault
+            $source = 'literal_default'
+        }
+    }
+
+    $configured = @(& rclone listremotes 2>&1 | ForEach-Object { $_.ToString().Trim() })
+    if ($LASTEXITCODE -ne 0) {
+        return [pscustomobject]@{ Success = $false; Remote = $requested; Reason = 'remote_inventory_failed'; Source = $source }
+    }
+    if ($configured -notcontains $requested) {
+        $reason = if ($source -eq 'local_binding') { 'bound_remote_not_found' } else { 'configured_remote_not_found' }
+        return [pscustomobject]@{ Success = $false; Remote = $requested; Reason = $reason; Source = $source }
+    }
+    return [pscustomobject]@{ Success = $true; Remote = $requested; Reason = 'configured_remote_verified'; Source = $source }
+}
+
+function Test-RcloneRemoteFileMatchesLocal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $LocalPath,
+        [Parameter(Mandatory)] [string] $RemotePath
+    )
+
+    if (-not (Test-Path -LiteralPath $LocalPath -PathType Leaf)) {
+        return [pscustomobject]@{ Matches = $false; Reason = 'local_file_missing'; ExitCode = -1 }
+    }
+    & rclone check $LocalPath $RemotePath --one-way --checksum --fast-list --checkers 4 `
+        --retries 2 --low-level-retries 4 *> $null
+    $exitCode = $LASTEXITCODE
+    return [pscustomobject]@{
+        Matches = ($exitCode -eq 0)
+        Reason = if ($exitCode -eq 0) { 'remote_object_matches' } else { 'remote_object_missing_or_mismatch' }
+        ExitCode = $exitCode
+    }
+}
+
+function Get-DriveUploadState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)] [string] $Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    try {
+        $state = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+        $expected = @('schema', 'sha256', 'remote', 'folder', 'dated_name', 'latest_name')
+        $actual = @($state.PSObject.Properties | ForEach-Object { $_.Name })
+        if (@(Compare-Object -ReferenceObject $expected -DifferenceObject $actual).Count -ne 0) { return $null }
+        if ([string]$state.schema -cne 'devconfig.drive-upload-state.v1') { return $null }
+        return $state
+    } catch {
+        return $null
+    }
+}
+
+function New-DriveUploadState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Sha256,
+        [Parameter(Mandatory)] [string] $Remote,
+        [Parameter(Mandatory)] [string] $Folder,
+        [Parameter(Mandatory)] [string] $DatedName,
+        [string] $LatestName = 'latest.zip'
+    )
+
+    return [pscustomobject]@{
+        schema = 'devconfig.drive-upload-state.v1'
+        sha256 = $Sha256
+        remote = $Remote
+        folder = $Folder
+        dated_name = $DatedName
+        latest_name = $LatestName
+    }
+}
+
+function Test-DriveUploadStateMatches {
+    [CmdletBinding()]
+    param(
+        $State,
+        [Parameter(Mandatory)] [string] $Sha256,
+        [Parameter(Mandatory)] [string] $Remote,
+        [Parameter(Mandatory)] [string] $Folder,
+        [Parameter(Mandatory)] [string] $DatedName,
+        [string] $LatestName = 'latest.zip'
+    )
+
+    if ($null -eq $State) { return $false }
+    return [string]$State.schema -ceq 'devconfig.drive-upload-state.v1' -and
+        [string]$State.sha256 -ceq $Sha256 -and
+        [string]$State.remote -ceq $Remote -and
+        [string]$State.folder -ceq $Folder -and
+        [string]$State.dated_name -ceq $DatedName -and
+        [string]$State.latest_name -ceq $LatestName
+}
+
+function Test-DriveUploadSkipEligibility {
+    [CmdletBinding()]
+    param(
+        $State,
+        [Parameter(Mandatory)] [string] $Sha256,
+        [Parameter(Mandatory)] [string] $Remote,
+        [Parameter(Mandatory)] [string] $Folder,
+        [Parameter(Mandatory)] [string] $DatedName,
+        [Parameter(Mandatory)] [string] $DatedLocalPath,
+        [Parameter(Mandatory)] [string] $LatestLocalPath,
+        [string] $LatestName = 'latest.zip'
+    )
+
+    if (-not (Test-DriveUploadStateMatches -State $State -Sha256 $Sha256 -Remote $Remote -Folder $Folder -DatedName $DatedName -LatestName $LatestName)) {
+        return [pscustomobject]@{ Eligible = $false; Reason = 'state_destination_binding_mismatch' }
+    }
+
+    $destination = $Remote + $Folder.Trim('/').Trim('\')
+    $dated = Test-RcloneRemoteFileMatchesLocal -LocalPath $DatedLocalPath -RemotePath ($destination + '/' + $DatedName)
+    if (-not $dated.Matches) {
+        return [pscustomobject]@{ Eligible = $false; Reason = $dated.Reason }
+    }
+    $latest = Test-RcloneRemoteFileMatchesLocal -LocalPath $LatestLocalPath -RemotePath ($destination + '/' + $LatestName)
+    if (-not $latest.Matches) {
+        return [pscustomobject]@{ Eligible = $false; Reason = $latest.Reason }
+    }
+    return [pscustomobject]@{ Eligible = $true; Reason = 'destination_verified' }
+}
+
 function Get-RcloneFailureCategory {
     [CmdletBinding()]
     param([string[]]$Output)

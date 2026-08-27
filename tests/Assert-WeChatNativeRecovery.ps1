@@ -13,6 +13,23 @@ function Assert-Condition {
     if (-not $Condition) { throw $Message }
 }
 
+function Assert-PathWithinFixtureNamespace {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Path,
+        [Parameter(Mandatory = $true)] [string] $NamespaceRoot,
+        [switch] $AllowNamespaceRoot
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd([char[]]@([char]'\', [char]'/' ))
+    $fullNamespace = [IO.Path]::GetFullPath($NamespaceRoot).TrimEnd([char[]]@([char]'\', [char]'/' ))
+    $comparison = [StringComparison]::OrdinalIgnoreCase
+    if (($AllowNamespaceRoot -and [string]::Equals($fullPath, $fullNamespace, $comparison)) -or
+        $fullPath.StartsWith($fullNamespace + [IO.Path]::DirectorySeparatorChar, $comparison)) {
+        return $fullPath
+    }
+    throw "Fixture cleanup path escapes its dedicated namespace: $fullPath"
+}
+
 $restorePath = Join-Path $RepoRoot 'Restore-WeChat.ps1'
 $helperPath = Join-Path $RepoRoot 'WeChat-Recovery.Common.ps1'
 $backupPath = Join-Path $RepoRoot 'Backup-WeChat.ps1'
@@ -31,7 +48,8 @@ Assert-Condition ($helperText -match 'Tencent\\Weixin\\Weixin\.exe') 'Client dis
 
 . $helperPath
 
-$root = Join-Path $env:TEMP ('wechat-native-recovery-' + [guid]::NewGuid().ToString('N'))
+$fixtureBase = Join-Path $env:TEMP 'Codex'
+$root = Join-Path $fixtureBase ('wechat-native-recovery-' + [guid]::NewGuid().ToString('N'))
 $source = Join-Path $root 'hot-backup'
 $planTarget = Join-Path $root 'plan-target'
 $executeTarget = Join-Path $root 'execute-target'
@@ -138,10 +156,22 @@ try {
 }
 finally {
     if (Test-Path -LiteralPath $junctionParent) {
-        & cmd.exe /d /c ('rmdir "{0}"' -f $junctionParent) | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Unable to remove synthetic junction fixture: $junctionParent" }
+        $junctionFull = Assert-PathWithinFixtureNamespace -Path $junctionParent -NamespaceRoot $root
+        $junctionItem = Get-Item -LiteralPath $junctionFull -Force -ErrorAction Stop
+        if (-not [bool]($junctionItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Synthetic junction cleanup refused a non-reparse path: $junctionFull"
+        }
+        [IO.Directory]::Delete($junctionFull)
     }
     if (Test-Path -LiteralPath $root) {
-        Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        $rootFull = Assert-PathWithinFixtureNamespace -Path $root -NamespaceRoot $fixtureBase
+        if ((Split-Path -Leaf $rootFull) -notmatch '^wechat-native-recovery-[0-9a-f]{32}$') {
+            throw "Synthetic fixture root has an unexpected name: $rootFull"
+        }
+        $rootItem = Get-Item -LiteralPath $rootFull -Force -ErrorAction Stop
+        if ([bool]($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Synthetic fixture root must not be a reparse point: $rootFull"
+        }
+        Remove-Item -LiteralPath $rootFull -Recurse -Force -ErrorAction Stop
     }
 }

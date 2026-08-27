@@ -8,8 +8,8 @@
   首次运行为全量(~38GB)；之后仅复制变化的库与新增媒体。复制/远端校验只能证明备份
   文件传输结果，不能证明微信在复制时未写入，也不能替代日后的官方客户端恢复验收。
   【Drive 流量安全】① 绝不直传微信源目录(运行时数据库边传边改→反复重传烧流量)，
-    而是先 robocopy 到本地静态快照再从快照上传；② 上云排除 SQLite 运行时文件
-    (.db-wal/.db-shm/.db-journal，恢复时自动重建)；③ rclone copy 自动跳过已上传文件。
+    而是先 robocopy 到本地静态快照再从快照上传；② 保留 SQLite 的 wal/shm/journal 伴随文件，
+    但不把运行中复制冒充为一致快照；③ rclone copy 自动跳过已上传文件。
 .EXAMPLE
   pwsh -File Backup-WeChat.ps1 -List           # 干跑，只估算将复制的量（强烈建议先跑）
   pwsh -File Backup-WeChat.ps1 -Target Hot      # 增量到G盘热备（零流量，自动任务主力）
@@ -37,6 +37,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 . (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
+$script:GDriveRemoteWasExplicit = $PSBoundParameters.ContainsKey('GDriveRemote')
 $Target = @($Target) | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 $invalidTargets = @($Target | Where-Object { $_ -notin @('Hot','Local','Drive') })
 if ($invalidTargets.Count -gt 0) { throw "Unsupported target: $($invalidTargets -join ','). H cold backup is owned by the PCConfig manual G-to-H workflow." }
@@ -45,6 +46,7 @@ if ($invalidTargets.Count -gt 0) { throw "Unsupported target: $($invalidTargets 
 $exclDirs = @('cache','Cache','temp','Temp','WMPF','apm_record','crash','FileStorageTemp','recommend_cover')
 
 $LogDir = Join-Path $PSScriptRoot 'logs'
+$StateDir = Join-Path $PSScriptRoot 'state'
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
 $log = Join-Path $LogDir ("wechat-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 function Say($m,$c='Gray'){ $l="{0} {1}" -f (Get-Date -Format 'HH:mm:ss'),$m; Write-Host $l -ForegroundColor $c; Add-Content -LiteralPath $log -Value $l -Encoding UTF8 }
@@ -80,16 +82,15 @@ foreach ($t in $Target) {
                 $overallExitCode = 1
                 break
             }
-            # 远端自动探测（默认名不存在则用第一个已配置远端）
-            $remotes = @(& rclone listremotes 2>$null)
-            if ($remotes -notcontains $GDriveRemote) {
-                if ($remotes.Count) { $GDriveRemote = $remotes[0]; Say "  默认远端不存在，改用 $GDriveRemote" }
-                else {
-                    Say "rclone 无已配置远端，跳过 Drive" 'Red'
-                    $overallExitCode = 1
-                    break
-                }
+            $remoteResolution = Resolve-ConfiguredRcloneRemote -Remote $GDriveRemote `
+                -RemoteWasExplicit $script:GDriveRemoteWasExplicit `
+                -BindingPath (Join-Path $StateDir 'rclone-remote-binding.json')
+            if (-not $remoteResolution.Success) {
+                Say "配置的 Drive 远端不可用 reason=$($remoteResolution.Reason)，本轮失败" 'Red'
+                $overallExitCode = 1
+                break
             }
+            $GDriveRemote = $remoteResolution.Remote
             # 治本：绝不直传微信源目录——微信运行时数据库在被写入，rclone 上传中途
             # 检测到 modtime 变化即报 "source file is being updated" 并整文件从头重传，
             # 反复烧海外流量却传不成功。改为先 robocopy 源→本地静态快照（零流量），
@@ -115,12 +116,10 @@ foreach ($t in $Target) {
             # 只有显式 -DbOnly 时才只上传 db_storage，用作临时省流量模式。
             if (-not $DbOnly -or $DriveFull) {
                 $filter  = $exclDirs | ForEach-Object { '--exclude'; "$_/**" }
-                $filter += @('--exclude','*.db-wal','--exclude','*.db-shm','--exclude','*.db-journal')
                 Say "  Drive范围: 完整原应用数据(db+媒体)" 'Yellow'
             } else {
-                # 只收 db_storage 下的库: 先排运行时文件, 再只收 db_storage, 其余(媒体等)全排
-                $filter = @('--filter','- *.db-wal','--filter','- *.db-shm','--filter','- *.db-journal',
-                            '--filter','+ **/db_storage/**','--filter','- *')
+                # 只收 db_storage 下的库及其 WAL/SHM/journal 伴随文件，其他(媒体等)全排。
+                $filter = @('--filter','+ **/db_storage/**','--filter','- *')
                 Say "  Drive范围: 仅数据库db_storage(-DbOnly省流量模式)" 'Cyan'
             }
             # copy=只增不删（历史安全）；源为静态快照 $LocalRoot（非微信源目录）

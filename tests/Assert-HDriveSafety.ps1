@@ -82,12 +82,16 @@ Assert-Text 'Drive skip and upload failures propagate to Task Scheduler' (
     $wechatText -match '\$overallExitCode = 1' -and
     $wechatText -match 'exit \$overallExitCode'
 )
-Assert-Text 'README routes cold backup through PCConfig G to H' ($readmeText -match 'Invoke-HotToColdBackup.ps1' -and $readmeText -match 'G.*H')
-Assert-Text 'Password Center Recovery Set remains an explicit PCConfig cold-backup set' (
-    (Get-Content -LiteralPath 'E:\PCConfig\tools\Invoke-HotToColdBackup.ps1' -Raw) -match
-        "'PasswordCenterRecoverySet'" -and
-    (Get-Content -LiteralPath 'E:\PCConfig\tools\Invoke-HotToColdBackup.ps1' -Raw) -match
-        'scheduled_task_allowed = \$false'
+Assert-Text 'README routes cold backup through the current PCConfig maintenance contract' (
+    $readmeText -match 'Invoke-CoreRecoveryMaintenance\.ps1' -and
+    $readmeText -match '-Mode Cold' -and $readmeText -match 'G.*H'
+)
+$coreRecoveryMaintenance = Get-Content -LiteralPath 'E:\PCConfig\tools\Invoke-CoreRecoveryMaintenance.ps1' -Raw
+Assert-Text 'PCConfig cold recovery uses the current explicit maintenance contract' (
+    $coreRecoveryMaintenance -match "\[ValidateSet\('Inspect', 'Hot', 'Cold'\)\]" -and
+    $coreRecoveryMaintenance -match '\$Mode -ne ''Inspect'' -and -not \$Execute' -and
+    $coreRecoveryMaintenance -match "'additive_no_mirror'" -and
+    $coreRecoveryMaintenance -match "'consume_validated_hot_context'"
 )
 Assert-Text 'default DevConfig backup excludes Codex session history and log database' (
     $sourcesText -match "'sessions'" -and
