@@ -25,12 +25,15 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'ScheduledTask-Registration.Common.ps1')
 $devScript = Join-Path $PSScriptRoot 'Backup-DevConfig.ps1'
 $wxScript  = Join-Path $PSScriptRoot 'Backup-WeChat.ps1'
 $devWrapper = Join-Path $PSScriptRoot 'Backup-DevConfig-Hidden.vbs'
 $wxWrapper  = Join-Path $PSScriptRoot 'Backup-WeChat-Hidden.vbs'
 if (-not (Test-Path $devScript)) { throw "找不到 $devScript" }
 if (-not (Test-Path $devWrapper)) { throw "找不到 $devWrapper" }
+if (-not (Test-Path $wxScript)) { throw "找不到 $wxScript" }
+if (-not (Test-Path $wxWrapper)) { throw "找不到 $wxWrapper" }
 
 $launcher = Join-Path $env:WINDIR 'System32\wscript.exe'
 
@@ -40,12 +43,6 @@ function New-Action([string]$Wrapper, [string]$ScriptArgs) {
         -Argument "`"$Wrapper`" $ScriptArgs" `
         -WorkingDirectory $PSScriptRoot
 }
-function Register-T([string]$Name, $Triggers, $Action, $Settings, [string]$Desc) {
-    Register-ScheduledTask -TaskName $Name -TaskPath '\' -Force `
-        -Action $Action -Trigger $Triggers -Principal $principal -Settings $Settings -Description $Desc | Out-Null
-    Write-Host "  [OK] $Name" -ForegroundColor Green
-}
-
 # 本地/G：关机错过后补跑；业务失败返回非零后再重试 3 次，不依赖网络。
 $sLocalHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
@@ -68,38 +65,73 @@ $sWeChatDrive = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetwo
     -ExecutionTimeLimit (New-TimeSpan -Hours 8) `
     -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 30)
 
-# 重建前尽量清理旧任务（非管理员会遇到部分旧任务拒绝删除；不阻塞后续 -Force 覆盖）
-foreach ($oldTask in @(Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*' -ErrorAction SilentlyContinue)) {
-    try {
-        Unregister-ScheduledTask -InputObject $oldTask -Confirm:$false -ErrorAction Stop
-    } catch {
-        Write-Warning "旧任务删除失败，后续尝试直接覆盖：$($oldTask.TaskName) - $($_.Exception.Message)"
-    }
-}
-
 # ① 本地 + G 热备：每天21:05 + 登录后20分钟（桌面机错过晚间窗口时补一份；不走海外流量）
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $logonTrigger.Delay = 'PT20M'
-Register-T 'DevConfigBackup-Local' `
-    @((New-ScheduledTaskTrigger -Daily -At $DailyAt), $logonTrigger) `
-    (New-Action $devWrapper 'Local,Hot') $sLocalHot '配置备份：本地包+G盘热备（每天/登录·零流量·失败重试3次）'
 
-# ② Drive：与本地/G任务分离，离线或远端失败不会把热备链路一起拖住
-Register-T 'DevConfigBackup-Drive-Daily' `
-    (New-ScheduledTaskTrigger -Daily -At $DriveAt) `
-    (New-Action $devWrapper 'Drive') $sDrive '配置备份：Drive增量（每天·有网才跑·失败重试3次）'
+$taskDefinitions = @(
+    [pscustomobject]@{
+        Name = 'DevConfigBackup-Local'
+        Triggers = @((New-ScheduledTaskTrigger -Daily -At $DailyAt), $logonTrigger)
+        Action = New-Action $devWrapper 'Local,Hot'
+        Settings = $sLocalHot
+        Description = '配置备份：本地包+G盘热备（每天/登录·零流量·失败重试3次）'
+    },
+    [pscustomobject]@{
+        Name = 'DevConfigBackup-Drive-Daily'
+        Triggers = @((New-ScheduledTaskTrigger -Daily -At $DriveAt))
+        Action = New-Action $devWrapper 'Drive'
+        Settings = $sDrive
+        Description = '配置备份：Drive增量（每天·有网才跑·失败重试3次）'
+    },
+    [pscustomobject]@{
+        Name = 'WeChatBackup-Hot-Daily'
+        Triggers = @((New-ScheduledTaskTrigger -Daily -At $WeChatHotAt))
+        Action = New-Action $wxWrapper 'Hot'
+        Settings = $sWeChatHot
+        Description = '微信聊天记录：每日增量到G盘热备（失败重试3次）'
+    },
+    [pscustomobject]@{
+        Name = 'WeChatBackup-Drive-Weekly'
+        Triggers = @((New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeChatDriveWeeklyDay -At $WeChatDriveWeeklyAt))
+        Action = New-Action $wxWrapper 'Drive'
+        Settings = $sWeChatDrive
+        Description = '微信聊天记录：每周增量到Drive（有网才跑·失败重试5次）'
+    }
+)
 
-# ③ 微信聊天记录：G 热备与 Drive 分开调度、分别报告结果
-if (Test-Path $wxScript) {
-    if (-not (Test-Path $wxWrapper)) { throw "找不到 $wxWrapper" }
-    Register-T 'WeChatBackup-Hot-Daily' `
-        (New-ScheduledTaskTrigger -Daily -At $WeChatHotAt) `
-        (New-Action $wxWrapper 'Hot') $sWeChatHot '微信聊天记录：每日增量到G盘热备（失败重试3次）'
-    Register-T 'WeChatBackup-Drive-Weekly' `
-        (New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeChatDriveWeeklyDay -At $WeChatDriveWeeklyAt) `
-        (New-Action $wxWrapper 'Drive') $sWeChatDrive '微信聊天记录：每周增量到Drive（有网才跑·失败重试5次）'
+$nativeTaskApi = @{
+    GetTask = {
+        param([string] $Name)
+        @(Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction SilentlyContinue) | Select-Object -First 1
+    }
+    ExportTask = {
+        param([string] $Name)
+        Export-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction Stop
+    }
+    UnregisterTask = {
+        param([string] $Name)
+        Unregister-ScheduledTask -TaskName $Name -TaskPath '\' -Confirm:$false -ErrorAction Stop
+    }
+    RegisterXml = {
+        param([string] $Name, [string] $Xml)
+        Register-ScheduledTask -TaskName $Name -TaskPath '\' -Xml $Xml -ErrorAction Stop | Out-Null
+    }
+    RegisterDefinition = {
+        param($Definition)
+        Register-ScheduledTask -TaskName $Definition.Name -TaskPath '\' `
+            -Action $Definition.Action -Trigger $Definition.Triggers -Principal $principal `
+            -Settings $Definition.Settings -Description $Definition.Description -ErrorAction Stop | Out-Null
+    }
 }
 
+$registration = Invoke-BackupScheduledTaskRegistrationTransaction -Definitions $taskDefinitions -Api $nativeTaskApi
+foreach ($name in $registration.Names) {
+    Write-Host "  [OK] $name" -ForegroundColor Green
+}
 Write-Host "`n已注册的任务：" -ForegroundColor Cyan
-Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*' | Format-Table TaskName, State -AutoSize
+$registeredTasks = foreach ($name in $registration.Names) {
+    Get-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction Stop
+}
+$registeredTasks | Format-Table TaskName, State -AutoSize
 Write-Host "验证：Start-ScheduledTask DevConfigBackup-Local; (Get-ScheduledTaskInfo DevConfigBackup-Local).LastTaskResult  # 0=成功"
