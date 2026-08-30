@@ -164,6 +164,16 @@ function Resolve-ConfiguredRcloneRemote {
             $requested = $binding.Remote
             $source = $binding.Source
         } else {
+            if (-not [string]::IsNullOrWhiteSpace($BindingPath)) {
+                try {
+                    $bindingPathExists = Test-Path -LiteralPath $BindingPath -ErrorAction Stop
+                } catch {
+                    return [pscustomobject]@{ Success = $false; Remote = $null; Reason = 'local_binding_unreadable'; Source = 'local_binding' }
+                }
+                if ($bindingPathExists) {
+                    return [pscustomobject]@{ Success = $false; Remote = $null; Reason = 'local_binding_invalid'; Source = 'local_binding' }
+                }
+            }
             $requested = Normalize-ConfiguredRcloneRemote -Remote $LiteralDefault
             $source = 'literal_default'
         }

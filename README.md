@@ -61,6 +61,7 @@
 > - **配置保留**：G盘 / Drive 各保留 **3 份带日期**（`devconfig-YYYYMMDD-HHMMSS.zip`）+ 一份 `latest.zip`；H盘只接收 PCConfig 统一的 `G → H` 冷备。
 > - **rclone 远端必须明确**：显式 `-GDriveRemote` 优先；否则读取本机非秘密 binding，最后才尝试字面 `gdrive:`。候选 remote 不存在就失败并等待重试，绝不改用第一个已配置远端。binding 会作为单个 `_manifestsclone-remote-binding.json` 随 DevConfig 备份，不含 OAuth、token 或账号配置。
 > - **微信完整历史上云**：微信 38GB 里大部分是已压缩媒体，压缩收益很小；因此不用全量压缩包，而是用 `rclone copy --checksum` 逐文件增量，已上传且内容未变的文件自动跳过。默认单次 Drive 上传有 **8G 流量保险丝**，防止异常情况下大额重传。
+> - **binding 失败关闭**：本地 remote binding 文件存在但损坏或不可读时，Drive 流程直接失败并等待修复；只有文件确实不存在时才尝试字面 `gdrive:`，避免静默切到另一云目标。
 > - **增量是自动的**：robocopy(`/E`) 先刷新静态快照，rclone(`copy --checksum`) 按内容 hash 判断是否变化；只传新增或内容变化的文件，数据库仍是**整文件级**增量。
 > - **内容校验是完成条件**：DevConfig 对日期包和 `latest.zip` 分别核对远端大小/MD5，微信目录使用 `rclone check`；只比较大小不算内容一致。两个 DevConfig 名称始终来自同一个 hash 已验证的日期包，不能在上传中重新读取会变化的本地 `latest.zip`。
 > - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑一次；② 后台任务没有显式代理变量时，自动继承当前用户已启用的 Windows 代理；代理/远端仍没就绪则返回失败，由任务级重试继续；③ 传一半断 → `rclone copy` 幂等续传；④ 本地/G 与 Drive 分任务，离线不会阻断热备。

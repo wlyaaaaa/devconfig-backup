@@ -83,6 +83,12 @@ try {
     Set-RcloneRemoteBinding -Path $bindingPath -Remote 'selected:'
     $bound = Resolve-ConfiguredRcloneRemote -Remote 'gdrive:' -BindingPath $bindingPath
     Assert-Condition ($bound.Success -and $bound.Remote -eq 'selected:' -and $bound.Source -eq 'local_binding') 'Local remote binding must take precedence over the literal default.'
+    $invalidBindingPath = Join-Path $fixtureRoot 'invalid-rclone-remote-binding.json'
+    Set-Content -LiteralPath $invalidBindingPath -Value '{"schema":"truncated"' -Encoding UTF8
+    $global:CloudIntegrityRcloneCalls.Clear()
+    $invalidBinding = Resolve-ConfiguredRcloneRemote -Remote 'gdrive:' -BindingPath $invalidBindingPath
+    Assert-Condition (-not $invalidBinding.Success -and $null -eq $invalidBinding.Remote -and $invalidBinding.Reason -eq 'local_binding_invalid' -and $invalidBinding.Source -eq 'local_binding') 'An existing invalid remote binding must fail closed instead of switching to the literal default.'
+    Assert-Condition ($global:CloudIntegrityRcloneCalls.Count -eq 0) 'An invalid local binding must be rejected before remote inventory or any cloud operation.'
     $missing = Resolve-ConfiguredRcloneRemote -Remote 'missing:' -RemoteWasExplicit $true
     Assert-Condition (-not $missing.Success -and $missing.Remote -eq 'missing:' -and $missing.Reason -eq 'configured_remote_not_found') 'Missing configured remote must fail instead of falling back to another remote.'
 
