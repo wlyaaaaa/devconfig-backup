@@ -25,6 +25,7 @@ param(
     [string[]] $Target = @('Hot'),
     [string]   $Source       = 'E:\Documents\xwechat_files',
     [string]   $HotRoot      = 'G:\80_Backup\WeChat\xwechat_files',
+    [string]   $HotReceiptPath = 'G:\80_Backup\ControlPlane\wechat-hot-last.json',
     [string]   $LocalRoot    = 'E:\WeChatBackup\xwechat_files',
     [string]   $GDriveRemote = 'gdrive:',
     [string]   $GDriveFolder = 'Backups/WeChat/xwechat_files',
@@ -51,6 +52,7 @@ if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Forc
 $log = Join-Path $LogDir ("wechat-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 function Say($m,$c='Gray'){ $l="{0} {1}" -f (Get-Date -Format 'HH:mm:ss'),$m; Write-Host $l -ForegroundColor $c; Add-Content -LiteralPath $log -Value $l -Encoding UTF8 }
 $overallExitCode = 0
+$script:lastHotCopyExit = $null
 
 if (-not (Test-Path -LiteralPath $Source)) { Say "源不存在: $Source" 'Red'; exit 1 }
 Say "==== WeChat backup | Target=$($Target -join ',') | List=$List ====" 'Cyan'
@@ -63,13 +65,60 @@ function Sync-Local([string]$dst, [bool]$listOnly, [int]$Threads = 16) {
     $copyExit = $LASTEXITCODE
     Say "  robocopy exit=$copyExit (0-7 正常)" $(if($copyExit -lt 8){'Green'}else{'Red'})
     if ($copyExit -ge 8) { $script:overallExitCode = 1 }
+    return $copyExit
+}
+
+function Write-HotReceipt([int]$RobocopyExit) {
+    $parent = Split-Path -Parent $HotReceiptPath
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $receipt = [ordered]@{
+        schema = 'wechat.hot-backup-receipt.v1'
+        completed_utc = [DateTimeOffset]::UtcNow.ToString('o')
+        status = 'complete'
+        source = [IO.Path]::GetFullPath($Source).TrimEnd('\')
+        destination = [IO.Path]::GetFullPath($HotRoot).TrimEnd('\')
+        robocopy_exit = $RobocopyExit
+        excluded_directory_count = $exclDirs.Count
+        payload_names_emitted = $false
+        payload_content_read = $false
+    }
+    $temp = Join-Path $parent (
+        '.wechat-hot-last.tmp-' + [guid]::NewGuid().ToString('N') + '.json'
+    )
+    try {
+        [IO.File]::WriteAllText(
+            $temp,
+            ($receipt | ConvertTo-Json -Depth 5),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $temp -Destination $HotReceiptPath -Force
+        $readback = Get-Content -LiteralPath $HotReceiptPath -Raw |
+            ConvertFrom-Json
+        if ([string]$readback.schema -cne 'wechat.hot-backup-receipt.v1' -or
+            [string]$readback.status -cne 'complete' -or
+            [string]$readback.destination -cne
+                [IO.Path]::GetFullPath($HotRoot).TrimEnd('\') -or
+            [int]$readback.robocopy_exit -ne $RobocopyExit) {
+            throw 'wechat_hot_receipt_readback_mismatch'
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+    }
 }
 
 foreach ($t in $Target) {
     switch ($t) {
         'Hot' {
             New-Item -ItemType Directory -Path $HotRoot -Force | Out-Null
-            Sync-Local $HotRoot ([bool]$List)
+            $script:lastHotCopyExit = Sync-Local $HotRoot ([bool]$List)
+            if (-not $List -and $script:lastHotCopyExit -lt 8) {
+                try { Write-HotReceipt -RobocopyExit $script:lastHotCopyExit }
+                catch {
+                    Say "Hot 回执发布失败: $($_.Exception.Message)" 'Red'
+                    $overallExitCode = 1
+                }
+            }
         }
         'Local' {
             New-Item -ItemType Directory -Path $LocalRoot -Force | Out-Null
