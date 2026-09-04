@@ -1,8 +1,12 @@
 # DevConfig Backup — 开发配置 / 凭据 / 系统设置分层备份
 
-> 面向"极端意外下快速重装新机"的灾备工具。**只备份真正不可再生的配置与凭据**，
-> 软件本体、IDE 插件、npm 包、缓存等可重下内容一律剔除。
-> 核心事实：原始一锅端是 **十几 GB**，精选后仅 **~170 MB**（打包后 **~65 MB**）。
+> 面向“系统损坏后重装或换机”的灾备工具。它不做整机镜像，而是优先保留难以重建的
+> 配置、凭据和恢复状态，并剔除软件本体、IDE 插件、npm 包及常见缓存。恢复时把备份
+> 当候选材料：先看版本、兼容性和现场状态，再选择性回填，不把整个包不加判断地覆盖到新系统。
+>
+> 包体积不是固定产品承诺。2026-09-03 21:05 的最近一次 `History=False` 任务实际采集
+> **5,657.16 MB**，生成 **1,911.28 MB** 压缩包；早期约 170 MB / 65 MB 的数字已经不代表
+> 当前清单规模。
 
 本仓库只包含**工具脚本**。**备份数据（含 API key/私钥的 zip、注册表导出）永不进仓库**，
 见 [.gitignore](.gitignore)。仓库边界见 [AGENTS.md](AGENTS.md)，提交前用
@@ -24,7 +28,11 @@
 | **系统导出**(脚本现生成) | 环境变量(`HKCU\Environment` + `HKLM...\Environment`)、机器 PATH、20+ 个自定义计划任务 XML、hosts、Wi-Fi(含密码)、Xshell 注册表 | |
 | **重装清单** | `scoop export`、`winget export`、VS Code/Cursor 扩展列表、JetBrains 插件名单、已装软件 CSV | 让"可重下"的部分一条命令补回 |
 
-**默认剔除**（`-IncludeHistory` 可保留）：AI 聊天历史（`.claude\projects`、`.openclaw\session-backup*` 等，约 +256MB）。
+**默认剔除**（`-IncludeHistory` 可保留）：AI 聊天历史（`.claude\projects`、`.openclaw\session-backup*` 等）。
+
+当前包会随 `sources.psd1`、已安装工具和本机配置增长或缩小。它仍然不是整机镜像：插件、
+依赖、缓存、Docker 大盘和运行态数据库继续排除，但较完整的 AI 工具配置、Scoop persist
+与其他恢复状态会让它明显大于早期的数十 MB 示例。
 
 **清单数据驱动**：增删备份项只改 [sources.psd1](sources.psd1)，不动脚本。
 
@@ -46,28 +54,35 @@
                           ┌───────────┴────────────┐
                           ▼                         ▼
                    ② G:\80_Backup 热备       ③ Google Drive (rclone)
-                      (在线,计划任务主力)          (海外额度,改动才传)
-                   ④ H: 冷备（由 PCConfig 在人工维护窗口从 G 刷新）
+                      (在线,计划任务主力)          (每个新代上传完整 zip)
+                   ④ H: 冷备（PCConfig 日任务在人工解锁窗口机会式刷新）
 ```
 
 | 级 | 任务 | 周期/触发 | 流量 |
 |---|---|---|---|
 | ① 本地 + G盘热备 | `DevConfigBackup-Local` (`-Tier Local,Hot`) | 每天 21:05 + 登录后20分钟；错过补跑、失败重试3次 | 无 |
-| ② Drive | `DevConfigBackup-Drive-Daily` (`-Tier Drive`) | 每天 22:00；有网才跑、失败重试5次 | 海外（sha 变化才传） |
+| ② Drive | `DevConfigBackup-Drive-Daily` (`-Tier Drive`) | 每天 22:00；有网才跑、失败重试5次 | 海外（每个新代上传日期包与 `latest.zip` 两个完整对象） |
 | 微信 G盘热备 | `WeChatBackup-Hot-Daily` (`-Target Hot`) | 每天 18:30；错过补跑、失败重试3次 | 无 |
 | 微信 Drive | `WeChatBackup-Drive-Weekly` (`-Target Drive`) | 每周日 20:00；有网才跑、失败重试5次 | 只传新增/变化文件并做内容校验 |
 
-> - **介质原则(2026-07调整)**：G盘是可直接访问的在线热备；H盘是默认 BitLocker 锁定的冷备，只在人工维护窗口刷新，不注册计划任务。
-> - **配置保留**：G盘 / Drive 各保留 **3 份带日期**（`devconfig-YYYYMMDD-HHMMSS.zip`）+ 一份 `latest.zip`；H盘只接收 PCConfig 统一的 `G → H` 冷备。
-> - **rclone 远端必须明确**：显式 `-GDriveRemote` 优先；否则读取本机非秘密 binding，最后才尝试字面 `gdrive:`。候选 remote 不存在就失败并等待重试，绝不改用第一个已配置远端。binding 会作为单个 `_manifestsclone-remote-binding.json` 随 DevConfig 备份，不含 OAuth、token 或账号配置。
-> - **微信完整历史上云**：微信 38GB 里大部分是已压缩媒体，压缩收益很小；因此不用全量压缩包，而是用 `rclone copy --checksum` 逐文件增量，已上传且内容未变的文件自动跳过。默认单次 Drive 上传有 **8G 流量保险丝**，防止异常情况下大额重传。
+当前运行快照（2026-09-04 10:31，本机时区）：本地/G 配置任务、微信 Hot 与微信 Drive
+最近一次结果为 0；`DevConfigBackup-Drive-Daily` 最近一次结果为 1。随后只读远端预检已恢复，
+但远端 `latest.zip` 仍对应 9 月 2 日，本地/G 已到 9 月 3 日，本轮没有执行上传。
+`WeChatDrive-Monitor-Hourly` 是首次云端补齐的临时任务，当前已禁用，不算第五个常规任务。
+PCConfig 的 `AIRecoveryColdSync-Daily` 已启用，最近任务结果为 0，但有界回执明确是
+`status=skipped` / `H_unavailable`：本轮没有发生 H 冷拷贝，也没有自动重锁 H。
+
+> - **介质原则(2026-07调整)**：G 盘是可直接访问的在线热备；H 盘平时不可用。本仓库不注册 H 写入任务；PCConfig 自己的 `AIRecoveryColdSync-Daily` 每日机会式调用 `Invoke-CoreRecoveryMaintenance.ps1 -Mode Cold -Execute -Json`，只有用户已人工解锁 H 且全部前置条件通过时才复制。H 不可用时会写出 `status=skipped` / `H_unavailable`，不是失败，也不是完成冷备。
+> - **配置保留**：本地与 G 盘各保留 **7 份带日期**（`devconfig-YYYYMMDD-HHMMSS.zip`）+ 一份 `latest.zip`，Drive 保留 **3 份带日期** + 一份 `latest.zip`；H 盘只接收 PCConfig 统一的 `G → H` 冷备。
+> - **rclone 远端必须明确**：显式 `-GDriveRemote` 优先；否则读取本机非秘密 binding，最后才尝试字面 `gdrive:`。候选 remote 不存在就失败并等待重试，绝不改用第一个已配置远端。binding 会作为单个 `_manifests/rclone-remote-binding.json` 随 DevConfig 备份，不含 OAuth、token 或账号配置。
+> - **微信完整历史上云**：当前 G 盘微信热备约 **41.89 GB / 142,693 文件**，其中大部分媒体已经压缩，继续打成一个大包收益很小；因此使用 `rclone copy --checksum` 逐文件增量，已上传且内容未变的文件自动跳过。默认单次 Drive 上传有 **8G 流量保险丝**，限制一次任务的传输量，但不承诺累计云空间永远够用。
 > - **binding 失败关闭**：本地 remote binding 文件存在但损坏或不可读时，Drive 流程直接失败并等待修复；只有文件确实不存在时才尝试字面 `gdrive:`，避免静默切到另一云目标。
-> - **增量是自动的**：robocopy(`/E`) 先刷新静态快照，rclone(`copy --checksum`) 按内容 hash 判断是否变化；只传新增或内容变化的文件，数据库仍是**整文件级**增量。
+> - **两类“增量”必须分开**：微信用 robocopy(`/E`) 与 rclone(`copy --checksum`) 做逐文件增量；DevConfig 每次 Local 都写入当前时间并生成新的时间戳 zip/SHA-256，所以正常新代会完整上传日期包与 `latest.zip`。只有同一代、同一目标的两个对象都已经按大小/MD5 核对一致时才跳过，不是 zip 内部差量。
 > - **内容校验是完成条件**：DevConfig 对日期包和 `latest.zip` 分别核对远端大小/MD5，微信目录使用 `rclone check`；只比较大小不算内容一致。两个 DevConfig 名称始终来自同一个 hash 已验证的日期包，不能在上传中重新读取会变化的本地 `latest.zip`。
 > - **Drive 海外可靠性**：① 没开机 → `StartWhenAvailable` 开机补跑一次；② 后台任务没有显式代理变量时，自动继承当前用户已启用的 Windows 代理；代理/远端仍没就绪则返回失败，由任务级重试继续；③ 传一半断 → `rclone copy` 幂等续传；④ 本地/G 与 Drive 分任务，离线不会阻断热备。
 > - **小时监控是临时工具**：`WeChatDrive-Monitor-Hourly` 只用于首次全量补齐，首次内容级校验通过后禁用；正常运行依赖 `WeChatBackup-Hot-Daily` 与 `WeChatBackup-Drive-Weekly`。
 > - **看进度/日志**：`pwsh -File Backup-Status.ps1`。
-> - **H盘边界**：本项目不直接写 H。冷备由 PCConfig 的 `Invoke-CoreRecoveryMaintenance.ps1 -Mode Cold -Execute -Json` 按已验证 Hot 上下文和其自身安全合同执行；本仓库不替代或重建该流程。
+> - **H盘边界**：本项目不直接写 H。PCConfig 冷备要求整体 Hot context 不超过 48 小时、DevConfig 与微信各自不超过 36 小时，核对 G/H 介质身份、H 已解锁、剩余空间高于 100 GiB 并取得写锁；复制模式为 `additive_no_mirror`，不自动重锁 H。DevConfig 只有在新文件通过 SHA-256、大小和存在性核对后才按 allowlist 清理旧日期包。
 
 ---
 
@@ -93,7 +108,7 @@ pwsh -File Setup-ScheduledTasks.ps1     # 或 powershell -File（兼容 5.1）
 # 4) Drive：装 rclone 并配置远端
 scoop install rclone
 rclone config        # 配置已选的 Google Drive 远端（OAuth，需挂代理）
-# 如备份内有 _manifestsclone-remote-binding.json，只回填这一个非秘密 alias 选择：
+# 如备份内有 _manifests/rclone-remote-binding.json，只回填这一个非秘密 alias 选择：
 New-Item -ItemType Directory -Force E:\Projects\Backups\devconfig-backup\state
 Copy-Item _manifests\rclone-remote-binding.json E:\Projects\Backups\devconfig-backup\state\rclone-remote-binding.json
 ```
@@ -108,21 +123,25 @@ Copy-Item _manifests\rclone-remote-binding.json E:\Projects\Backups\devconfig-ba
 
 ## 4. 微信原应用数据备份与恢复（独立流）
 
-微信应用数据约 **38 GB**（媒体也是原应用数据的一部分），太大不进配置包，单独走 [Backup-WeChat.ps1](Backup-WeChat.ps1)。本地/G 的原生恢复路径保留 `xwechat_files` 的原生目录布局，目标是让官方微信客户端有机会继续使用该数据；本次恢复流程不是个人保险库、解密工具或聊天导出工具。
+微信应用数据当前约 **41.89 GB**（媒体也是原应用数据的一部分），太大不进配置包，单独走 [Backup-WeChat.ps1](Backup-WeChat.ps1)。本地/G 的原生恢复路径保留 `xwechat_files` 的原生目录布局，目标是让官方微信客户端有机会继续使用该数据；本次恢复流程不是个人保险库、解密工具或聊天导出工具。
 
 ```powershell
 pwsh -File Backup-WeChat.ps1 -List          # 干跑:刷新本地快照后列出待传量
 pwsh -File Backup-WeChat.ps1 -Target Hot     # 全量到G盘热备(robocopy /E,只增不删,零流量;主力)
+pwsh -File Backup-WeChat.ps1 -Target Local   # 增量到本地另一盘
 pwsh -File Backup-WeChat.ps1 -Target Drive   # 完整原应用数据增量到Drive(含媒体;已传自动跳过;默认8G封顶)
 pwsh -File Backup-WeChat.ps1 -Target Drive -MaxTransfer 0   # 一次性补齐模式(关闭封顶,需人工看进度)
 pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly   # 临时省流量模式:只传db_storage
+pwsh -File Backup-WeChat.ps1 -Target Drive -DbOnly -DriveFull # 兼容覆盖：仍按完整原应用数据上传
 ```
 
 **当前策略：完整原应用数据逐文件增量备份**：
-- **G盘热备**：`Backup-WeChat.ps1 -Target Hot` 原样复制所选 `xwechat_files` 目录到 `G:\80_Backup\WeChat\xwechat_files`，是零流量恢复主力；H盘仅人工冷备。
+- **G盘热备**：`Backup-WeChat.ps1 -Target Hot` 原样复制所选 `xwechat_files` 目录到 `G:\80_Backup\WeChat\xwechat_files`，是零流量恢复主力；H 由 PCConfig 日任务在人工解锁窗口机会式冷备。
+- **热备回执**：一次 G 盘热备成功后，脚本原子写入并回读 `G:\80_Backup\ControlPlane\wechat-hot-last.json`。回执只含 schema、完成时间、目标绑定、robocopy 退出码和排除项数量，不输出文件名或正文；PCConfig 用它判断微信热备是否足够新，再决定人工冷备窗口能否继续。
 - **USB 人工冷备**：可把其 `xwechat_files` 路径显式传给恢复脚本的 `-BackupRoot`；不会自动扫盘或选择介质。
 - **Drive 副本**：代码只使用用户已选 remote，远端缺失、对象缺失或对象不一致都会失败关闭；本次没有实际上传、改账号或修改现有云端对象，不能据此声称云端恢复已验收。
 - **增量机制**：`robocopy /E` 和 `rclone copy --checksum` 只复制新增/内容变化文件；文件大小和修改时间相同但内容变化时也会被识别。
+- **模式边界**：`-DbOnly` 只传 `db_storage`，不含图片、视频等媒体，不能称为完整原应用备份；`-DriveFull` 是兼容覆盖开关。`-MaxTransfer 8G` 只限制一次脚本进程，计划任务最多重试 5 次会产生新的单次额度；`-MaxTransfer 0` 只能用于明确的一次性补齐并持续人工观察。
 
 **流量护栏**：静态快照上传(不直传使用中源目录，杜绝"边传边改"反复重传)、`-MaxTransfer 8G` 默认硬封顶。SQLite 的 `-wal`、`-shm` 与 journal 伴随文件会随原生目录保留；SQLite 明确说明 WAL 是数据库持久状态的一部分，分离时可能丢失已提交事务或损坏数据库，[官方说明](https://sqlite.org/wal.html#the_wal_file)。脚本不替应用做 checkpoint，也不把运行中复制称为一致快照。
 
@@ -146,6 +165,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -BackupRo
 
 `COPY_COMPLETE_AWAITING_HUMAN_ACCEPTANCE` 只表示原生目录已复制，不表示“微信已恢复”。此后由用户自行启动官方微信、按提示登录目标账号并确认预期历史可见；在此之前必须保留备份源与 `.pre-restore-*` 回滚目录。脚本不读取账号、数据库、聊天、媒体或密钥正文，也不自动关闭或启动微信。
 
+恢复预检只证明源是可用的非空目录、目标和已知客户端状态可检查，并不做内容 hash 完整性验证。它拒绝盘符根目录、源/目标相同或互为父子目录，以及路径链上的 reparse point（重解析点）。复制失败时，部分结果移到 `.failed-restore-*`，再恢复 `.pre-restore-*` 原目录；`-DriveOnly` 仍是未完成真实联网验收的兼容路径。
+
 本次闭合的范围是本地/G/人工指定 USB 的原生目录恢复，以及云端代码的失败关闭逻辑；`-DriveOnly` 与上传链路没有做真实联网验收，也不应从本次结果推导为云端已恢复或可用。
 
 ---
@@ -167,12 +188,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -BackupRo
 | 文件 | 作用 |
 |---|---|
 | `Backup-DevConfig.ps1` | 主脚本：采集→系统导出→清单→打包→分层分发（`-Tier Local/Hot/Drive`） |
-| `Backup-WeChat.ps1` | 微信原应用数据增量备份 |
+| `Backup-WeChat.ps1` | 微信原应用数据增量备份；G 盘成功后发布不含文件名或正文的有界热备回执 |
 | `Restore-WeChat.ps1` | 默认只读预检、显式原生目录回填与回滚保护；官方客户端验收仍由用户完成 |
 | `Initialize-BackupNetwork.ps1` | 让无窗口计划任务在缺少进程代理变量时继承当前用户已启用的 Windows 代理，不保存固定代理地址 |
 | `Monitor-WeChatDrive.ps1` | 每小时监控微信 Drive 备份进度；未完成且无上传进程时自动续传；成功后自动禁用监控任务 |
 | `Install-WeChatDriveMonitor.ps1` | 注册/刷新微信 Drive 小时监控任务；直接运行 PowerShell，30 分钟硬超时，避免监控实例卡住 |
 | `Setup-ScheduledTasks.ps1` | 注册/重建 DevConfig + WeChat 常规备份计划任务（幂等） |
+| `ScheduledTask-Registration.Common.ps1` | 拒绝接管非本项目同名任务；注册前保存精确 XML 前像，逐项回读失败时恢复原定义 |
 | `sources.psd1` | 备份源清单 + 排除规则（数据，改这里即可） |
 | `AGENTS.md` | 仓库边界、PCConfig 分工、公开安全规则 |
 | `tests/Assert-NoBackupArtifacts.ps1` | 检查 Git 候选文件中没有备份包、注册表导出、密钥容器、`.env` 或微信数据库 |
@@ -188,10 +210,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -BackupRo
   拒绝分号分隔数组；无 BOM 时中文按本地代码页误解。pwsh7 宽容会掩盖此问题。
 - **`-File` 的逗号陷阱**：`powershell -File x.ps1 -Tier Local,Hot` 会把 `Local,Hot` 当**单个字符串**
   传入（不是数组）。脚本已在入口 `-split ','` 归一化，并去掉了 `ValidateSet`。
-- **任务计划无法启动 Store 版 pwsh**：`(Get-Command pwsh).Source` 指向
-  `C:\Program Files\WindowsApps\...\pwsh.exe`，任务计划起不来（结果码 1）。
-  故启动器固定用 `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`（脚本兼容 5.1）。
-- **脚本结尾 `exit 0`**：7z 遇到被占用文件返回警告码 1，显式 `exit 0` 让任务稳定报成功。
+- **任务计划不直接使用 Store 别名**：四个常规任务的 Action 是 `wscript.exe`。隐藏 VBS 先找
+  `%ProgramFiles%\PowerShell\7\pwsh.exe`，存在就用 PowerShell 7；只有该固定路径不存在时才选择
+  `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe` 5.1。独立临时监控安装器固定用 5.1。
+- **7z 非零不能装成成功**：当前脚本只有在采集、打包和请求的分发层全部完成后才返回 0；7z 返回警告或错误码时保留旧包、跳过本轮分发并让计划任务重试。
 
 ---
 
@@ -202,7 +224,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Restore-WeChat.ps1 -BackupRo
 cd E:\Projects\Backups\devconfig-backup
 .\Backup-DevConfig.ps1 -Tier Local          # 仅本地
 .\Backup-DevConfig.ps1 -Tier Local,Hot      # 本地+G盘热备
-.\Backup-DevConfig.ps1 -Tier Drive          # 仅上 Drive（改动才传；-Force 强制）
+.\Backup-DevConfig.ps1 -Tier Drive          # 把当前冻结的新代完整上传为日期包与 latest.zip
 .\Backup-DevConfig.ps1 -Tier Local,Hot -IncludeHistory   # 连聊天历史一起备(+256M)
 
 .\Backup-WeChat.ps1 -List                   # 微信干跑估算
@@ -232,7 +254,7 @@ rclone about <remote>:                                 # 配额
 ### 🆘 新电脑完整恢复（按顺序）
 ```powershell
 # 1. 装 PowerShell7 / Git / scoop(含7zip) / rclone / Windows Terminal / 各 IDE
-#    （Store 版 pwsh 任务计划起不来，本工具的任务固定用 powershell.exe 5.1）
+#    （四个常规任务用 wscript 隐藏启动：优先 Program Files 下的 PowerShell 7，缺失时才用 5.1）
 
 # 2. 取回最新配置包：优先从 G 热备，灾难场景再人工解锁 H 冷备；也可从 Drive 拉
 rclone copy <remote>:Backups/WLY/latest.zip E:\restore\
