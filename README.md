@@ -88,6 +88,35 @@ PCConfig 的 `AIRecoveryColdSync-Daily` 已启用，最近任务结果为 0，�
 
 ## 3. 在新电脑上恢复（重装后）
 
+先装 Git，再取得两个不同角色的仓库：本 PUBLIC 仓库只提供 DevConfig/微信工具；机器路径、
+计划任务、系统设置与 H 冷备顺序来自 PRIVATE `wlyaaaaa/PCConfig`。恢复 GitHub 登录后执行：
+
+```powershell
+git clone https://github.com/wlyaaaaa/devconfig-backup.git E:\Projects\Backups\devconfig-backup
+git clone https://github.com/wlyaaaaa/PCConfig.git E:\PCConfig
+```
+
+若暂时没有 PRIVATE PCConfig 访问权，仍可检查/解压 DevConfig 包和预检微信，但必须暂停
+机器级设置、计划任务与 H 冷备步骤；一个本地路径不存在不能冒充恢复入口已经就绪。
+
+选包不能只看“最新”文件名。当前 `state\latest.sha256` 只保存在原工作目录，没有随
+G/Drive 包发布为可携带 sidecar；若它仍存活，可核对候选包 SHA-256。若已丢失，
+`7z t` 只能证明 zip 内部 CRC 可读，不能证明它与原始发布哈希一致。这是当前真实缺口；
+核验失败时改试上一日期包或另一介质，所有候选都失败就停止恢复。
+
+```powershell
+$candidateZip = 'G:\80_Backup\DevConfig\latest.zip'
+& 'C:\Program Files\7-Zip\7z.exe' t $candidateZip
+$shaRecord = 'E:\Projects\Backups\devconfig-backup\state\latest.sha256'
+if (Test-Path -LiteralPath $shaRecord) {
+    $expectedSha = (Get-Content $shaRecord -ErrorAction Stop).Split()[0]
+    $actualSha = (Get-FileHash $candidateZip -Algorithm SHA256).Hash
+    if ($actualSha -ine $expectedSha) { throw 'devconfig_backup_hash_mismatch' }
+} else {
+    Write-Warning 'portable expected SHA-256 is unavailable; 7z CRC is the strongest current check'
+}
+```
+
 ```powershell
 # 0) 装基础：scoop（含 7zip）、Windows Terminal、各 IDE、rclone
 #    用备份里的 _manifests\ 一键补软件：
@@ -116,8 +145,8 @@ Copy-Item _manifests\rclone-remote-binding.json E:\Projects\Backups\devconfig-ba
 > ⚠️ **两个恢复陷阱**（务必注意）：
 > 1. **Documents 在 E 盘**：重装后"我的文档"默认指向 `C:\Users\<你>\Documents`，Xshell/Navicat 会读到空目录。
 >    解决：右键"文档"→属性→位置→移动 到 `E:\Documents`，旧配置瞬间满血。
-> 2. **用户名必须仍是 `10979`**：很多配置里固化了 `C:\Users\10979\...` 绝对路径。
->    新建用户时保持同名，或恢复后批量文本替换路径。
+> 2. **用户名路径要兼容**：很多配置里固化了 `C:\Users\10979\...` 绝对路径。
+>    沿用 `10979` 最省事；使用新用户名也可以，但恢复后必须有界替换或重映射这些已知路径。
 
 ---
 
