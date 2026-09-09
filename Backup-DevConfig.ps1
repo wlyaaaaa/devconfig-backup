@@ -254,18 +254,49 @@ function Invoke-Pack {
 # ============================================================
 # 5) 分发：G盘热备 / H盘冷备
 # ============================================================
-function Push-Hot {
-    param($Pack)
+function Test-HotRootAvailable {
+    param([Parameter(Mandatory)][string]$Path)
     try {
-        New-Item -ItemType Directory -Path $HotRoot -Force -ErrorAction Stop | Out-Null
-        Copy-Item -LiteralPath $Pack.Zip -Destination $HotRoot -Force -ErrorAction Stop
-        Copy-Item -LiteralPath (Join-Path $OutDir 'latest.zip') -Destination $HotRoot -Force -ErrorAction Stop
-        Get-ChildItem $HotRoot -Filter 'devconfig-*.zip' | Sort-Object LastWriteTime -Descending |
-            Select-Object -Skip $KeepHot | Remove-Item -Force -ErrorAction SilentlyContinue
-        Write-Log "G盘热备同步完成 -> $HotRoot" 'OK'
+        $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Path))
+        return -not [string]::IsNullOrWhiteSpace($root) -and
+            (Test-Path -LiteralPath $root -PathType Container)
     }
     catch {
-        Set-BackupFailure "G盘热备同步失败: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Push-Hot {
+    param($Pack)
+    $attemptCount = 3
+    for ($attempt = 1; $attempt -le $attemptCount; $attempt++) {
+        if (-not (Test-HotRootAvailable -Path $HotRoot)) {
+            if ($attempt -lt $attemptCount) {
+                Write-Log "G盘热备根目录暂不可用，$attemptCount 次中的第 $attempt 次等待后重试" 'WARN'
+                Start-Sleep -Seconds 30
+                continue
+            }
+            Set-BackupFailure "G盘热备同步失败: hot_backup_root_unavailable:$HotRoot"
+            return
+        }
+        try {
+            New-Item -ItemType Directory -Path $HotRoot -Force -ErrorAction Stop | Out-Null
+            Copy-Item -LiteralPath $Pack.Zip -Destination $HotRoot -Force -ErrorAction Stop
+            Copy-Item -LiteralPath (Join-Path $OutDir 'latest.zip') -Destination $HotRoot -Force -ErrorAction Stop
+            Get-ChildItem $HotRoot -Filter 'devconfig-*.zip' | Sort-Object LastWriteTime -Descending |
+                Select-Object -Skip $KeepHot | Remove-Item -Force -ErrorAction SilentlyContinue
+            Write-Log "G盘热备同步完成 -> $HotRoot" 'OK'
+            return
+        }
+        catch {
+            if ($attempt -lt $attemptCount -and -not (Test-HotRootAvailable -Path $HotRoot)) {
+                Write-Log "G盘热备写入期间不可用，$attemptCount 次中的第 $attempt 次等待后重试" 'WARN'
+                Start-Sleep -Seconds 30
+                continue
+            }
+            Set-BackupFailure "G盘热备同步失败: $($_.Exception.Message)"
+            return
+        }
     }
 }
 
