@@ -24,6 +24,7 @@
 | **终端/代理** | FinalShell `conn\`(SSH会话+密码)、Clash Verge Rev `profiles\`(订阅)+yaml(剔 geo*.dat) | |
 | **Docker 小配置** | `.docker\config.json`、daemon 配置、contexts、Docker Desktop settings 偏好文件 | 不含 Docker Desktop VHDX、镜像层、容器运行态、登录/会话数据库 |
 | **生产力** | PowerToys 配置、PixPin 配置、用户自装字体、Scoop `persist\` | |
+| **OBS Studio** | `AppData\Roaming\obs-studio\basic`、`plugin_config`、`global.ini`、`user.ini` | 场景集合、Profile、编码/插件配置；不含录像、日志、崩溃、profiler 与更新缓存 |
 | **散件** | `.gitconfig .zshrc .wakatime.cfg .claude.json .wslconfig .condarc .npmrc` | |
 | **系统导出**(脚本现生成) | 环境变量(`HKCU\Environment` + `HKLM...\Environment`)、机器 PATH、20+ 个自定义计划任务 XML、hosts、Wi-Fi(含密码)、Xshell 注册表 | |
 | **重装清单** | `scoop export`、`winget export`、VS Code/Cursor 扩展列表、JetBrains 插件名单、已装软件 CSV | 让"可重下"的部分一条命令补回 |
@@ -43,6 +44,7 @@
 - Clash：取 `profiles\`+yaml，剔 `geoip.dat/geosite.dat/Country.mmdb`(34M 可重下)
 - JetBrains：剔 `plugins\`(10.6G)+`jdbc-drivers\`
 - Docker：DevConfig 只保存 allowlist 内的 CLI/Desktop 小配置；本地自建镜像另由软件环境备份导出 tar，Docker Desktop 的 `docker_data.vhdx`、登录态、会话数据库和插件二进制不进 DevConfig
+- OBS Studio：只取 `basic`、`plugin_config`、`global.ini`、`user.ini`；录像输出目录以及 `logs`、`crashes`、`profiler_data`、`updates` 不进入 DevConfig。所选配置可能包含插件/推流相关敏感字段，因此只存在私有备份包中，不进入 Git。
 
 ---
 

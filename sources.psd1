@@ -61,7 +61,9 @@
         'Typora',
         'WhirlwindFX\SignalRgb',
         'GitHub CLI',
-        'io.github.clash-verge-rev.clash-verge-rev'
+        'io.github.clash-verge-rev.clash-verge-rev',
+        'obs-studio\basic',
+        'obs-studio\plugin_config'
     )
 
     # AppData\Roaming 下精确文件（保留相对路径）
@@ -74,7 +76,9 @@
         'Docker Desktop\Preferences',
         'Docker Desktop\window-management.json',
         'Docker Desktop\versions.json',
-        'Docker Desktop\notifications.json'
+        'Docker Desktop\notifications.json',
+        'obs-studio\global.ini',
+        'obs-studio\user.ini'
     )
 
     # AppData\Local 下目录（精确子目录，避开 GB 级缓存/安装目录）
