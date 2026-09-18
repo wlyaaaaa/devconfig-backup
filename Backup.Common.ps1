@@ -42,13 +42,13 @@ function Open-BackupResourceLock([string]$Resource){
 }
 function Test-BackupNameExcluded([string]$Name,[string[]]$Patterns=@()){foreach($pattern in $Patterns){if($Name-like $pattern){return $true}};return $false}
 function Get-BackupStableFileHash([string]$Path){
- $before=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+ $before=[IO.FileInfo]::new($Path);$before.Refresh();$null=$before.Length
  $stream=$null;$algorithm=[Security.Cryptography.SHA256]::Create()
  try{
-  $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+  $stream=[IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete),1048576,[IO.FileOptions]::SequentialScan)
   $hash=([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-','').ToLowerInvariant()
  }catch{$_.Exception.Data['backup_source_path']=$Path;throw}finally{if($stream){$stream.Dispose()};$algorithm.Dispose()}
- $after=Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+ $after=[IO.FileInfo]::new($Path);$after.Refresh();$null=$after.Length
  if($before.Length-ne $after.Length -or $before.LastWriteTimeUtc.Ticks-ne $after.LastWriteTimeUtc.Ticks){throw 'backup_source_changed_during_hash'};return $hash
 }
 function Get-BackupTreeInventory {
@@ -68,7 +68,7 @@ function Get-BackupTreeInventory {
    $logical=if($RelativePrefix){$RelativePrefix.TrimEnd('/')+'/'+$relative}else{$relative}
    if(Test-BackupNameExcluded $logical $ExcludeRelativePaths){$excluded++;continue}
    if($isDirectory){$directories.Add($relative);$pending.Push($path);continue}
-   $item=Get-Item -LiteralPath $path -Force -ErrorAction Stop;$digest=if($Hash){Get-BackupStableFileHash $path}else{$null}
+   $item=[IO.FileInfo]::new($path);$item.Refresh();$null=$item.Length;$digest=if($Hash){Get-BackupStableFileHash $path}else{$null}
    if($files.ContainsKey($relative)){throw 'backup_case_collision'}
    $files.Add($relative,[pscustomobject]@{relative_path=$relative;full_path=$path;length=[long]$item.Length;mtime_ticks=[long]$item.LastWriteTimeUtc.Ticks;sha256=$digest})
   }
