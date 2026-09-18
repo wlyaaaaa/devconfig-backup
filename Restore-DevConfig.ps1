@@ -10,7 +10,7 @@ param([string]$Archive='G:\80_Backup\DevConfig\latest.zip',[string]$Destination=
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Backup.Common.ps1')
 Add-Type -AssemblyName System.IO.Compression,System.IO.Compression.FileSystem
-$Archive=[IO.Path]::GetFullPath($Archive);$Destination=Resolve-BackupPath $Destination
+$Archive=Resolve-BackupPath $Archive;$Destination=Resolve-BackupPath $Destination
 Assert-BackupPathsIndependent $Archive $Destination;Assert-BackupPathChain $Destination;Assert-BackupPathChain $Archive
 $receipt=Read-BackupJson ($Archive+'.receipt.json') -Required;$manifest=Read-BackupJson ($Archive+'.manifest.json') -Required
 if($receipt.schema-cne 'devconfig.package-receipt.v2' -or $receipt.status-cne 'complete' -or $receipt.collection_status-cne 'complete' -or $receipt.archive_verification-cne '7z_test_pass' -or $receipt.sha256-cnotmatch '^[a-f0-9]{64}$'){throw 'restore_collection_success_required'}

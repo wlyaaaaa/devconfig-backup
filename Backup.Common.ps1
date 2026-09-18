@@ -187,6 +187,7 @@ function Get-BackupFailureCode($ErrorRecord){
  if($text-match '^([a-z][a-z0-9_]+)(?::[a-z0-9_]+)?$'){return $text};return 'backup_io_or_dependency_failure'
 }
 function Get-VerifiedDevConfigPackage([string]$OutDir,[switch]$MetadataOnly){
+ $OutDir=Resolve-BackupPath $OutDir
  $pointer=Read-BackupJson (Join-Path $OutDir 'current.json') -Required
  if($pointer.schema-cne 'devconfig.package-current.v2' -or $pointer.status-cne 'complete' -or $pointer.package_name-cnotmatch '^devconfig-[0-9]{8}(?:-[0-9]{6})?(?:-[a-f0-9]{8})?\.zip$' -or $pointer.sha256-cnotmatch '^[a-f0-9]{64}$'){throw 'backup_package_pointer_invalid'}
  $zip=Join-Path $OutDir $pointer.package_name;$receipt=Read-BackupJson ($zip+'.receipt.json') -Required;$item=Get-Item -LiteralPath $zip -ErrorAction Stop
