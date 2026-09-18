@@ -1,86 +1,90 @@
 ﻿<#
 .SYNOPSIS
-  备份状态/进度面板：任务结果、各处备份新鲜度、Drive 上次成功、微信上传进度、最近日志。
-.EXAMPLE
-  pwsh -File Backup-Status.ps1            # 一览
-  pwsh -File Backup-Status.ps1 -LogLines 25
-  # 实时跟最新日志：  Get-Content (gci E:\Projects\Backups\devconfig-backup\logs\*.log | sort LastWriteTime)[-1] -Wait -Tail 20
+  Bounded backup status. Default is local-only, read-only, with no private log output.
+.DESCRIPTION
+  -Gui opens a visible panel; closing it stops display refresh, not backups.
+  -LiveDrive explicitly queries cloud metadata and may refresh the existing OAuth token.
 #>
 [CmdletBinding()]
-param([int]$LogLines = 12, [switch]$NoDrive, [string]$GDriveRemote = 'gdrive:')
-
-$dir   = $PSScriptRoot
-$state = Join-Path $dir 'state'
-$logs  = Join-Path $dir 'logs'
-. (Join-Path $dir 'Initialize-BackupNetwork.ps1')
-$script:GDriveRemoteWasExplicit = $PSBoundParameters.ContainsKey('GDriveRemote')
-function GB($b){ '{0:N2} GB' -f ($b/1GB) }
-function Age($t){ if(-not $t){return '—'}; $d=(Get-Date)-$t; if($d.TotalDays -ge 1){'{0:N0} 天前' -f $d.TotalDays}elseif($d.TotalHours -ge 1){'{0:N0} 小时前' -f $d.TotalHours}else{'{0:N0} 分钟前' -f $d.TotalMinutes} }
-function Line(){ Write-Host ('-'*60) -ForegroundColor DarkGray }
-Write-Host "`n===== DevConfig / WeChat 备份状态  $(Get-Date -Format 'yyyy-MM-dd HH:mm') =====" -ForegroundColor Cyan
-
-# 1) 计划任务
-Line; Write-Host "① 计划任务" -ForegroundColor Yellow
-Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*' -ErrorAction SilentlyContinue | ForEach-Object {
-    $i = $_ | Get-ScheduledTaskInfo
-    $r = switch ($i.LastTaskResult) { 0 {'OK'} 267009 {'运行中'} 267011 {'未运行过'} default {"err=$($i.LastTaskResult)"} }
-    '{0,-26} {1,-7} 上次:{2}  结果:{3}  下次:{4}' -f $_.TaskName, $_.State,
-        $(if($i.LastRunTime){$i.LastRunTime.ToString('MM-dd HH:mm')}else{'—'}), $r,
-        $(if($i.NextRunTime){$i.NextRunTime.ToString('MM-dd HH:mm')}else{'—'})
+param([int]$LogLines=0,[switch]$NoDrive,[string]$GDriveRemote='gdrive:',[switch]$LiveDrive,[switch]$Json,[switch]$Gui,[switch]$VerifyContent,[string]$OutputRoot='',[string]$HotRoot='G:\80_Backup\DevConfig',[string]$HotReceiptPath='G:\80_Backup\ControlPlane\wechat-hot-last.json',[string]$WeChatHotRoot='G:\80_Backup\WeChat\xwechat_files')
+if(-not $OutputRoot){$OutputRoot=$PSScriptRoot}
+$ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'Backup.Common.ps1')
+. (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
+$remoteWasExplicit=$PSBoundParameters.ContainsKey('GDriveRemote')
+function Get-ReceiptAgeState([string]$Timestamp){
+ $age=([DateTimeOffset]::UtcNow-[DateTimeOffset]::Parse($Timestamp)).TotalHours
+ if($age-lt -0.1){return 'invalid_timestamp'};if($age-gt 36){return 'stale'};return 'current'
 }
-
-# 2) 本地 / G盘热备
-Line; Write-Host "② 本地 & G盘热备" -ForegroundColor Yellow
-$lz = Join-Path $dir 'out\latest.zip'
-if (Test-Path $lz) { '本地 latest.zip : {0:N1} MB  ({1})' -f ((Get-Item $lz).Length/1MB), (Age (Get-Item $lz).LastWriteTime) }
-$dated = Get-ChildItem (Join-Path $dir 'out') -Filter 'devconfig-*.zip' -ErrorAction SilentlyContinue
-'本地带日期版   : {0} 份  {1}' -f $dated.Count, (($dated | Sort-Object Name -Descending | Select-Object -First 3 -ExpandProperty Name) -join ', ')
-$hotRoot = 'G:\80_Backup'
-$gd = Join-Path $hotRoot 'DevConfig'
-$gw = Join-Path (Join-Path $hotRoot 'WeChat') 'xwechat_files'
-if (Test-Path $gd) { $z=Get-ChildItem $gd -Filter 'devconfig-*.zip'; 'G盘 配置热备   : {0} 份带日期, 最新 {1}' -f $z.Count, (Age ($z|Sort LastWriteTime|Select -Last 1).LastWriteTime) }
-else { Write-Host 'G盘 配置热备   : 尚未建立' -ForegroundColor DarkGray }
-if (Test-Path $gw) { $w=Get-ChildItem $gw -Recurse -File -ErrorAction SilentlyContinue|Measure-Object Length -Sum; 'G盘 微信热备   : {0} ({1} 文件)' -f (GB $w.Sum), $w.Count }
-else { Write-Host 'G盘 微信热备   : 尚未建立' -ForegroundColor DarkGray }
-
-# 3) Drive
-if (-not $NoDrive) {
-    Line; Write-Host "③ Google Drive (海外)" -ForegroundColor Yellow
-    $ds = Join-Path $state 'last-drive-success.txt'
-    if (Test-Path $ds) { $t=[datetime]::Parse((Get-Content $ds -Raw).Trim()); Write-Host ("配置上次成功上云: {0}  ({1})" -f $t.ToString('yyyy-MM-dd HH:mm'), (Age $t)) -ForegroundColor Green }
-    else { Write-Host '配置上次成功上云: 无记录' -ForegroundColor DarkGray }
-    if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) {
-        Write-Host 'rclone 未安装，无法核对配置的 Drive 远端' -ForegroundColor DarkGray
-    } else {
-        $remoteResolution = Resolve-ConfiguredRcloneRemote -Remote $GDriveRemote `
-            -RemoteWasExplicit $script:GDriveRemoteWasExplicit `
-            -BindingPath (Join-Path $state 'rclone-remote-binding.json')
-        if (-not $remoteResolution.Success) {
-            Write-Host "配置的 Drive 远端不可用 reason=$($remoteResolution.Reason)" -ForegroundColor Red
-        } else {
-            $remote = $remoteResolution.Remote
-        Write-Host "连通性测试 ..." -NoNewline
-        & rclone lsd "$remote" --max-depth 1 --contimeout 10s --timeout 15s --retries 1 *> $null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host " 可达 ✓" -ForegroundColor Green
-            $cfg = & rclone lsf "${remote}Backups/WLY" 2>$null
-            "  配置: $(($cfg | Where-Object {$_ -match 'devconfig'}).Count) 份带日期 + latest.zip"
-            $wxsz = (& rclone size "${remote}Backups/WeChat/xwechat_files" --json 2>$null | ConvertFrom-Json)
-            if ($wxsz) { "  微信: {0} / ~38 GB ({1} 文件)  {2}" -f (GB $wxsz.bytes), $wxsz.count, $(if($wxsz.bytes -lt 37GB){'⏳上传中'}else{'✓'}) }
-            } else { Write-Host " 不可达（代理没开/网络断）——下次触发会自动重试" -ForegroundColor Red }
-        }
-    }
+function Get-PackageStatus([string]$Directory){
+ $result=[ordered]@{status='unknown';path=$Directory;package=$null;bytes=$null;completed_utc=$null;verification='unknown';reason=$null}
+ try{
+  $pack=Get-VerifiedDevConfigPackage $Directory -MetadataOnly:(-not $VerifyContent)
+  $result.status=Get-ReceiptAgeState $pack.Current.completed_utc;$result.package=$pack.Name;$result.bytes=$pack.Receipt.package_bytes;$result.completed_utc=$pack.Current.completed_utc
+  if($VerifyContent -and (Get-BackupStableFileHash (Join-Path $Directory 'latest.zip'))-cne $pack.Sha){throw 'latest_alias_mismatch'}
+  $result.verification=if($VerifyContent){'sha256_rechecked'}else{'producer_verified_not_rehashed_by_status'}
+ }catch{$result.reason=Get-BackupFailureCode $_;if([IO.File]::Exists((Join-Path $Directory 'latest.zip'))){$result.status='legacy_or_unverified'}}
+ return [pscustomobject]$result
 }
-
-# 4) 微信→Drive 首次全量进度（若日志存在）
-$wdlog = Join-Path $logs 'wechat-drive-firstfull.log'
-if (Test-Path $wdlog) {
-    Line; Write-Host "④ 微信→Drive 首传日志尾部" -ForegroundColor Yellow
-    Get-Content $wdlog -Tail 6 -ErrorAction SilentlyContinue
+function Get-BackupStatusSnapshot {
+ $state=Join-Path $OutputRoot 'state';$attempts=@()
+ foreach($name in @('devconfig-local-last.json','devconfig-drive-last.json','wechat-local-last.json','wechat-drive-last.json')){
+  try{$record=Read-BackupJson (Join-Path $state $name);if($record){$attempts+=$record}}catch{$attempts+=[pscustomobject]@{schema=$name;status='unreadable';failure='run_record_unreadable'}}
+ }
+ $tasks=@();try{foreach($task in @(Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*','WeChatDrive-Monitor-Hourly' -ErrorAction Stop)){
+  $info=$task|Get-ScheduledTaskInfo -ErrorAction Stop
+  $tasks+=[pscustomobject]@{name=$task.TaskName;state=[string]$task.State;enabled=[bool]$task.Settings.Enabled;last_exit=$info.LastTaskResult;last_run=$info.LastRunTime;next_run=$info.NextRunTime}
+ }}catch{$tasks=@([pscustomobject]@{name='Task Scheduler';state='unavailable';last_exit=$null;next_run=$null})}
+ $wechat=[ordered]@{status='unknown';verification='unknown';bytes=$null;completed_utc=$null;application_consistency='not_proven';application_recovery='not_tested';reason=$null}
+ try{
+  $receipt=Read-BackupJson $HotReceiptPath -Required
+  if($receipt.schema-cne 'wechat.hot-backup-receipt.v2' -or $receipt.status-cne 'complete' -or $receipt.collection_status-cne 'complete' -or $receipt.verification_status-cne 'sha256_full_tree' -or $receipt.retention_status-cne 'source_follow_verified'){throw 'wechat_receipt_not_verified'}
+  if($receipt.destination-ine (Resolve-BackupPath $WeChatHotRoot)){throw 'wechat_receipt_destination_mismatch'}
+  $manifestPath=$WeChatHotRoot+'.backup-manifest.json'
+  $bound=Get-VerifiedBackupTreeManifest $WeChatHotRoot -VerifyContent:$VerifyContent
+  if($bound.run_id-cne $receipt.generation_id -or $bound.content_sha256-cne $receipt.content_sha256 -or (Get-Item $manifestPath).Length-ne $receipt.manifest_bytes -or (Get-BackupStableFileHash $manifestPath)-cne $receipt.manifest_sha256){throw 'wechat_receipt_manifest_mismatch'}
+  $wechat.status=Get-ReceiptAgeState $receipt.completed_utc;$wechat.verification=if($VerifyContent){'sha256_full_tree_rechecked'}else{'producer_verified_manifest_bound'};$wechat.completed_utc=$receipt.completed_utc;$wechat.bytes=$receipt.bytes;$wechat.file_count=$receipt.file_count
+ }catch{$wechat.reason=Get-BackupFailureCode $_}
+ $drive=[ordered]@{status='not_contacted';application_recovery='not_tested'}
+ if($LiveDrive -and -not $NoDrive){try{
+  $rclone=Get-BackupExecutable rclone -FallbackPath 'E:\Scoop\shims\rclone.exe';$env:PATH=[IO.Path]::GetDirectoryName($rclone)+';'+$env:PATH;$null=Initialize-BackupNetwork
+  $resolved=Resolve-ConfiguredRcloneRemote -Remote $GDriveRemote -RemoteWasExplicit $remoteWasExplicit -BindingPath (Join-Path $state 'rclone-remote-binding.json')
+  if(-not $resolved.Success){throw 'drive_remote_unavailable'}
+  $probe=Invoke-RcloneDrivePreflight -Remote $resolved.Remote -Attempts 1 -DelaySeconds 0
+  $drive.status=if($probe.Success){'reachable_not_content_verified'}else{'unreachable'}
+ }catch{$drive.status='unavailable';$drive.reason=Get-BackupFailureCode $_}}
+ $local=Get-PackageStatus (Join-Path $OutputRoot 'out');$hot=Get-PackageStatus $HotRoot
+ $health=if(@($attempts|Where-Object{$_.status-in @('failed','unreadable')}).Count -or $local.status-ne 'current' -or $hot.status-ne 'current' -or $wechat.status-ne 'current'){'attention_required'}else{'receipts_current'}
+ return [pscustomobject][ordered]@{schema='devconfig.backup-status.v2';observed_utc=(Get-BackupUtc);write_mode=$(if($LiveDrive -and -not $NoDrive){'metadata_query_may_refresh_oauth'}else{'zero_write'});status=$health;local=$local;hot=$hot;wechat_hot=[pscustomobject]$wechat;drive=[pscustomobject]$drive;last_attempts=$attempts;scheduled_tasks=$tasks;application_recovery='not_tested';log_payloads='not_read'}
 }
-
-# 5) 最近日志
-Line; Write-Host "⑤ 最近一次备份日志" -ForegroundColor Yellow
-$last = Get-ChildItem "$logs\backup-*.log","$logs\wechat-*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if ($last) { Write-Host "($($last.Name))" -ForegroundColor DarkGray; Get-Content $last.FullName -Tail $LogLines -Encoding UTF8 }
-Line
+function Format-BackupStatusForHuman($Snapshot){
+ $labels=@{current='当前有效';stale='已过期';unknown='尚未验证';legacy_or_unverified='旧版或未验证';complete='完成';failed='失败';running='进行中';not_requested='本次未请求';not_contacted='未联网检查';attention_required='需要处理';receipts_current='成功回执均在有效期内';Ready='就绪';Disabled='已禁用'}
+ function Label([string]$Value){if($labels.ContainsKey($Value)){return $labels[$Value]};return $Value}
+ $lines=[Collections.Generic.List[string]]::new();$lines.Add('DevConfig / 微信备份状态');$lines.Add('检查时间：'+$Snapshot.observed_utc);$lines.Add('总体：'+(Label $Snapshot.status));$lines.Add('')
+ foreach($entry in @(@('本地配置',$Snapshot.local),@('G 盘配置',$Snapshot.hot),@('G 盘微信',$Snapshot.wechat_hot))){
+  $item=$entry[1];$lines.Add($entry[0]+'：'+(Label $item.status));if($item.completed_utc){$lines.Add('  最近成功：'+$item.completed_utc)}
+  if($null-ne $item.bytes){$lines.Add(('  大小：{0:N2} GiB' -f ([double]$item.bytes/1GB)))};$lines.Add('  校验依据：'+$item.verification);if($item.reason){$lines.Add('  原因：'+$item.reason)}
+ }
+ $lines.Add('');$lines.Add('最近尝试（失败不会覆盖上一个成功版本）：');foreach($attempt in $Snapshot.last_attempts){$lines.Add(('  {0}：{1}  {2}' -f $attempt.schema,(Label $attempt.status),$attempt.failure))}
+ $lines.Add('');$lines.Add('计划任务：');foreach($task in $Snapshot.scheduled_tasks){$lines.Add(('  {0}：{1}；上次返回 {2}；下次 {3}' -f $task.name,(Label $task.state),$task.last_exit,$task.next_run))}
+ $lines.Add('');$lines.Add('云端：'+(Label $Snapshot.drive.status));$lines.Add('文件校验、复制成功与官方客户端恢复是不同结果；此页不证明应用已经恢复。')
+ $lines.Add('界面每分钟刷新。关闭窗口不停止备份；启停任务请使用“管理计划任务”。')
+ return $lines-join [Environment]::NewLine
+}
+if($Gui){
+ if($Json){throw 'gui_json_modes_are_exclusive'};Add-Type -AssemblyName System.Windows.Forms;Add-Type -AssemblyName System.Drawing
+ $form=New-Object Windows.Forms.Form;$form.Text='DevConfig / 微信备份状态';$form.Width=1080;$form.Height=760
+ $bar=New-Object Windows.Forms.FlowLayoutPanel;$bar.Dock='Top';$bar.Height=42
+ $refresh=New-Object Windows.Forms.Button;$refresh.Text='立即刷新';$refresh.Width=120
+ $control=New-Object Windows.Forms.Button;$control.Text='管理计划任务';$control.Width=160
+ $notice=New-Object Windows.Forms.Label;$notice.Text='关闭窗口只停止界面刷新，不停止备份任务。';$notice.AutoSize=$true;$notice.Padding='8,8,0,0'
+ $bar.Controls.AddRange(@($refresh,$control,$notice))
+ $box=New-Object Windows.Forms.TextBox;$box.Multiline=$true;$box.ReadOnly=$true;$box.ScrollBars='Both';$box.Dock='Fill';$box.WordWrap=$false;$box.Font=New-Object Drawing.Font('Microsoft YaHei UI',10)
+ $form.Controls.Add($box);$form.Controls.Add($bar)
+ $update={try{$box.Text=Format-BackupStatusForHuman (Get-BackupStatusSnapshot)}catch{$box.Text='状态读取失败，不推断备份成功。'}}
+ $refresh.Add_Click($update);$form.Add_Shown($update);$control.Add_Click({Start-Process taskschd.msc})
+ $timer=New-Object Windows.Forms.Timer;$timer.Interval=60000;$timer.Add_Tick($update);$timer.Start()
+ try{[void]$form.ShowDialog()}finally{$timer.Stop();$timer.Dispose();$form.Dispose()};exit 0
+}
+$snapshot=Get-BackupStatusSnapshot
+if($Json){$snapshot|ConvertTo-Json -Depth 12}else{Format-BackupStatusForHuman $snapshot}

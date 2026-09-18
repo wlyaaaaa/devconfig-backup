@@ -2,12 +2,14 @@
 function Get-DevConfigSourceInventory {
  param($Config,[string]$ProfileRoot,[switch]$IncludeHistory,[switch]$Hash)
  $profile=Resolve-BackupPath $ProfileRoot
+ $null=[IO.Directory]::GetFileSystemEntries($profile) # Unavailable profile is never an empty configuration.
  $excludeDirs=@($Config.ExcludeDirs);$excludeFiles=@($Config.ExcludeFiles)
  if(-not $IncludeHistory){$excludeDirs+=@($Config.HistoryDirs);$excludeFiles+=@($Config.HistoryFiles)}
  $fileMap=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
  $dirSet=[Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
  $sources=[Collections.Generic.List[object]]::new()
  function Add-SelectedSource([string]$Source,[string]$Relative,[bool]$IsDirectory){
+  if([IO.Path]::IsPathRooted($Relative) -or $Relative-match '(^|[/\\])\.\.([/\\]|$)|[\r\n|:]'){throw 'source_selection_destination_invalid'}
   $Relative=$Relative.Replace('\','/').Trim('/')
   if($Relative-match '(^|/)\.\.(/|$)|[\r\n|:]'){throw 'source_selection_destination_invalid'}
   $required=$Relative-in @($Config.RequiredSources)
@@ -24,7 +26,7 @@ function Get-DevConfigSourceInventory {
   $sources.Add([pscustomobject]@{id=$Relative;status='available';required=$required})
   if($IsDirectory){
    [void]$dirSet.Add($Relative)
-   $tree=Get-BackupTreeInventory $Source -ExcludeDirs $excludeDirs -ExcludeFiles $excludeFiles -Hash:$Hash -SkipReparsePoints
+   $tree=Get-BackupTreeInventory $Source -ExcludeDirs $excludeDirs -ExcludeFiles $excludeFiles -Hash:$Hash -SkipReparsePoints -RelativePrefix $Relative -ExcludeRelativePaths @($Config.ExcludeRelativePaths)
    foreach($directory in $tree.directories){[void]$dirSet.Add($Relative+'/'+$directory)}
    foreach($file in $tree.files){$path=$Relative+'/'+$file.relative_path;$file.relative_path=$path;if($fileMap.ContainsKey($path)){if($fileMap[$path].full_path-ine $file.full_path){throw 'backup_source_destination_collision'}}else{$fileMap.Add($path,$file)}}
   }else{
@@ -41,6 +43,7 @@ function Get-DevConfigSourceInventory {
  }
  foreach($extra in @($Config.ExtraDirs)){if($extra){Add-SelectedSource $extra.Src ('extra/'+$extra.Name) $true}}
  foreach($path in @($Config.SpecialFiles)){if($path){Add-SelectedSource (Join-Path $profile $path) ('special/'+$path) $false}}
+ foreach($required in @($Config.RequiredSources)){if($required -and $required-notin @($sources|ForEach-Object{$_.id})){throw 'required_backup_source_not_declared'}}
  # Parent directories are part of the same deterministic logical tree.
  foreach($key in $fileMap.Keys){$parent=[IO.Path]::GetDirectoryName($key).Replace('\','/');while($parent){[void]$dirSet.Add($parent);$next=[IO.Path]::GetDirectoryName($parent);$parent=if($next){$next.Replace('\','/')}else{''}}}
  [string[]]$keys=@($fileMap.Keys);[Array]::Sort($keys,[StringComparer]::OrdinalIgnoreCase)

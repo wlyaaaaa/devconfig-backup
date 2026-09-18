@@ -22,3 +22,9 @@ _*.ps1
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Runtime coordination and secret containers
+*.backup.lock
+*.pem
+.env
+.env.*

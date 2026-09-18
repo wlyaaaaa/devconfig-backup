@@ -39,13 +39,13 @@ Assert-NoMatch 'git candidates do not include backup archives or exports' $gitFi
 Assert-NoMatch 'git candidates do not include WeChat databases or media backups' $gitFiles '(?i)(xwechat_files|db_storage|msg|micromsg|\.db$|\.sqlite$|\.sqlite3$)'
 
 Assert-Text 'gitignore excludes generated backup directories' (
-    $gitIgnore -match '(?m)^out/$' -and
-    $gitIgnore -match '(?m)^staging/$' -and
-    $gitIgnore -match '(?m)^state/$' -and
-    $gitIgnore -match '(?m)^logs/$'
+    $gitIgnore -match '(?m)^out/\r?$' -and
+    $gitIgnore -match '(?m)^staging/\r?$' -and
+    $gitIgnore -match '(?m)^state/\r?$' -and
+    $gitIgnore -match '(?m)^logs/\r?$'
 )
 Assert-Text 'gitignore excludes backup archives and secret containers' (
-    $gitIgnore -match '(?m)^\*\.zip$' -and
-    $gitIgnore -match '(?m)^\*\.reg$' -and
-    $gitIgnore -match '(?m)^\*\.key$'
+    $gitIgnore -match '(?m)^\*\.zip\r?$' -and
+    $gitIgnore -match '(?m)^\*\.reg\r?$' -and
+    $gitIgnore -match '(?m)^\*\.key\r?$'
 )

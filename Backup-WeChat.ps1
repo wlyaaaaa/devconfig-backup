@@ -17,8 +17,9 @@ param(
     [string]$GDriveRemote='gdrive:', [string]$GDriveFolder='Backups/WeChat/xwechat_files',
     [string]$BwLimit='4M', [string]$MaxTransfer='8G', [switch]$DriveFull,
     [switch]$DbOnly, [Alias('List')][switch]$Plan, [switch]$Json,
-    [string]$StateRoot=(Join-Path $PSScriptRoot 'state')
+    [string]$StateRoot=''
 )
+if(-not $StateRoot){$StateRoot=Join-Path $PSScriptRoot 'state'}
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Backup.Common.ps1')
 . (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
@@ -94,10 +95,13 @@ try{
     if($Target-contains 'Hot'){
         try {
         $run.hot='running';Write-BackupJsonAtomic $runPath $run
-        $hot=Invoke-VerifiedBackupTree -Source $Source -Destination $HotRoot -ExcludeDirs $exclDirs
+        $hotLease=Open-BackupResourceLock $HotRoot
+        try {
+        $hot=Invoke-VerifiedBackupTree -Source $Source -Destination $HotRoot -ExcludeDirs $exclDirs -LockHeld
         # A custom Hot root may not write a receipt into the production G location.
         $receiptPath=if($PSBoundParameters.ContainsKey('HotRoot') -and -not $PSBoundParameters.ContainsKey('HotReceiptPath')){$HotRoot+'.hot-receipt.json'}else{$HotReceiptPath}
         Write-BackupJsonAtomic $receiptPath (Get-WeChatSummary $hot 'hot')
+        } finally {$hotLease.Dispose()}
         $run.hot='complete';Write-BackupJsonAtomic $runPath $run
         } catch { $run.hot='failed';$run.failure=Get-BackupFailureCode $_;$code=1;Write-BackupJsonAtomic $runPath $run }
     }

@@ -29,5 +29,15 @@ Assert-Text 'Docker Desktop settings-store is allowlisted' ('Docker\settings-sto
 Assert-Text 'Docker login metadata is not allowlisted' (-not (@($cfg.AppDataRoamingFiles) -match 'login|auth-token'))
 Assert-Text 'Docker browser local storage is not allowlisted' (-not (@($cfg.AppDataRoamingFiles) -match 'Local Storage|session\.db|leveldb'))
 
-Assert-Text 'Backup script preserves precise relative files' ($scriptText -match 'function\s+Copy-RelativeFile')
-Assert-Text 'Backup script preserves precise relative directories' ($scriptText -match 'function\s+Copy-RelativeDir')
+. (Join-Path $RepoRoot 'Backup.Common.ps1')
+. (Join-Path $RepoRoot 'DevConfig.Sources.ps1')
+$fixtureParent=[IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')
+$fixturePath=Join-Path $fixtureParent ('docker-scope-'+[guid]::NewGuid().ToString('N'))
+try {
+ [void][IO.Directory]::CreateDirectory((Join-Path $fixturePath '.docker/contexts/test'))
+ [IO.File]::WriteAllText((Join-Path $fixturePath '.docker/config.json'),'synthetic')
+ [IO.File]::WriteAllText((Join-Path $fixturePath '.docker/contexts/test/one.txt'),'synthetic')
+ $plan=Get-DevConfigSourceInventory @{HomePreciseFiles=@('.docker/config.json');HomePreciseDirs=@('.docker/contexts')} $fixturePath
+ Assert-Text 'precise file keeps nested relative layout' ('home/.docker/config.json' -in $plan.files.relative_path)
+ Assert-Text 'precise directory keeps nested relative layout' ('home/.docker/contexts/test/one.txt' -in $plan.files.relative_path)
+} finally { Remove-BackupOwnedDirectory $fixturePath $fixtureParent '^docker-scope-[a-f0-9]{32}$' }

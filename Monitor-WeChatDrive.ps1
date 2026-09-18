@@ -1,187 +1,73 @@
-﻿<#
+<#
 .SYNOPSIS
-  每小时监控微信聊天记录 Drive 备份，直到完整成功。
+  Optional WeChat catchup monitor. No task is installed or enabled by this script.
 .DESCRIPTION
-  - 计算本地静态快照（E:\WeChatBackup\xwechat_files）按同一排除规则后的应备份大小。
-  - 查询 Google Drive 端 Backups/WeChat/xwechat_files 当前大小和文件数。
-  - 未完成且没有正在运行的 rclone 上传时，自动启动 Backup-WeChat.ps1 -Target Drive 续传。
-  - 接近完成后运行 rclone check 做确认；确认成功后自动禁用本监控任务。
-.NOTES
-  本脚本不上传密钥内容到日志，只记录大小、百分比、进程和任务状态。
+  Completion requires a locked, verified native snapshot and exact cloud check,
+  not a percentage or byte threshold. All follow-up parameters are preserved.
 #>
 [CmdletBinding()]
-param(
-    [string] $LocalRoot = 'E:\WeChatBackup\xwechat_files',
-    [string] $GDriveRemote = 'gdrive:',
-    [string] $GDriveFolder = 'Backups/WeChat/xwechat_files',
-    [string] $MonitorTaskName = 'WeChatDrive-Monitor-Hourly',
-    [double] $CompletePercent = 99.5,
-    [int] $RcloneTimeoutSec = 900
-)
-
-$ErrorActionPreference = 'Continue'
-$Root = $PSScriptRoot
+param([string]$LocalRoot='E:\WeChatBackup\xwechat_files',[string]$GDriveRemote='gdrive:',[string]$GDriveFolder='Backups/WeChat/xwechat_files',[string]$MonitorTaskName='WeChatDrive-Monitor-Hourly',[double]$CompletePercent=99.5,[ValidateRange(1,3600)][int]$RcloneTimeoutSec=900,[string]$Source='E:\Documents\xwechat_files',[string]$BwLimit='4M',[string]$MaxTransfer='8G',[switch]$Plan)
+$ErrorActionPreference='Stop';$Root=$PSScriptRoot
+. (Join-Path $Root 'Backup.Common.ps1')
 . (Join-Path $Root 'Initialize-BackupNetwork.ps1')
-$script:GDriveRemoteWasExplicit = $PSBoundParameters.ContainsKey('GDriveRemote')
-$StateDir = Join-Path $Root 'state'
-$LogDir = Join-Path $Root 'logs'
-if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
-$LogFile = Join-Path $LogDir 'wechat-drive-monitor.log'
-
-function Write-MonitorLog([string]$Message, [string]$Level = 'INFO') {
-    $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
-    Write-Host $line
-    Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8
+$remoteExplicit=$PSBoundParameters.ContainsKey('GDriveRemote');$state=Join-Path $Root 'state'
+function Write-MonitorLog([string]$Message,[string]$Level='INFO'){Write-Host ($Level+': '+$Message)}
+function ConvertTo-BackupProcessArgument([string]$Value){
+ if($Value -and $Value-notmatch '[\s"]'){return $Value}
+ return '"'+[regex]::Replace([regex]::Replace($Value,'(\\*)"','$1$1\"'),'(\\+)$','$1$1')+'"'
 }
-
 function Invoke-RcloneWithTimeout {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string[]] $Arguments,
-        [int] $TimeoutSec = 900,
-        [string] $Purpose = 'rclone'
-    )
-
-    function ConvertTo-ProcessArgumentString([string[]]$Items) {
-        $quoted = foreach ($item in $Items) {
-            if ($item -match '[\s"]') {
-                '"' + ($item -replace '"', '\"') + '"'
-            } else {
-                $item
-            }
-        }
-        return ($quoted -join ' ')
-    }
-
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = 'rclone.exe'
-    $psi.Arguments = ConvertTo-ProcessArgumentString $Arguments
-    $psi.UseShellExecute = $false
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.CreateNoWindow = $true
-    $psi.WorkingDirectory = $Root
-
-    $p = New-Object System.Diagnostics.Process
-    $p.StartInfo = $psi
-    try {
-        [void]$p.Start()
-        if (-not $p.WaitForExit($TimeoutSec * 1000)) {
-            try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
-            Write-MonitorLog "$Purpose 超过 ${TimeoutSec}s 未返回，终止本轮检查，等待下一轮重试。" 'WARN'
-            return [pscustomobject]@{ ExitCode = 124; Stdout = ''; Stderr = ''; TimedOut = $true }
-        }
-
-        $outText = $p.StandardOutput.ReadToEnd()
-        $errText = $p.StandardError.ReadToEnd()
-        return [pscustomobject]@{ ExitCode = $p.ExitCode; Stdout = $outText; Stderr = $errText; TimedOut = $false }
-    } finally {
-        if ($p) { $p.Dispose() }
-    }
+ param([string[]]$Arguments,[int]$TimeoutSec=900,[string]$Purpose='rclone')
+ $psi=New-Object Diagnostics.ProcessStartInfo;$psi.FileName=Get-BackupExecutable rclone -FallbackPath 'E:\Scoop\shims\rclone.exe'
+ $psi.Arguments=(@($Arguments|ForEach-Object{ConvertTo-BackupProcessArgument $_})-join ' ')
+ $psi.UseShellExecute=$false;$psi.CreateNoWindow=$true;$psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true;$psi.WorkingDirectory=$Root
+ $psi.StandardOutputEncoding=[Text.UTF8Encoding]::new($false);$psi.StandardErrorEncoding=[Text.UTF8Encoding]::new($false)
+ $p=New-Object Diagnostics.Process;$p.StartInfo=$psi
+ try{
+  [void]$p.Start();$outTask=$p.StandardOutput.ReadToEndAsync();$errTask=$p.StandardError.ReadToEndAsync()
+  if(-not $p.WaitForExit($TimeoutSec*1000)){try{$p.Kill();$null=$p.WaitForExit(5000)}catch{};return [pscustomobject]@{ExitCode=124;Stdout='';Stderr='';TimedOut=$true}}
+  return [pscustomobject]@{ExitCode=$p.ExitCode;Stdout=$outTask.GetAwaiter().GetResult();Stderr=$errTask.GetAwaiter().GetResult();TimedOut=$false}
+ }finally{$p.Dispose()}
 }
-
-function Get-RcloneSizeJson {
-    param([string]$Path, [string[]]$ExtraArgs = @())
-    $args = @('size', $Path) + $ExtraArgs + @('--fast-list', '--json')
-    $result = Invoke-RcloneWithTimeout -Arguments $args -TimeoutSec $RcloneTimeoutSec -Purpose "rclone size $Path"
-    if ($result.ExitCode -ne 0 -or -not $result.Stdout) { return $null }
-    try { return ($result.Stdout | ConvertFrom-Json) } catch { return $null }
-}
-
 function Test-WeChatRcloneActive {
-    $procs = @(Get-CimInstance Win32_Process -Filter "name='rclone.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -match 'E:\\WeChatBackup\\xwechat_files|Backups[/\\]WeChat[/\\]xwechat_files' })
-    return $procs.Count -gt 0
+ $path=$LocalRoot.TrimEnd('\','/')+'.backup.lock';if(-not [IO.File]::Exists($path)){return $false}
+ try{$lease=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$lease.Dispose();return $false}catch [IO.IOException]{return $true}
 }
-
 function Start-WeChatDriveCatchup {
-    $script = Join-Path $Root 'Backup-WeChat.ps1'
-    if (-not (Test-Path -LiteralPath $script)) {
-        Write-MonitorLog "找不到续传脚本: $script" 'ERR'
-        return
-    }
-    $arg = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Target Drive' -f $script
-    $p = Start-Process -FilePath powershell.exe -ArgumentList $arg -WorkingDirectory $Root -WindowStyle Hidden -PassThru
-    Write-MonitorLog "未完成且未检测到 rclone 上传，已启动 Drive 续传 PID=$($p.Id)"
+ $exe=Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe';if(-not [IO.File]::Exists($exe)){$exe=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'}
+ $items=@('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'Backup-WeChat.ps1'),'-Target','Drive','-Source',$Source,'-LocalRoot',$LocalRoot,'-GDriveRemote',$script:resolvedRemote,'-GDriveFolder',$GDriveFolder,'-BwLimit',$BwLimit,'-MaxTransfer',$MaxTransfer)
+ $arguments=@($items|ForEach-Object{ConvertTo-BackupProcessArgument $_})-join ' '
+ $process=Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory $Root -WindowStyle Hidden -PassThru
+ return $process.Id
 }
-
-function Disable-SelfMonitor {
-    param([string]$Name)
-    try {
-        Disable-ScheduledTask -TaskName $Name -ErrorAction Stop | Out-Null
-        Write-MonitorLog "已禁用监控任务: $Name" 'OK'
-    } catch {
-        Write-MonitorLog "禁用监控任务失败，可能需要管理员权限: $($_.Exception.Message)" 'WARN'
-    }
+function Disable-SelfMonitor([string]$Name){
+ $task=Get-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction Stop
+ if(@($task.Actions|Where-Object{$_.Arguments-like ('*'+(Join-Path $Root 'Monitor-WeChatDrive.ps1')+'*')}).Count-ne 1){throw 'monitor_task_identity_mismatch'}
+ Disable-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction Stop|Out-Null
 }
-
-$excludes = @(
-    '--exclude','cache/**',
-    '--exclude','Cache/**',
-    '--exclude','temp/**',
-    '--exclude','Temp/**',
-    '--exclude','WMPF/**',
-    '--exclude','apm_record/**',
-    '--exclude','crash/**',
-    '--exclude','FileStorageTemp/**',
-    '--exclude','recommend_cover/**'
-)
-
-Write-MonitorLog "==== WeChat Drive monitor start PID=$PID ===="
-if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) {
-    Write-MonitorLog 'rclone 未安装或不在 PATH，无法监控 Drive' 'ERR'
-    exit 1
+if($Plan){[pscustomobject]@{mode='plan';write_mode='zero_write';source=$Source;snapshot=$LocalRoot;cloud='not_contacted';task=$MonitorTaskName}|ConvertTo-Json;exit 0}
+$monitorLease=$null;$snapshotLease=$null;$code=0
+$result=[ordered]@{schema='wechat.drive-monitor.v2';observed_utc=(Get-BackupUtc);status='running';snapshot='unknown';cloud='unknown';catchup='not_started';application_recovery='not_tested'}
+try{
+ $monitorLease=Open-BackupResourceLock (Join-Path $state 'wechat-drive-monitor')
+ $null=Initialize-BackupNetwork
+ $resolved=Resolve-ConfiguredRcloneRemote -Remote $GDriveRemote -RemoteWasExplicit $remoteExplicit -BindingPath (Join-Path $state 'rclone-remote-binding.json')
+ if(-not $resolved.Success){throw 'monitor_remote_unavailable'};$script:resolvedRemote=$resolved.Remote
+ if(Test-WeChatRcloneActive){$result.status='busy'}else{
+  $verified=$false
+  try{$snapshotLease=Open-BackupResourceLock $LocalRoot;$null=Get-VerifiedBackupTreeManifest $LocalRoot -VerifyContent;$verified=$true;$result.snapshot='sha256_verified'}catch{$result.snapshot='not_verified'}
+  if($verified){
+   $selection=Import-PowerShellDataFile (Join-Path $Root 'wechat-sources.psd1');$filter=@();foreach($name in $selection.ExcludeDirs){$filter+=@('--exclude',($name+'/**'))}
+   $check=Invoke-RcloneWithTimeout -Arguments (@('check',$LocalRoot,($resolved.Remote+$GDriveFolder),'--checkers','8','--retries','2','--contimeout','20s','--timeout','120s')+$filter) -TimeoutSec $RcloneTimeoutSec -Purpose 'cloud check'
+   $result.cloud=if($check.ExitCode-eq 0){'verified'}else{'incomplete_or_unavailable'}
+  }
+  if($snapshotLease){$snapshotLease.Dispose();$snapshotLease=$null}
+  if($result.cloud-eq 'verified'){Disable-SelfMonitor $MonitorTaskName;$result.status='complete'}
+  elseif(-not (Test-WeChatRcloneActive)){$result.catchup='launched_not_completed';$result.pid=Start-WeChatDriveCatchup;$result.status='catchup_started'}else{$result.status='busy'}
+ }
+}catch{$code=1;$result.status='failed';$result.reason=Get-BackupFailureCode $_}
+finally{
+ if($snapshotLease){$snapshotLease.Dispose()};if($monitorLease){$monitorLease.Dispose()}
+ if($result.status-ne 'running'){Write-BackupJsonAtomic (Join-Path $state 'wechat-monitor-last.json') $result}
 }
-if (-not (Test-Path -LiteralPath $LocalRoot)) {
-    Write-MonitorLog "本地静态快照不存在: $LocalRoot" 'ERR'
-    exit 1
-}
-
-$remoteResolution = Resolve-ConfiguredRcloneRemote -Remote $GDriveRemote `
-    -RemoteWasExplicit $script:GDriveRemoteWasExplicit `
-    -BindingPath (Join-Path $StateDir 'rclone-remote-binding.json')
-if (-not $remoteResolution.Success) {
-    Write-MonitorLog "配置的 Drive 远端不可用 reason=$($remoteResolution.Reason)，本轮失败以便任务重试" 'ERR'
-    exit 1
-}
-$remote = $remoteResolution.Remote
-$dest = "$remote$GDriveFolder"
-
-$local = Get-RcloneSizeJson -Path $LocalRoot -ExtraArgs $excludes
-if (-not $local -or $local.bytes -le 0) {
-    Write-MonitorLog '本地静态快照大小读取失败，跳过本轮监控' 'ERR'
-    exit 1
-}
-
-$drive = Get-RcloneSizeJson -Path $dest
-if (-not $drive) {
-    Write-MonitorLog 'Drive 端大小读取失败（网络/代理/Google 暂时不可用），下轮重试' 'WARN'
-    exit 0
-}
-
-$pct = [math]::Round(($drive.bytes / [double]$local.bytes) * 100, 2)
-$localGiB = [math]::Round($local.bytes / 1GB, 2)
-$driveGiB = [math]::Round($drive.bytes / 1GB, 2)
-$active = Test-WeChatRcloneActive
-Write-MonitorLog ("进度: {0} GiB / {1} GiB = {2}% ; Drive文件={3} 本地文件={4} ; rcloneActive={5}" -f $driveGiB, $localGiB, $pct, $drive.count, $local.count, $active)
-
-if ($pct -ge $CompletePercent) {
-    Write-MonitorLog "达到 $CompletePercent%，执行 rclone check 做最终确认..."
-    $checkArgs = @('check', $LocalRoot, $dest) + $excludes + @('--one-way', '--fast-list', '--checkers', '16', '--retries', '3', '--low-level-retries', '10', '--log-file', $LogFile, '--log-level', 'INFO')
-    $check = Invoke-RcloneWithTimeout -Arguments $checkArgs -TimeoutSec ([math]::Max($RcloneTimeoutSec, 1800)) -Purpose 'rclone check'
-    if ($check.ExitCode -eq 0) {
-        Write-MonitorLog "微信 Drive 备份已确认完成: $driveGiB / $localGiB GiB, $pct%" 'OK'
-        Disable-SelfMonitor $MonitorTaskName
-        exit 0
-    }
-    Write-MonitorLog "rclone check 未通过(exit=$($check.ExitCode))，继续保持监控并等待补齐" 'WARN'
-}
-
-    $active = Test-WeChatRcloneActive
-    if (-not $active) {
-    Start-WeChatDriveCatchup
-} else {
-    Write-MonitorLog '检测到上传正在进行，本轮不重复启动。'
-}
-Write-MonitorLog '==== WeChat Drive monitor end ===='
-exit 0
+$result|ConvertTo-Json -Depth 6;exit $code

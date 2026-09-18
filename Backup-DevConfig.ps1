@@ -13,10 +13,12 @@ param(
  [string]$GDriveFolder="Backups/$env:COMPUTERNAME",[string]$BwLimit='4M',
  [ValidateRange(1,365)][int]$KeepLocal=7,[ValidateRange(1,365)][int]$KeepHot=7,[ValidateRange(1,365)][int]$KeepDrive=3,
  [switch]$Plan,[switch]$Json,[string]$ProfileRoot=$env:USERPROFILE,
- [string]$SourcesFile=(Join-Path $PSScriptRoot 'sources.psd1'),[string]$OutputRoot=$PSScriptRoot,
+ [string]$SourcesFile='',[string]$OutputRoot='',
  [string]$SevenZipPath='E:\Scoop\shims\7z.exe',[switch]$SkipSystemExport,
  [ValidateSet('ServerCopy','Upload')][string]$CloudLatestMode='ServerCopy'
 )
+if(-not $SourcesFile){$SourcesFile=Join-Path $PSScriptRoot 'sources.psd1'}
+if(-not $OutputRoot){$OutputRoot=$PSScriptRoot}
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Backup.Common.ps1')
 . (Join-Path $PSScriptRoot 'DevConfig.Sources.ps1')
@@ -91,7 +93,7 @@ function Push-Drive($Pack){
 function New-DevConfigCandidate([string]$Container){
  $stage=Join-Path $Container 'payload';$inventory=Get-DevConfigSourceInventory $cfg $ProfileRoot -IncludeHistory:$IncludeHistory -Hash
  Copy-DevConfigSourceInventory $inventory $stage
- $script:run.optional_tools_absent=if($SkipSystemExport){@('system_export_explicitly_skipped')}else{@(Invoke-DevConfigSystemExport $cfg $stage)}
+ $script:run.optional_tools_absent=@(if($SkipSystemExport){'system_export_explicitly_skipped'}else{Invoke-DevConfigSystemExport $cfg $stage})
  $binding=Join-Path $StateDir 'rclone-remote-binding.json'
  if([IO.File]::Exists($binding)){$null=Copy-RcloneRemoteBindingToManifest -BindingPath $binding -ManifestDirectory (Join-Path $stage '_manifests')}
  $again=Get-DevConfigSourceInventory $cfg $ProfileRoot -IncludeHistory:$IncludeHistory
@@ -102,12 +104,17 @@ function New-DevConfigCandidate([string]$Container){
  $script:run.collection='complete';$script:run.package='running';Write-BackupJsonAtomic $runPath $script:run
  $previous=$null;try{$previous=Get-VerifiedDevConfigPackage $OutDir}catch{}
  if($previous -and $previous.Receipt.content_sha256-ceq $contentHash){$script:run.package='reused';return $previous}
- $manifest=[ordered]@{schema='devconfig.payload-manifest.v1';content_sha256=$contentHash;payload_tree_sha256=$treeHash;policy_sha256=$policyHash;file_count=$payload.file_count;bytes=$payload.bytes;directories=$payload.directories;files=@($payload.files|Select-Object relative_path,length,sha256);sources=$inventory.sources;application_consistency='not_proven'}
+ $manifest=[ordered]@{schema='devconfig.payload-manifest.v1';content_sha256=$contentHash;payload_tree_sha256=$treeHash;policy_sha256=$policyHash;file_count=$payload.file_count;bytes=$payload.bytes;directories=$payload.directories;files=@($payload.files|Select-Object relative_path,length,mtime_ticks,sha256);sources=$inventory.sources;application_consistency='not_proven'}
  Write-BackupJsonAtomic (Join-Path $stage 'backup-manifest.json') $manifest
  $name='devconfig-'+(Get-Date -Format yyyyMMdd-HHmmss)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)+'.zip';$zip=Join-Path $Container $name
  $zipExe=Get-BackupExecutable 7z -FallbackPath $SevenZipPath
- & $zipExe a -tzip -mx=5 -bso0 -bsp0 -- $zip ($stage+'\*') *> $null
- if($LASTEXITCODE-ne 0 -or -not [IO.File]::Exists($zip)){throw 'backup_pack_failed'}
+ $zipOutput=@(& $zipExe a -tzip -mx=5 -mmt=4 -bso0 -bsp0 -- $zip ($stage+'\*') 2>&1 | ForEach-Object {$_.ToString()})
+ $zipExit=$LASTEXITCODE
+ if($zipExit-ne 0 -or -not [IO.File]::Exists($zip)){
+  $script:run.pack_native_exit=$zipExit;$script:run.pack_output_lines=$zipOutput.Count
+  $script:run.pack_diagnostic=ConvertTo-RcloneSafeDiagnostic -Output $zipOutput
+  throw 'backup_pack_failed'
+ }
  & $zipExe t -bso0 -bsp0 -- $zip *> $null;if($LASTEXITCODE-ne 0){throw 'backup_archive_test_failed'}
  $hash=Get-BackupStableFileHash $zip
  $receipt=[ordered]@{schema='devconfig.package-receipt.v2';status='complete';collection_status='complete';archive_verification='7z_test_pass';completed_utc=(Get-BackupUtc);package_name=$name;sha256=$hash;package_bytes=(Get-Item $zip).Length;content_sha256=$contentHash;payload_tree_sha256=$treeHash;file_count=$payload.file_count;application_recovery='not_tested'}
@@ -117,7 +124,9 @@ function New-DevConfigCandidate([string]$Container){
 }
 if($Plan){
  $inventory=Get-DevConfigSourceInventory $cfg $ProfileRoot -IncludeHistory:$IncludeHistory
- $result=[ordered]@{schema='devconfig.backup-plan.v1';write_mode='zero_write';tiers=$Tier;source_count=$inventory.source_count;file_count=$inventory.file_count;bytes=$inventory.bytes;optional_absent_count=$inventory.optional_absent_count;sources=$inventory.sources;system_exports='not_run';cloud='not_contacted';out=$OutDir;hot=$HotRoot}
+ $prior=$null;$basis='no_verified_previous'
+ try{$old=Get-VerifiedDevConfigPackage $OutDir -MetadataOnly;$prior=Read-BackupJson ($old.Zip+'.manifest.json') -Required;$prior.files=@($prior.files|Where-Object{$_.relative_path-match '^(home|appdata-roaming|appdata-local|extra|special)/'});$basis='verified_package_manifest'}catch{}
+ $result=[ordered]@{schema='devconfig.backup-plan.v1';write_mode='zero_write';tiers=$Tier;difference=(Get-BackupDifference $inventory $prior);comparison_basis=$basis;source_count=$inventory.source_count;file_count=$inventory.file_count;bytes=$inventory.bytes;optional_absent_count=$inventory.optional_absent_count;sources=$inventory.sources;system_exports='not_run';cloud='not_contacted';out=$OutDir;hot=$HotRoot}
  if($Json){$result|ConvertTo-Json -Depth 8}else{[pscustomobject]$result|Format-List};exit 0
 }
 $script:overallExitCode=0;$outLease=$null;$pin=$null;$container=$null;$pack=$null
@@ -127,6 +136,9 @@ try{
  Write-BackupJsonAtomic $runPath $run
  $outLease=Open-BackupResourceLock $OutDir
  if($Tier-contains 'Local' -or $Tier-contains 'Hot'){
+  if($ProfileRoot-match '(?i)[\\/]systemprofile$'){throw 'backup_interactive_user_profile_required'}
+  if(-not $SkipSystemExport -and (Resolve-BackupPath $ProfileRoot)-ine (Resolve-BackupPath $env:USERPROFILE)){throw 'system_export_requires_matching_profile'}
+  Assert-BackupPathsIndependent $ProfileRoot $OutputRoot
   $run.collection='running';Write-BackupJsonAtomic $runPath $run
   $container=Join-Path $StageParent ('run-'+$run.run_id);[void][IO.Directory]::CreateDirectory($container)
   $pack=New-DevConfigCandidate $container
@@ -136,7 +148,8 @@ try{
   [IO.File]::WriteAllText((Join-Path $StateDir 'latest.sha256'),($pack.Sha+'  '+$pack.Name),[Text.Encoding]::ASCII)
  }else{$pack=Get-DrivePackageSnapshot -OutDir $OutDir -StateDir $StateDir;$run.package='verified_existing'}
  $pin=[IO.File]::Open($pack.Zip,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
- $outLease.Dispose();$outLease=$null;Write-BackupJsonAtomic $runPath $run
+ # Serialize collection, publication and retention through the same output lease.
+ Write-BackupJsonAtomic $runPath $run
  if($Tier-contains 'Hot'){$run.hot='running';Write-BackupJsonAtomic $runPath $run;try{Push-Hot $pack;$run.hot='complete'}catch{$run.hot='failed';$run.failure=Get-BackupFailureCode $_;$script:overallExitCode=1}}
  if($Tier-contains 'Drive'){$run.drive='running';Write-BackupJsonAtomic $runPath $run;try{Push-Drive $pack;$run.drive='complete'}catch{$run.drive='failed';$run.failure=Get-BackupFailureCode $_;$script:overallExitCode=1}}
  $run.status=if($script:overallExitCode-eq 0){'complete'}else{'failed'}

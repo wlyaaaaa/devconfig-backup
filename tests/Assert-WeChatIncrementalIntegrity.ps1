@@ -16,11 +16,7 @@ $backupScript = Get-Content -LiteralPath (Join-Path $RepoRoot 'Backup-WeChat.ps1
 $monitorScript = Get-Content -LiteralPath (Join-Path $RepoRoot 'Monitor-WeChatDrive.ps1') -Raw
 $restoreScript = Get-Content -LiteralPath (Join-Path $RepoRoot 'Restore-WeChat.ps1') -Raw
 Assert-Condition ($backupScript -match "'--checksum'") 'Backup-WeChat.ps1 must pass --checksum to rclone copy.'
-Assert-Condition ($backupScript -match 'wechat\.hot-backup-receipt\.v1' -and
-    $backupScript -match 'wechat-hot-last\.json' -and
-    $backupScript -match 'wechat_hot_receipt_readback_mismatch' -and
-    $backupScript -match 'payload_names_emitted\s*=\s*\$false') `
-    'Backup-WeChat.ps1 must publish a bounded read-back-verified Hot receipt.'
+Assert-Condition ($backupScript -match 'backup-receipt\.v2' -and $backupScript -match 'Get-WeChatSummary' -and $backupScript -match 'manifest_sha256' -and $backupScript -match 'payload_names_emitted=\$false') 'Hot receipt is generation-bound and contains no payload names.'
 Assert-Condition ($monitorScript -notmatch "'--size-only'") 'Monitor-WeChat.ps1 must not use --size-only for final verification.'
 Assert-Condition ($restoreScript -match '\[switch\]\s+\$DriveOnly') 'Restore-WeChat.ps1 must expose -DriveOnly.'
 

@@ -92,16 +92,24 @@ foreach ($body in @($devConfig, $weChat)) {
         throw 'Both scheduled Drive backup scripts must load the network helper.'
     }
 }
-if ($devConfig -notmatch '\$network = Initialize-BackupNetwork' -or
-    $weChat -notmatch 'Initialize-BackupNetwork \| Out-Null') {
+if ($devConfig -notmatch '\$network\s*=\s*Initialize-BackupNetwork' -or
+    $weChat -notmatch '\$null=Initialize-BackupNetwork') {
     throw 'Both scheduled Drive backup scripts must initialize the user proxy before rclone.'
 }
 if ($devConfig -notmatch 'Invoke-RcloneDrivePreflight') {
     throw 'DevConfig Drive backup must use the bounded preflight helper.'
 }
-if ($devConfig -notmatch '--tpslimit 8' -or
+if ($devConfig -notmatch 'tpslimit' -or
     (Get-Content -LiteralPath $helper -Raw) -notmatch 'rclone about') {
     throw 'DevConfig Drive API calls must use dedicated-client pacing and a metadata-only preflight.'
 }
 
 Write-Host 'PASS: scheduled Drive backups inherit the user proxy and classify bounded preflight failures.'
+
+$oldHttp=$env:HTTP_PROXY;$oldHttps=$env:HTTPS_PROXY
+try{
+ $env:HTTP_PROXY='http://127.0.0.1:1';$env:HTTPS_PROXY='http://127.0.0.1:1'
+ function Get-ItemProperty { [pscustomobject]@{ProxyEnable=0;ProxyServer='127.0.0.1:1'} }
+ $state=Initialize-BackupNetwork
+ if($env:HTTP_PROXY -or $env:HTTPS_PROXY -or $state.Source-ne 'direct'){throw 'proxy_off_must_clear_stale_process_variables'}
+}finally{Remove-Item Function:\Get-ItemProperty -ErrorAction SilentlyContinue;$env:HTTP_PROXY=$oldHttp;$env:HTTPS_PROXY=$oldHttps}

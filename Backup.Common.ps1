@@ -52,7 +52,7 @@ function Get-BackupStableFileHash([string]$Path){
  if($before.Length-ne $after.Length -or $before.LastWriteTimeUtc.Ticks-ne $after.LastWriteTimeUtc.Ticks){throw 'backup_source_changed_during_hash'};return $hash
 }
 function Get-BackupTreeInventory {
- param([string]$Root,[string[]]$ExcludeDirs=@(),[string[]]$ExcludeFiles=@(),[switch]$Hash,[switch]$SkipReparsePoints)
+ param([string]$Root,[string[]]$ExcludeDirs=@(),[string[]]$ExcludeFiles=@(),[switch]$Hash,[switch]$SkipReparsePoints,[string]$RelativePrefix='',[string[]]$ExcludeRelativePaths=@())
  $full=Resolve-BackupPath $Root;$attributes=[IO.File]::GetAttributes($full)
  if(($attributes-band [IO.FileAttributes]::Directory)-eq 0){throw 'backup_source_not_directory'}
  $files=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -65,6 +65,8 @@ function Get-BackupTreeInventory {
    if(($attr-band [IO.FileAttributes]::ReparsePoint)-ne 0){if($SkipReparsePoints){$excluded++;continue};throw 'backup_unhandled_source_reparse'}
    $relative=$path.Substring($full.Length+1).Replace('\','/')
    if($relative-match '[\r\n|]'){throw 'backup_unsupported_path_character'}
+   $logical=if($RelativePrefix){$RelativePrefix.TrimEnd('/')+'/'+$relative}else{$relative}
+   if(Test-BackupNameExcluded $logical $ExcludeRelativePaths){$excluded++;continue}
    if($isDirectory){$directories.Add($relative);$pending.Push($path);continue}
    $item=Get-Item -LiteralPath $path -Force -ErrorAction Stop;$digest=if($Hash){Get-BackupStableFileHash $path}else{$null}
    if($files.ContainsKey($relative)){throw 'backup_case_collision'}
@@ -87,12 +89,13 @@ function Assert-BackupSourceUnchanged($Inventory){
 }
 function Get-BackupDifference($Current,$Previous){
  $known=@{};if($Previous){foreach($file in @($Previous.files)){$known[$file.relative_path]=$file}}
- $added=0;$changed=0;[long]$bytes=0
+ $added=0;$changed=0;$unknown=0;[long]$bytes=0
  foreach($file in @($Current.files)){
   $old=$known[$file.relative_path];if(-not $old){$added++;$bytes+=$file.length}
-  elseif($file.length-ne $old.length -or $file.mtime_ticks-ne $old.mtime_ticks){$changed++;$bytes+=$file.length}
+  elseif($file.length-ne $old.length -or ($null-ne $old.PSObject.Properties['mtime_ticks'] -and $file.mtime_ticks-ne $old.mtime_ticks)){$changed++;$bytes+=$file.length}
+  elseif($null-eq $old.PSObject.Properties['mtime_ticks']){$unknown++}
   $known.Remove($file.relative_path)
- };return [pscustomobject]@{added_files=$added;changed_files=$changed;deleted_files=$known.Count;estimated_copy_bytes=$bytes;comparison='metadata_estimate_not_content_verification'}
+ };return [pscustomobject]@{added_files=$added;changed_files=$changed;deleted_files=$known.Count;estimated_copy_bytes=$bytes;unknown_timestamp_comparisons=$unknown;comparison='metadata_estimate_not_content_verification'}
 }
 function Copy-BackupFileVerified([string]$Source,[string]$Destination,[string]$ExpectedHash){
  $parent=[IO.Path]::GetDirectoryName($Destination);[void][IO.Directory]::CreateDirectory($parent);$temp=Join-Path $parent ('.copy-'+[guid]::NewGuid().ToString('N')+'.tmp')
@@ -123,7 +126,7 @@ function Repair-BackupTreeTransaction([string]$Destination){
  if(-not $journal){return};$name=[IO.Path]::GetFileName($dest);$parent=[IO.Path]::GetDirectoryName($dest)
  if($journal.destination-ine $dest -or $journal.run_id-cnotmatch '^[a-f0-9]{32}$' -or $journal.incoming-ine ($dest+'.incoming-'+$journal.run_id) -or $journal.previous-ine ($dest+'.previous-'+$journal.run_id)){throw 'backup_tree_journal_invalid'}
  $current=Read-BackupJson ($dest+'.backup-manifest.json')
- if($current -and $current.run_id-ceq $journal.run_id){[IO.File]::Delete($journalPath);return}
+ if($current -and $current.run_id-ceq $journal.run_id -and $current.status-ceq 'complete' -and [IO.Directory]::Exists($dest)){[IO.File]::Delete($journalPath);return}
  if([IO.Directory]::Exists($journal.previous)){
   if([IO.Directory]::Exists($dest)){if([IO.Directory]::Exists($journal.incoming)){throw 'backup_tree_recovery_ambiguous'};[IO.Directory]::Move($dest,$journal.incoming)}
   [IO.Directory]::Move($journal.previous,$dest)
@@ -171,7 +174,7 @@ function Invoke-VerifiedBackupTree {
  }catch{
   if(-not $committed -and [IO.File]::Exists($dest+'.backup-transaction.json')){Repair-BackupTreeTransaction $dest};throw
  }finally{
-  if($incoming -and [IO.Directory]::Exists($incoming)){Remove-BackupOwnedDirectory $incoming $parent ('^'+[regex]::Escape($leaf)+'\.incoming-[a-f0-9]{32}$')}
+  if($incoming -and [IO.Directory]::Exists($incoming) -and -not [IO.File]::Exists($dest+'.backup-transaction.json')){Remove-BackupOwnedDirectory $incoming $parent ('^'+[regex]::Escape($leaf)+'\.incoming-[a-f0-9]{32}$')}
   if($lease){$lease.Dispose()}
  }
 }

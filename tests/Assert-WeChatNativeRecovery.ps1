@@ -42,7 +42,7 @@ Assert-Condition ($restoreText -match 'MODE=PLAN') 'Restore-WeChat.ps1 must expo
 Assert-Condition ($restoreText -match 'COPY_COMPLETE_AWAITING_HUMAN_ACCEPTANCE') 'Copy completion must be distinct from official-client acceptance.'
 Assert-Condition ($restoreText -match 'Close it yourself') 'The restore flow must refuse a running official client without terminating it.'
 Assert-Condition ($restoreText -notmatch '(?i)WeFlow|wx_key|decryptKey|_KEYS') 'Native recovery must not include decryption or personal-vault behavior.'
-Assert-Condition ($backupText -match '本地/G 热备路径不打开') 'Backup documentation must distinguish the local/G native-data path.'
+Assert-Condition ($backupText -match 'Copies opaque native files') 'Backup documentation must distinguish the local/G native-data path.'
 Assert-Condition ($backupText -notmatch '(?i)_KEYS|keyDir') 'Backup tooling must not automatically read or copy WeChat key material.'
 Assert-Condition ($helperText -match 'Tencent\\Weixin\\Weixin\.exe') 'Client discovery must include the native Weixin installation path.'
 

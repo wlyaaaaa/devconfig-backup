@@ -129,6 +129,13 @@
         'Trust Tokens', 'Trust Tokens-journal', 'SharedStorage'
     )
 
+    # Exact live process coordination files, not application configuration.
+    # Do not exclude *.lock generally: dependency lockfiles remain recoverable.
+    ExcludeRelativePaths = @(
+        'appdata-roaming/WhirlwindFX/SignalRgb/QtWebEngine/*/Local Storage/leveldb/LOCK',
+        'home/.gemini/antigravity-cli/presence/*.lock'
+    )
+
     # 历史/对话日志目录名（默认排除；-IncludeHistory 时保留）
     HistoryDirs = @(
         'projects', 'data', 'session-backup*',

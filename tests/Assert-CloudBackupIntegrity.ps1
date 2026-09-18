@@ -101,12 +101,19 @@ try {
     New-Item -ItemType Directory -Path $snapshotState | Out-Null
     $datedHash = (Get-FileHash -LiteralPath $datedLocal -Algorithm SHA256).Hash
     [IO.File]::WriteAllText((Join-Path $snapshotState 'latest.sha256'), "$datedHash  devconfig-20260827.zip")
-    $snapshot = Get-DrivePackageSnapshot -OutDir $fixtureRoot -StateDir $snapshotState
-    Assert-Condition ($snapshot.Zip -eq $datedLocal -and $snapshot.Sha -eq $datedHash) 'Drive must freeze the validated dated package, not the mutable latest.zip pointer.'
-    [IO.File]::WriteAllText((Join-Path $snapshotState 'latest.sha256'), (('0' * 64) + '  devconfig-20260827.zip'))
-    $badSnapshotRejected = $false
-    try { Get-DrivePackageSnapshot -OutDir $fixtureRoot -StateDir $snapshotState | Out-Null } catch { $badSnapshotRejected = $true }
-    Assert-Condition $badSnapshotRejected 'A mismatched snapshot record must not be uploaded under the wrong dated name.'
+    $refused=$false
+    try { $null=Get-DrivePackageSnapshot -OutDir $fixtureRoot -StateDir $snapshotState } catch { $refused=$true }
+    Assert-Condition $refused 'Legacy matching SHA alone cannot prove completed collection.'
+    . (Join-Path $RepoRoot 'Backup.Common.ps1')
+    $goodReceipt=@{schema='devconfig.package-receipt.v2';status='complete';collection_status='complete';archive_verification='7z_test_pass';package_name='devconfig-20260827.zip';sha256=$datedHash.ToLowerInvariant();package_bytes=(Get-Item $datedLocal).Length}
+    Write-BackupJsonAtomic ($datedLocal+'.receipt.json') $goodReceipt
+    Write-BackupJsonAtomic (Join-Path $fixtureRoot 'current.json') @{schema='devconfig.package-current.v2';status='complete';package_name='devconfig-20260827.zip';sha256=$datedHash.ToLowerInvariant()}
+    $snapshot=Get-DrivePackageSnapshot -OutDir $fixtureRoot -StateDir $snapshotState
+    Assert-Condition ($snapshot.Zip-eq $datedLocal -and $snapshot.Sha-ieq $datedHash) 'Verified dated object is used instead of mutable latest.'
+    $goodReceipt.collection_status='failed';Write-BackupJsonAtomic ($datedLocal+'.receipt.json') $goodReceipt
+    $refused=$false;try{$null=Get-DrivePackageSnapshot -OutDir $fixtureRoot -StateDir $snapshotState}catch{$refused=$true}
+    Assert-Condition $refused 'Failed collection cannot be used as a cloud package.'
+    $goodReceipt.collection_status='complete';Write-BackupJsonAtomic ($datedLocal+'.receipt.json') $goodReceipt
     $state = New-DriveUploadState -Sha256 'abc123' -Remote 'selected:' -Folder 'Backups/Host' -DatedName 'devconfig-20260827.zip'
 
     $eligible = Test-DriveUploadSkipEligibility -State $state -Sha256 'abc123' -Remote 'selected:' -Folder 'Backups/Host' `
