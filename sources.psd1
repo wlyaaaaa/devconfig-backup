@@ -112,7 +112,9 @@
         'blob_storage', 'Crashpad', 'Code Cache', 'CacheStorage', 'Service Worker',
         'Session Storage', 'VideoDecodeStats', 'Shared Dictionary',
         'logs', '.tmp', 'tmp', 'temp', '.git', 'History', 'OcrModel',
-        'memory-backup', 'secrets-backup'
+        'memory-backup', 'secrets-backup',
+        # Live process coordination, not configuration or recovery payload.
+        'thread-writer-locks'
     )
 
     # 始终排除的文件名（robocopy /XF，可重下的大数据文件）

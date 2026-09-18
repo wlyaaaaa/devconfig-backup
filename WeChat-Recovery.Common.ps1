@@ -1,3 +1,4 @@
+. (Join-Path $PSScriptRoot 'Backup.Common.ps1')
 Set-StrictMode -Version 2.0
 
 function Resolve-NativeWeChatRecoveryPath {
@@ -285,6 +286,9 @@ function Invoke-NativeWeChatLocalCopy {
     $targetState = $pathStates.TargetState
 
     New-Item -ItemType Directory -Path $targetState.Path -Force -ErrorAction Stop | Out-Null
+    $sourceInventory = Get-BackupTreeInventory -Root $sourceState.Path -Hash
+    $portable=Read-BackupJson ($sourceState.Path+'.backup-manifest.json')
+    if($portable -and ($portable.schema-cne 'devconfig.tree-manifest.v1' -or $portable.status-cne 'complete' -or $portable.verification-cne 'sha256_full_tree' -or (Get-BackupInventoryDigest $sourceInventory)-cne $portable.content_sha256)){throw 'restore_portable_manifest_mismatch'}
     $arguments = @(
         $sourceState.Path, $targetState.Path,
         '/E', '/COPY:DAT', '/DCOPY:DAT', '/R:1', '/W:1', '/MT:8', '/XJ',
@@ -296,6 +300,9 @@ function Invoke-NativeWeChatLocalCopy {
         throw "robocopy reported mismatched or failed native WeChat application data (exit=$exitCode)."
     }
 
+    $copied=Get-BackupTreeInventory -Root $targetState.Path -Hash
+    if((Get-BackupInventoryDigest $copied)-cne (Get-BackupInventoryDigest $sourceInventory)){throw 'restore_native_payload_hash_mismatch'}
+    Assert-BackupSourceUnchanged $sourceInventory
     return [pscustomobject]@{
         Method = 'robocopy'
         ExitCode = $exitCode

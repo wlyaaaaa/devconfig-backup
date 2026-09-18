@@ -1,411 +1,153 @@
-﻿<#
+<#
 .SYNOPSIS
-  DevConfig 备份：采集开发配置/凭据/系统设置 -> 打包 -> 本地/G盘热备/Drive 分发。
+  Collect, verify, publish and distribute complete DevConfig generations.
 .DESCRIPTION
-  内容来自 sources.psd1。剔除可重下的插件/缓存/包/二进制；默认剔除聊天历史。
-  Tier 控制分发：Local（产出本地 zip）、Hot（同步到G盘热备）、Drive（rclone 上传，改动才传）。H 冷备统一由 PCConfig 从 G 人工复制。
-.EXAMPLE
-  pwsh -File Backup-DevConfig.ps1 -Tier Local
-  pwsh -File Backup-DevConfig.ps1 -Tier Local,Hot
-  pwsh -File Backup-DevConfig.ps1 -Tier Drive
+  -Plan is zero-write. Collection failures never publish or prune successful
+  backups. H cold copying is owned by PCConfig. Source selection remains in
+  sources.psd1; configuration payload may contain private credentials.
 #>
 [CmdletBinding()]
 param(
-    # Local/Hot/Drive 任意组合；-File 传入时可能是 "Local,Hot" 单串，下面会拆分
-    [string[]] $Tier = @('Local'),
-
-    [switch]   $IncludeHistory,
-    [switch]   $Force,                       # 跳过 Drive 的 hash 门控（测试用）
-
-    [string]   $HotRoot      = 'G:\80_Backup\DevConfig',
-    [string]   $GDriveRemote = 'gdrive:',
-    [string]   $GDriveFolder = "Backups/$env:COMPUTERNAME",
-    [string]   $BwLimit      = '4M',
-
-    [int]      $KeepLocal = 7,
-    [int]      $KeepHot   = 7,
-    [int]      $KeepDrive = 3
+ [string[]]$Tier=@('Local'),[switch]$IncludeHistory,[switch]$Force,
+ [string]$HotRoot='G:\80_Backup\DevConfig',[string]$GDriveRemote='gdrive:',
+ [string]$GDriveFolder="Backups/$env:COMPUTERNAME",[string]$BwLimit='4M',
+ [ValidateRange(1,365)][int]$KeepLocal=7,[ValidateRange(1,365)][int]$KeepHot=7,[ValidateRange(1,365)][int]$KeepDrive=3,
+ [switch]$Plan,[switch]$Json,[string]$ProfileRoot=$env:USERPROFILE,
+ [string]$SourcesFile=(Join-Path $PSScriptRoot 'sources.psd1'),[string]$OutputRoot=$PSScriptRoot,
+ [string]$SevenZipPath='E:\Scoop\shims\7z.exe',[switch]$SkipSystemExport,
+ [ValidateSet('ServerCopy','Upload')][string]$CloudLatestMode='ServerCopy'
 )
-
-$ErrorActionPreference = 'Continue'
+$ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'Backup.Common.ps1')
+. (Join-Path $PSScriptRoot 'DevConfig.Sources.ps1')
 . (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
-$script:GDriveRemoteWasExplicit = $PSBoundParameters.ContainsKey('GDriveRemote')
-
-# 归一化 Tier：兼容 -File 把 "Local,Hot" 当单串传入的情况
-$Tier = @($Tier) | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-$validTiers = @('Local','Hot','Drive')
-$bad = $Tier | Where-Object { $_ -notin $validTiers }
-if ($bad) { Write-Host "无效 Tier: $($bad -join ',')（可选 Local/Hot/Drive；H 冷备请使用 PCConfig 人工 G→H 流程）" -ForegroundColor Red; exit 2 }
-
-$Root     = $PSScriptRoot
-$Staging  = Join-Path $Root 'staging'
-$OutDir   = Join-Path $Root 'out'
-$StateDir = Join-Path $Root 'state'
-$LogDir   = Join-Path $Root 'logs'
-$Home10   = $env:USERPROFILE
-$SevenZip = 'E:\Scoop\shims\7z.exe'
-
-foreach ($d in @($Staging,$OutDir,$StateDir,$LogDir)) {
-    if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+$script:GDriveRemoteWasExplicit=$PSBoundParameters.ContainsKey('GDriveRemote')
+$Tier=@(@($Tier)|ForEach-Object{$_-split ','}|ForEach-Object{$_.Trim()}|Where-Object{$_}|Select-Object -Unique)
+if($Tier.Count-eq 0 -or @($Tier|Where-Object{$_-notin @('Local','Hot','Drive')}).Count){throw 'invalid_backup_tier'}
+$cfg=Import-PowerShellDataFile -LiteralPath $SourcesFile -ErrorAction Stop
+$OutputRoot=Resolve-BackupPath $OutputRoot;$OutDir=Join-Path $OutputRoot 'out';$StateDir=Join-Path $OutputRoot 'state';$StageParent=Join-Path $OutputRoot 'staging'
+$HotRoot=Resolve-BackupPath $HotRoot
+if($Tier-contains 'Hot'){Assert-BackupPathsIndependent $OutDir $HotRoot}
+function Test-HotRootAvailable([string]$Path){
+ try{$root=[IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Path));$null=[IO.Directory]::GetFileSystemEntries($root);return $true}catch{return $false}
 }
-
-# ---------- 日志 ----------
-$stamp   = Get-Date -Format 'yyyyMMdd-HHmmss'
-$logFile = Join-Path $LogDir "backup-$stamp.log"
-function Write-Log {
-    param([string]$Msg, [string]$Level = 'INFO')
-    $line = "{0} [{1}] {2}" -f (Get-Date -Format 'HH:mm:ss'), $Level, $Msg
-    $color = switch ($Level) { 'WARN' {'Yellow'} 'ERR' {'Red'} 'OK' {'Green'} default {'Gray'} }
-    Write-Host $line -ForegroundColor $color
-    Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8
+function Push-Hot($Pack){
+ Assert-BackupPathsIndependent $OutDir $HotRoot
+ for($attempt=1;$attempt-le 3;$attempt++){
+  if(-not (Test-HotRootAvailable $HotRoot)){if($attempt-lt 3){Start-Sleep -Seconds 30;continue};throw 'hot_backup_root_unavailable'}
+  $hotLease=Open-BackupResourceLock $HotRoot
+  try{Publish-DevConfigPackage $Pack $HotRoot $KeepHot;return}finally{$hotLease.Dispose()}
+ }
 }
-
-$overallExitCode = 0
-function Set-BackupFailure {
-    param([string]$Message)
-    $script:overallExitCode = 1
-    if ($Message) { Write-Log $Message 'ERR' }
+function Push-Drive($Pack){
+ $rclone=Get-BackupExecutable rclone -FallbackPath 'E:\Scoop\shims\rclone.exe';$env:PATH=[IO.Path]::GetDirectoryName($rclone)+';'+$env:PATH
+ $network=Initialize-BackupNetwork
+ $resolved=Resolve-ConfiguredRcloneRemote -Remote $GDriveRemote -RemoteWasExplicit $script:GDriveRemoteWasExplicit -BindingPath (Join-Path $StateDir 'rclone-remote-binding.json')
+ if(-not $resolved.Success){throw ('drive_remote_unavailable:'+ $resolved.Reason)}
+ if([string]::IsNullOrWhiteSpace($GDriveFolder) -or $GDriveFolder-match '(^|[/\\])\.\.([/\\]|$)|^[/\\]'){throw 'drive_folder_invalid'}
+ $remote=$resolved.Remote;$dest=$remote+$GDriveFolder.TrimEnd('/','\')
+ $preflight=Invoke-RcloneDrivePreflight -Remote $remote
+ if(-not $preflight.Success){throw ('drive_preflight_failed:'+ $preflight.Category)}
+ $flags=@('--checksum','--bwlimit',$BwLimit,'--transfers','1','--tpslimit','8','--tpslimit-burst','8','--retries','3','--low-level-retries','10','--contimeout','20s','--timeout','120s')
+ $cachePath=Join-Path $StateDir 'last-uploaded.json';$state=Get-DriveUploadState $cachePath
+ $skip=$false
+ if(-not $Force){$skip=(Test-DriveUploadSkipEligibility -State $state -Sha256 $Pack.Sha -Remote $remote -Folder $GDriveFolder -DatedName $Pack.Name -DatedLocalPath $Pack.Zip -LatestLocalPath $Pack.Zip).Eligible}
+ if(-not $skip){
+  Invoke-BackupRclone copyto $Pack.Zip ($dest+'/'+$Pack.Name) @flags *> $null
+  if($LASTEXITCODE-ne 0){throw 'drive_dated_upload_failed'}
+  $latestSource=if($CloudLatestMode-eq 'ServerCopy'){$dest+'/'+$Pack.Name}else{$Pack.Zip}
+  Invoke-BackupRclone copyto $latestSource ($dest+'/latest.zip') @flags *> $null
+  if($LASTEXITCODE-ne 0){throw 'drive_latest_upload_failed'}
+ }
+ foreach($name in @($Pack.Name,'latest.zip')){
+  if(-not (Test-RcloneRemoteFileMatchesLocal -LocalPath $Pack.Zip -RemotePath ($dest+'/'+$name)).Matches){throw 'drive_package_verification_failed'}
+  foreach($suffix in @('.receipt.json','.manifest.json','.sha256')){
+   $local=$Pack.Zip+$suffix;$target=$dest+'/'+$name+$suffix
+   Invoke-BackupRclone copyto $local $target @flags *> $null
+   if($LASTEXITCODE-ne 0 -or -not (Test-RcloneRemoteFileMatchesLocal -LocalPath $local -RemotePath $target).Matches){throw 'drive_portable_metadata_verification_failed'}
+  }
+ }
+ $pointer=[ordered]@{schema='devconfig.package-current.v2';status='complete';collection_status='complete';verification_status='complete';destination=$dest;completed_utc=(Get-BackupUtc);package_name=$Pack.Name;sha256=$Pack.Sha;package_bytes=$Pack.Receipt.package_bytes;content_sha256=$Pack.Receipt.content_sha256}
+ $pointerFile=Join-Path $StateDir 'drive-current-candidate.json';Write-BackupJsonAtomic $pointerFile $pointer
+ Invoke-BackupRclone copyto $pointerFile ($dest+'/current.json') @flags *> $null
+ if($LASTEXITCODE-ne 0 -or -not (Test-RcloneRemoteFileMatchesLocal -LocalPath $pointerFile -RemotePath ($dest+'/current.json')).Matches){throw 'drive_current_publication_failed'}
+ $names=@(Invoke-BackupRclone lsf $dest --files-only --include 'devconfig-*.zip' --contimeout 20s --timeout 120s --retries 2)
+ if($LASTEXITCODE-ne 0){throw 'drive_retention_inventory_failed'}
+ $names=@($names|Where-Object{$_-cmatch '^devconfig-[0-9]{8}(?:-[0-9]{6})?(?:-[a-f0-9]{8})?\.zip$'}|Sort-Object -Descending)
+ $retained=@($Pack.Name)+@($names|Where-Object{$_-cne $Pack.Name}|Select-Object -First ($KeepDrive-1))
+ foreach($name in $names){if($name-notin $retained){
+  Invoke-BackupRclone deletefile ($dest+'/'+$name) --contimeout 20s --timeout 120s --retries 2 *> $null;if($LASTEXITCODE-ne 0){throw 'drive_retention_delete_failed'}
+  foreach($suffix in @('.receipt.json','.manifest.json','.sha256')){
+   # Old pre-v2 packages have no sidecars; lsf is authoritative before deletion.
+   $found=@(Invoke-BackupRclone lsf $dest --files-only --include ($name+$suffix) --contimeout 20s --timeout 120s --retries 2)
+   if($LASTEXITCODE-ne 0){throw 'drive_retention_inventory_failed'}
+   if($found-contains ($name+$suffix)){Invoke-BackupRclone deletefile ($dest+'/'+$name+$suffix) --contimeout 20s --timeout 120s --retries 2 *> $null;if($LASTEXITCODE-ne 0){throw 'drive_retention_delete_failed'}}
+  }
+ }}
+ Write-BackupJsonAtomic $cachePath (New-DriveUploadState -Sha256 $Pack.Sha -Remote $remote -Folder $GDriveFolder -DatedName $Pack.Name)
+ Write-BackupJsonAtomic (Join-Path $StateDir 'devconfig-drive-success.json') $pointer
+ [IO.File]::WriteAllText((Join-Path $StateDir 'last-drive-success.txt'),(Get-BackupUtc),[Text.Encoding]::ASCII)
 }
-
-Write-Log "==== DevConfig backup start | Tier=$($Tier -join ',') | History=$IncludeHistory ===="
-
-# ---------- 载入源清单 ----------
-$srcFile = Join-Path $Root 'sources.psd1'
-if (-not (Test-Path -LiteralPath $srcFile)) { Write-Log "缺少 sources.psd1" 'ERR'; exit 1 }
-$cfg = Import-PowerShellDataFile -LiteralPath $srcFile
-
-$excludeDirs  = @($cfg.ExcludeDirs)
-$excludeFiles = @($cfg.ExcludeFiles)
-if (-not $IncludeHistory) {
-    $excludeDirs += @($cfg.HistoryDirs)
-    $excludeFiles += @($cfg.HistoryFiles)
+function New-DevConfigCandidate([string]$Container){
+ $stage=Join-Path $Container 'payload';$inventory=Get-DevConfigSourceInventory $cfg $ProfileRoot -IncludeHistory:$IncludeHistory -Hash
+ Copy-DevConfigSourceInventory $inventory $stage
+ $script:run.optional_tools_absent=if($SkipSystemExport){@('system_export_explicitly_skipped')}else{@(Invoke-DevConfigSystemExport $cfg $stage)}
+ $binding=Join-Path $StateDir 'rclone-remote-binding.json'
+ if([IO.File]::Exists($binding)){$null=Copy-RcloneRemoteBindingToManifest -BindingPath $binding -ManifestDirectory (Join-Path $stage '_manifests')}
+ $again=Get-DevConfigSourceInventory $cfg $ProfileRoot -IncludeHistory:$IncludeHistory
+ if((Get-BackupInventoryDigest $again -Metadata)-cne (Get-BackupInventoryDigest $inventory -Metadata)){throw 'backup_source_changed_during_collection'}
+ $payload=Get-BackupTreeInventory $stage -Hash;$treeHash=Get-BackupInventoryDigest $payload
+ $policyHash=Get-BackupTextHash ((Get-BackupStableFileHash $SourcesFile)+'|'+[string]$IncludeHistory+'|'+[string]$SkipSystemExport)
+ $contentHash=Get-BackupTextHash ($treeHash+'|'+$policyHash)
+ $script:run.collection='complete';$script:run.package='running';Write-BackupJsonAtomic $runPath $script:run
+ $previous=$null;try{$previous=Get-VerifiedDevConfigPackage $OutDir}catch{}
+ if($previous -and $previous.Receipt.content_sha256-ceq $contentHash){$script:run.package='reused';return $previous}
+ $manifest=[ordered]@{schema='devconfig.payload-manifest.v1';content_sha256=$contentHash;payload_tree_sha256=$treeHash;policy_sha256=$policyHash;file_count=$payload.file_count;bytes=$payload.bytes;directories=$payload.directories;files=@($payload.files|Select-Object relative_path,length,sha256);sources=$inventory.sources;application_consistency='not_proven'}
+ Write-BackupJsonAtomic (Join-Path $stage 'backup-manifest.json') $manifest
+ $name='devconfig-'+(Get-Date -Format yyyyMMdd-HHmmss)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)+'.zip';$zip=Join-Path $Container $name
+ $zipExe=Get-BackupExecutable 7z -FallbackPath $SevenZipPath
+ & $zipExe a -tzip -mx=5 -bso0 -bsp0 -- $zip ($stage+'\*') *> $null
+ if($LASTEXITCODE-ne 0 -or -not [IO.File]::Exists($zip)){throw 'backup_pack_failed'}
+ & $zipExe t -bso0 -bsp0 -- $zip *> $null;if($LASTEXITCODE-ne 0){throw 'backup_archive_test_failed'}
+ $hash=Get-BackupStableFileHash $zip
+ $receipt=[ordered]@{schema='devconfig.package-receipt.v2';status='complete';collection_status='complete';archive_verification='7z_test_pass';completed_utc=(Get-BackupUtc);package_name=$name;sha256=$hash;package_bytes=(Get-Item $zip).Length;content_sha256=$contentHash;payload_tree_sha256=$treeHash;file_count=$payload.file_count;application_recovery='not_tested'}
+ Write-BackupJsonAtomic ($zip+'.manifest.json') $manifest;Write-BackupJsonAtomic ($zip+'.receipt.json') $receipt
+ [IO.File]::WriteAllText(($zip+'.sha256'),($hash+'  '+$name+"`n"),[Text.Encoding]::ASCII)
+ return [pscustomobject]@{Zip=$zip;Sha=$hash;Name=$name;Receipt=[pscustomobject]$receipt;MB=[math]::Round($receipt.package_bytes/1MB,2)}
 }
-
-# ---------- robocopy 包装 ----------
-function Invoke-Rc {
-    param([string]$Src, [string]$Dst, [string[]]$Excl, [string[]]$ExclF)
-    if (-not (Test-Path -LiteralPath $Src)) { Write-Log "  跳过(不存在) $Src" 'WARN'; return }
-    $rcArgs = @($Src, $Dst, '/E','/R:1','/W:1','/MT:8','/NFL','/NDL','/NJH','/NJS','/NP','/XJ','/XD') + $Excl
-    if ($ExclF) { $rcArgs += @('/XF') + $ExclF }
-    & robocopy @rcArgs *> $null
-    if ($LASTEXITCODE -ge 8) {
-        Set-BackupFailure "  robocopy 异常 exit=${LASTEXITCODE}: $Src"
-    }
+if($Plan){
+ $inventory=Get-DevConfigSourceInventory $cfg $ProfileRoot -IncludeHistory:$IncludeHistory
+ $result=[ordered]@{schema='devconfig.backup-plan.v1';write_mode='zero_write';tiers=$Tier;source_count=$inventory.source_count;file_count=$inventory.file_count;bytes=$inventory.bytes;optional_absent_count=$inventory.optional_absent_count;sources=$inventory.sources;system_exports='not_run';cloud='not_contacted';out=$OutDir;hot=$HotRoot}
+ if($Json){$result|ConvertTo-Json -Depth 8}else{[pscustomobject]$result|Format-List};exit 0
 }
-function Copy-One {
-    param([string]$Src, [string]$DstDir)
-    if (Test-Path -LiteralPath $Src) {
-        New-Item -ItemType Directory -Path $DstDir -Force | Out-Null
-        Copy-Item -LiteralPath $Src -Destination $DstDir -Force -ErrorAction SilentlyContinue
-    }
+$script:overallExitCode=0;$outLease=$null;$pin=$null;$container=$null;$pack=$null
+$script:run=[ordered]@{schema='devconfig.run.v2';run_id=[guid]::NewGuid().ToString('N');status='running';started_utc=(Get-BackupUtc);completed_utc=$null;tiers=$Tier;collection='not_requested';package='not_requested';hot='not_requested';drive='not_requested';retention='not_requested';failure=$null;optional_tools_absent=@();application_recovery='not_tested'}
+$runPath=Join-Path $StateDir ('devconfig-'+$(if($Tier.Count-eq 1 -and $Tier[0]-eq 'Drive'){'drive'}else{'local'})+'-last.json')
+try{
+ Write-BackupJsonAtomic $runPath $run
+ $outLease=Open-BackupResourceLock $OutDir
+ if($Tier-contains 'Local' -or $Tier-contains 'Hot'){
+  $run.collection='running';Write-BackupJsonAtomic $runPath $run
+  $container=Join-Path $StageParent ('run-'+$run.run_id);[void][IO.Directory]::CreateDirectory($container)
+  $pack=New-DevConfigCandidate $container
+  $run.retention='running';Publish-DevConfigPackage $pack $OutDir $KeepLocal
+  $pack=Get-VerifiedDevConfigPackage $OutDir
+  if($run.package-ne 'reused'){$run.package='complete'};$run.retention='complete'
+  [IO.File]::WriteAllText((Join-Path $StateDir 'latest.sha256'),($pack.Sha+'  '+$pack.Name),[Text.Encoding]::ASCII)
+ }else{$pack=Get-DrivePackageSnapshot -OutDir $OutDir -StateDir $StateDir;$run.package='verified_existing'}
+ $pin=[IO.File]::Open($pack.Zip,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+ $outLease.Dispose();$outLease=$null;Write-BackupJsonAtomic $runPath $run
+ if($Tier-contains 'Hot'){$run.hot='running';Write-BackupJsonAtomic $runPath $run;try{Push-Hot $pack;$run.hot='complete'}catch{$run.hot='failed';$run.failure=Get-BackupFailureCode $_;$script:overallExitCode=1}}
+ if($Tier-contains 'Drive'){$run.drive='running';Write-BackupJsonAtomic $runPath $run;try{Push-Drive $pack;$run.drive='complete'}catch{$run.drive='failed';$run.failure=Get-BackupFailureCode $_;$script:overallExitCode=1}}
+ $run.status=if($script:overallExitCode-eq 0){'complete'}else{'failed'}
+}catch{
+ $script:overallExitCode=1;$run.status='failed';$run.failure=Get-BackupFailureCode $_;$run.failure_type=$_.Exception.GetType().Name
+ $run.failure_site=@($_.ScriptStackTrace-split "`n")[0]
+ foreach($phase in @('collection','package','hot','drive','retention')){if($run[$phase]-eq 'running'){$run[$phase]='failed'}}
+}finally{
+ if($pin){$pin.Dispose()};if($outLease){$outLease.Dispose()}
+ if($container -and [IO.Directory]::Exists($container)){try{Remove-BackupOwnedDirectory $container $StageParent '^run-[a-f0-9]{32}$'}catch{$script:overallExitCode=1;$run.status='failed';$run.failure='backup_staging_cleanup_failed'}}
+ $run.completed_utc=Get-BackupUtc;try{Write-BackupJsonAtomic $runPath $run}catch{$script:overallExitCode=1;$run.status='failed';$run.failure='backup_status_publication_failed'}
 }
-
-function Copy-RelativeFile {
-    param([string]$Base, [string]$Relative, [string]$OutBase)
-    $src = Join-Path $Base $Relative
-    if (-not (Test-Path -LiteralPath $src)) { return }
-    $parent = Split-Path $Relative -Parent
-    $dstDir = if ([string]::IsNullOrWhiteSpace($parent)) { $OutBase } else { Join-Path $OutBase $parent }
-    New-Item -ItemType Directory -Path $dstDir -Force | Out-Null
-    Copy-Item -LiteralPath $src -Destination $dstDir -Force -ErrorAction SilentlyContinue
-}
-
-function Copy-RelativeDir {
-    param([string]$Base, [string]$Relative, [string]$OutBase, [string[]]$Excl, [string[]]$ExclF)
-    $src = Join-Path $Base $Relative
-    if (-not (Test-Path -LiteralPath $src)) { Write-Log "  跳过(不存在) $src" 'WARN'; return }
-    $dst = Join-Path $OutBase $Relative
-    Invoke-Rc $src $dst $Excl $ExclF
-}
-
-# ============================================================
-# 1) 采集 -> staging
-# ============================================================
-function Invoke-Gather {
-    Write-Log "重建 staging ..."
-    if (Test-Path -LiteralPath $Staging) { Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue }
-    $homeOut  = Join-Path $Staging 'home'
-    $adOut    = Join-Path $Staging 'appdata-roaming'
-    $adlOut   = Join-Path $Staging 'appdata-local'
-    $extraOut = Join-Path $Staging 'extra'
-    New-Item -ItemType Directory -Path $homeOut,$adOut,$adlOut,$extraOut -Force | Out-Null
-
-    foreach ($f in $cfg.HomeFiles)  { Copy-One (Join-Path $Home10 $f) $homeOut }
-    foreach ($f in @($cfg.HomePreciseFiles)) { Copy-RelativeFile $Home10 $f $homeOut }
-    foreach ($d in @($cfg.HomePreciseDirs))  { Copy-RelativeDir  $Home10 $d $homeOut $excludeDirs $excludeFiles }
-    foreach ($d in $cfg.HomeDirs)   { Invoke-Rc (Join-Path $Home10 $d) (Join-Path $homeOut $d) $excludeDirs $excludeFiles }
-    foreach ($d in $cfg.AppDataRoamingDirs) { Invoke-Rc (Join-Path $Home10 "AppData\Roaming\$d") (Join-Path $adOut $d) $excludeDirs $excludeFiles }
-    foreach ($f in @($cfg.AppDataRoamingFiles)) { Copy-RelativeFile (Join-Path $Home10 'AppData\Roaming') $f $adOut }
-    foreach ($d in $cfg.AppDataLocalDirs)   { Invoke-Rc (Join-Path $Home10 "AppData\Local\$d")   (Join-Path $adlOut $d) $excludeDirs $excludeFiles }
-    foreach ($f in $cfg.AppDataLocalFiles)  { Copy-One (Join-Path $Home10 "AppData\Local\$f") (Join-Path $adlOut (Split-Path $f)) }
-    foreach ($e in $cfg.ExtraDirs)  { Invoke-Rc $e.Src (Join-Path $extraOut $e.Name) $excludeDirs $excludeFiles }
-    foreach ($sf in $cfg.SpecialFiles) { Copy-One (Join-Path $Home10 $sf) (Join-Path $Staging (Join-Path 'special' (Split-Path $sf))) }
-
-    # Windows Terminal settings.json
-    $wt = Get-ChildItem "$Home10\AppData\Local\Packages\Microsoft.WindowsTerminal_*\LocalState\settings.json" -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($wt) { Copy-One $wt.FullName (Join-Path $adOut 'WindowsTerminal') }
-    Write-Log "采集完成" 'OK'
-}
-
-# ============================================================
-# 2) 系统配置导出 -> staging\_system
-# ============================================================
-function Invoke-SystemExport {
-    $sys = Join-Path $Staging '_system'
-    New-Item -ItemType Directory -Path $sys,"$sys\tasks","$sys\wifi" -Force | Out-Null
-
-    foreach ($re in $cfg.RegistryExports) {
-        & reg export $re.Key (Join-Path $sys "$($re.Name).reg") /y *> $null
-    }
-    [Environment]::GetEnvironmentVariable('Path','Machine') -split ';' |
-        Where-Object { $_ } | Set-Content (Join-Path $sys 'path-machine.txt') -Encoding UTF8
-
-    $n = 0
-    foreach ($t in (Get-ScheduledTask -ErrorAction SilentlyContinue)) {
-        foreach ($pat in $cfg.ScheduledTaskPatterns) {
-            if ($t.TaskName -like $pat) {
-                try {
-                    (Export-ScheduledTask -TaskName $t.TaskName -TaskPath $t.TaskPath -ErrorAction Stop) |
-                        Set-Content (Join-Path "$sys\tasks" ("{0}.xml" -f ($t.TaskName -replace '[^\w\-]','_'))) -Encoding Unicode
-                    $n++
-                } catch {}
-                break
-            }
-        }
-    }
-    Write-Log "  计划任务导出: $n 个"
-
-    Copy-Item "$env:WINDIR\System32\drivers\etc\hosts" (Join-Path $sys 'hosts') -Force -ErrorAction SilentlyContinue
-    & netsh wlan export profile key=clear folder="$sys\wifi" *> $null
-    if (-not (Get-ChildItem "$sys\wifi" -ErrorAction SilentlyContinue)) { & netsh wlan export profile folder="$sys\wifi" *> $null }
-    Write-Log "系统导出完成" 'OK'
-}
-
-# ============================================================
-# 3) 重装清单 -> staging\_manifests
-# ============================================================
-function Invoke-Manifests {
-    $man = Join-Path $Staging '_manifests'
-    New-Item -ItemType Directory -Path $man -Force | Out-Null
-
-    if (Copy-RcloneRemoteBindingToManifest -BindingPath (Join-Path $StateDir 'rclone-remote-binding.json') -ManifestDirectory $man) {
-        Write-Log '已加入非秘密 rclone remote binding 到 _manifests' 'OK'
-    }
-
-    try { & scoop export *> (Join-Path $man 'scoop.json') } catch {}
-    try { & winget export -o (Join-Path $man 'winget.json') --accept-source-agreements *> $null } catch {}
-    try { & code   --list-extensions *> (Join-Path $man 'vscode-extensions.txt') }  catch {}
-    try { & cursor --list-extensions *> (Join-Path $man 'cursor-extensions.txt') }  catch {}
-
-    $jb = "$Home10\AppData\Roaming\JetBrains"
-    if (Test-Path $jb) {
-        Get-ChildItem $jb -Directory | ForEach-Object {
-            $pl = Join-Path $_.FullName 'plugins'
-            if (Test-Path $pl) { "## $($_.Name)"; (Get-ChildItem $pl -Directory -ErrorAction SilentlyContinue).Name; '' }
-        } | Set-Content (Join-Path $man 'jetbrains-plugins.txt') -Encoding UTF8
-    }
-
-    Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-                     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName } | Select-Object DisplayName, DisplayVersion, Publisher |
-        Sort-Object DisplayName -Unique |
-        Export-Csv (Join-Path $man 'installed-software.csv') -NoTypeInformation -Encoding UTF8
-    Write-Log "重装清单完成" 'OK'
-}
-
-# ============================================================
-# 4) 打包 + sha256
-# ============================================================
-function Invoke-Pack {
-    $idx = Get-ChildItem -LiteralPath $Staging -Recurse -File -ErrorAction SilentlyContinue
-    $sizeMB = [math]::Round((($idx | Measure-Object Length -Sum).Sum)/1MB, 2)
-    @("DevConfig backup  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
-      "Host: $env:COMPUTERNAME   IncludeHistory: $IncludeHistory",
-      "Files: $($idx.Count)   Size: $sizeMB MB") | Set-Content (Join-Path $Staging 'MANIFEST.txt') -Encoding UTF8
-
-    $zip = Join-Path $OutDir "devconfig-$stamp.zip"
-    Write-Log "打包 -> $([IO.Path]::GetFileName($zip)) (staging $sizeMB MB) ..."
-    & $SevenZip a -tzip -mx=5 -bso0 -bsp0 -- $zip "$Staging\*" *> $null
-    $packExit = $LASTEXITCODE
-    if ($packExit -ne 0 -or -not (Test-Path -LiteralPath $zip)) {
-        Set-BackupFailure "打包失败 exit=$packExit"
-        return $null
-    }
-
-    $zipMB = [math]::Round((Get-Item $zip).Length/1MB, 2)
-    $sha   = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
-    try {
-        $latestTemp = Join-Path $OutDir 'latest.zip.tmp'
-        Copy-Item -LiteralPath $zip -Destination $latestTemp -Force -ErrorAction Stop
-        Move-Item -LiteralPath $latestTemp -Destination (Join-Path $OutDir 'latest.zip') -Force -ErrorAction Stop
-        Set-Content (Join-Path $StateDir 'latest.sha256') "$sha  devconfig-$stamp.zip" -Encoding ASCII -ErrorAction Stop
-    }
-    catch {
-        Set-BackupFailure "latest 包发布失败: $($_.Exception.Message)"
-        return $null
-    }
-    Write-Log "打包完成: $zipMB MB  sha256=$($sha.Substring(0,12))..." 'OK'
-
-    Get-ChildItem $OutDir -Filter 'devconfig-*.zip' | Sort-Object LastWriteTime -Descending |
-        Select-Object -Skip $KeepLocal | Remove-Item -Force -ErrorAction SilentlyContinue
-    return [pscustomobject]@{ Zip = $zip; Sha = $sha; MB = $zipMB; Name = "devconfig-$stamp.zip" }
-}
-
-# ============================================================
-# 5) 分发：G盘热备 / H盘冷备
-# ============================================================
-function Test-HotRootAvailable {
-    param([Parameter(Mandatory)][string]$Path)
-    try {
-        $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Path))
-        return -not [string]::IsNullOrWhiteSpace($root) -and
-            (Test-Path -LiteralPath $root -PathType Container)
-    }
-    catch {
-        return $false
-    }
-}
-
-function Push-Hot {
-    param($Pack)
-    $attemptCount = 3
-    for ($attempt = 1; $attempt -le $attemptCount; $attempt++) {
-        if (-not (Test-HotRootAvailable -Path $HotRoot)) {
-            if ($attempt -lt $attemptCount) {
-                Write-Log "G盘热备根目录暂不可用，$attemptCount 次中的第 $attempt 次等待后重试" 'WARN'
-                Start-Sleep -Seconds 30
-                continue
-            }
-            Set-BackupFailure "G盘热备同步失败: hot_backup_root_unavailable:$HotRoot"
-            return
-        }
-        try {
-            New-Item -ItemType Directory -Path $HotRoot -Force -ErrorAction Stop | Out-Null
-            Copy-Item -LiteralPath $Pack.Zip -Destination $HotRoot -Force -ErrorAction Stop
-            Copy-Item -LiteralPath (Join-Path $OutDir 'latest.zip') -Destination $HotRoot -Force -ErrorAction Stop
-            Get-ChildItem $HotRoot -Filter 'devconfig-*.zip' | Sort-Object LastWriteTime -Descending |
-                Select-Object -Skip $KeepHot | Remove-Item -Force -ErrorAction SilentlyContinue
-            Write-Log "G盘热备同步完成 -> $HotRoot" 'OK'
-            return
-        }
-        catch {
-            if ($attempt -lt $attemptCount -and -not (Test-HotRootAvailable -Path $HotRoot)) {
-                Write-Log "G盘热备写入期间不可用，$attemptCount 次中的第 $attempt 次等待后重试" 'WARN'
-                Start-Sleep -Seconds 30
-                continue
-            }
-            Set-BackupFailure "G盘热备同步失败: $($_.Exception.Message)"
-            return
-        }
-    }
-}
-
-# ============================================================
-# 6) 分发：Google Drive（rclone，改动才传）
-# ============================================================
-function Push-Drive {
-    param($Pack)
-    $network = Initialize-BackupNetwork
-    if ($network.Applied) { Write-Log "  rclone 已应用当前用户代理设置 source=$($network.Source)" }
-    if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) {
-        Set-BackupFailure "rclone 未安装，Drive 备份失败"
-        return
-    }
-    $remoteResolution = Resolve-ConfiguredRcloneRemote -Remote $GDriveRemote `
-        -RemoteWasExplicit $script:GDriveRemoteWasExplicit `
-        -BindingPath (Join-Path $StateDir 'rclone-remote-binding.json')
-    if (-not $remoteResolution.Success) {
-        Set-BackupFailure "配置的 Drive 远端不可用 reason=$($remoteResolution.Reason)，Drive 备份失败"
-        return
-    }
-    $GDriveRemote = $remoteResolution.Remote
-
-    # 连通性预检：容忍代理冷启动和 API 瞬态抖动；仅记录有界类别，不把原始错误写入日志。
-    $preflight = Invoke-RcloneDrivePreflight -Remote $GDriveRemote
-    if (-not $preflight.Success) {
-        Set-BackupFailure "Drive 预检失败 attempts=$($preflight.Attempts) category=$($preflight.Category) exit=$($preflight.ExitCode) output_lines=$($preflight.OutputLines) rclone=$($preflight.RclonePath) config=$($preflight.ConfigPath) diagnostic=$($preflight.Diagnostic)，交给计划任务重试"
-        return
-    }
-    Write-Log "Drive 预检通过 attempts=$($preflight.Attempts)" 'OK'
-
-    $dest = "$GDriveRemote$GDriveFolder"
-    $lastFile = Join-Path $StateDir 'last-uploaded.json'
-    # Both cloud names must describe one immutable package, even while Local
-    # publishes a new latest.zip concurrently.
-    $latestPath = $Pack.Zip
-    $uploadState = Get-DriveUploadState -Path $lastFile
-    if (-not $Force) {
-        $skip = Test-DriveUploadSkipEligibility -State $uploadState -Sha256 $Pack.Sha `
-            -Remote $GDriveRemote -Folder $GDriveFolder -DatedName $Pack.Name `
-            -DatedLocalPath $Pack.Zip -LatestLocalPath $latestPath
-        if ($skip.Eligible) {
-            Write-Log "内容与目的地均已核对，跳过 Drive 上传" 'OK'
-            return
-        }
-        if ($null -ne $uploadState) { Write-Log "Drive 缓存状态不可复用 reason=$($skip.Reason)，继续核对/上传" 'WARN' }
-    }
-
-    Write-Log "rclone 上传 -> $dest/$($Pack.Name) (bwlimit=$BwLimit) ..."
-    # 强重试 + 断点续传（rclone copy 幂等：进程被中断后再次运行自动跳过已传文件）
-    & rclone copyto $Pack.Zip "$dest/$($Pack.Name)" --checksum --bwlimit $BwLimit --transfers 1 `
-        --tpslimit 8 --tpslimit-burst 8 --drive-pacer-min-sleep 100ms --drive-pacer-burst 8 `
-        --retries 5 --retries-sleep 30s --low-level-retries 20 --timeout 120s
-    $datedCopyExit = $LASTEXITCODE
-    if ($datedCopyExit -eq 0) {
-        & rclone copyto $latestPath "$dest/latest.zip" --checksum --bwlimit $BwLimit `
-            --tpslimit 8 --tpslimit-burst 8 --drive-pacer-min-sleep 100ms --drive-pacer-burst 8 `
-            --retries 3 *> $null
-        $latestCopyExit = $LASTEXITCODE
-        if ($latestCopyExit -ne 0) {
-            Set-BackupFailure "Drive latest.zip 上传失败 exit=$latestCopyExit（日期包已保留，下次继续）"
-            return
-        }
-        $datedVerification = Test-RcloneRemoteFileMatchesLocal -LocalPath $Pack.Zip -RemotePath "$dest/$($Pack.Name)"
-        $latestVerification = Test-RcloneRemoteFileMatchesLocal -LocalPath $latestPath -RemotePath "$dest/latest.zip"
-        if (-not $datedVerification.Matches -or -not $latestVerification.Matches) {
-            Set-BackupFailure "Drive 上传后对象核对失败 dated=$($datedVerification.Reason) latest=$($latestVerification.Reason)"
-            return
-        }
-        $newState = New-DriveUploadState -Sha256 $Pack.Sha -Remote $GDriveRemote -Folder $GDriveFolder -DatedName $Pack.Name
-        Set-Content $lastFile ($newState | ConvertTo-Json -Compress) -Encoding UTF8 -ErrorAction Stop
-        Set-Content (Join-Path $StateDir 'last-drive-success.txt') (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Encoding ASCII -ErrorAction Stop
-        $remote = (& rclone lsf $dest --include 'devconfig-*.zip' `
-            --tpslimit 8 --tpslimit-burst 8 --drive-pacer-min-sleep 100ms --drive-pacer-burst 8 2>$null) |
-            Sort-Object -Descending
-        if ($remote.Count -gt $KeepDrive) { $remote | Select-Object -Skip $KeepDrive | ForEach-Object { & rclone deletefile "$dest/$_" *> $null } }
-        Write-Log "Drive 上传完成" 'OK'
-    }
-    else {
-        Set-BackupFailure "rclone 上传失败 exit=$datedCopyExit（部分已传，下次自动续传）"
-    }
-}
-
-# ============================================================
-# 主流程
-# ============================================================
-$pack = $null
-if ($Tier -contains 'Local' -or $Tier -contains 'Hot') {
-    Invoke-Gather; Invoke-SystemExport; Invoke-Manifests
-    $pack = Invoke-Pack
-} else {
-    try { $pack = Get-DrivePackageSnapshot -OutDir $OutDir -StateDir $StateDir }
-    catch { Write-Log 'Drive 缺少完整、hash匹配的日期包；先完成 Local，现有云备份不变。' 'ERR'; exit 1 }
-}
-if ($pack -and $overallExitCode -eq 0) {
-    if ($Tier -contains 'Hot')   { Push-Hot   $pack }
-    if ($Tier -contains 'Drive') { Push-Drive $pack }
-}
-elseif ($pack) {
-    Write-Log "采集或打包阶段存在失败，保留旧备份并跳过本轮分发" 'WARN'
-}
-else {
-    $overallExitCode = 1
-}
-
-if ($overallExitCode -eq 0) {
-    Write-Log "==== 完成：请求的备份层均成功 ====" 'OK'
-}
-else {
-    Write-Log "==== 失败：至少一个请求的备份层未完成，计划任务应继续重试 ====" 'ERR'
-}
-exit $overallExitCode
+if($Json){$run|ConvertTo-Json -Depth 8}else{[pscustomobject]$run|Format-List}
+exit $script:overallExitCode

@@ -75,6 +75,7 @@ function Invoke-NativeWeChatDriveCopy {
         throw 'rclone is required for -DriveOnly, but it is not available on PATH.'
     }
 
+    $null = Initialize-BackupNetwork
     $destinationState = Assert-NativeWeChatTargetPath -Target $Destination
     New-Item -ItemType Directory -Path $destinationState.Path -Force -ErrorAction Stop | Out-Null
     $remoteResolution = Resolve-ConfiguredRcloneRemote -Remote $Remote `
@@ -84,24 +85,17 @@ function Invoke-NativeWeChatDriveCopy {
         throw "Configured Drive remote is unavailable: $($remoteResolution.Reason)"
     }
     $source = Get-NativeWeChatDriveSource -Remote $remoteResolution.Remote -Folder $Folder
-    $excludes = @(
-        '--exclude', 'cache/**',
-        '--exclude', 'Cache/**',
-        '--exclude', 'temp/**',
-        '--exclude', 'Temp/**',
-        '--exclude', 'WMPF/**',
-        '--exclude', 'apm_record/**',
-        '--exclude', 'crash/**',
-        '--exclude', 'FileStorageTemp/**',
-        '--exclude', 'recommend_cover/**'
-    )
+    $selection = Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'wechat-sources.psd1')
+    $excludes = @(); foreach ($name in $selection.ExcludeDirs) { $excludes += @('--exclude', ($name + '/**')) }
     $arguments = @('copy', $source, $destinationState.Path, '--checksum', '--transfers', '8', '--checkers', '16', '--fast-list') + $excludes
-    & rclone @arguments
+    Invoke-BackupRclone @arguments
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
         throw "rclone failed while copying the native WeChat backup (exit=$exitCode)."
     }
 
+    Invoke-BackupRclone check $source $destinationState.Path @excludes --one-way --checkers 8 --contimeout 20s --timeout 120s
+    if ($LASTEXITCODE -ne 0) { throw 'restore_cloud_content_verification_failed' }
     return [pscustomobject]@{
         Method = 'rclone'
         ExitCode = $exitCode
@@ -185,6 +179,13 @@ if ($clientState.Detected) {
 }
 
 if ($DriveOnly) {
+    if ($Execute) {
+        $null = Initialize-BackupNetwork
+        $resolution = Resolve-ConfiguredRcloneRemote -Remote $GDriveRemote -RemoteWasExplicit $script:GDriveRemoteWasExplicit -BindingPath (Join-Path (Join-Path $PSScriptRoot 'state') 'rclone-remote-binding.json')
+        if (-not $resolution.Success) { throw 'restore_cloud_remote_unavailable' }
+        $remoteProbe = Invoke-RcloneDrivePreflight -Remote $resolution.Remote
+        if (-not $remoteProbe.Success) { throw 'restore_cloud_preflight_failed' }
+    }
     $sourceDescription = 'unverified Drive compatibility source: ' + (Get-NativeWeChatDriveSource -Remote $GDriveRemote -Folder $GDriveFolder)
     if (-not (Get-Command rclone -ErrorAction SilentlyContinue)) {
         $executionBlockers += 'rclone is not available for the requested -DriveOnly restore.'
@@ -228,7 +229,14 @@ if ($executionBlockers.Count -gt 0) {
 }
 
 $rollbackPath = $null
+$targetLease = $null
+$sourceLease = $null
 try {
+    $targetLease = Open-BackupResourceLock $targetState.Path
+    if (-not $DriveOnly) { $sourceLease = Open-BackupResourceLock $sourceState.Path }
+    $targetState = Get-NativeWeChatPathState -Path $Target
+    if ($targetState.HasEntries -and -not $ReplaceExisting) { throw 'restore_target_changed_requires_replace_existing' }
+    if ((Get-NativeWeChatClientState).Detected) { throw 'official_wechat_started_before_restore' }
     if ($targetState.HasEntries) {
         $rollbackPath = Get-NativeWeChatSiblingPath -Target $targetState.Path -Kind 'pre-restore'
         Say "Preserving the existing target as rollback: $rollbackPath" 'Yellow'
@@ -256,6 +264,9 @@ try {
         }
     }
     throw $originalError
+} finally {
+    if ($sourceLease) { $sourceLease.Dispose() }
+    if ($targetLease) { $targetLease.Dispose() }
 }
 
 Write-NativeWeChatAcceptanceInstructions -RollbackPath $rollbackPath

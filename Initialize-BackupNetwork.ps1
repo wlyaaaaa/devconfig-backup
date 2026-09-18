@@ -1,3 +1,4 @@
+if(-not (Get-Command Write-BackupJsonAtomic -ErrorAction SilentlyContinue)){ . (Join-Path $PSScriptRoot 'Backup.Common.ps1') }
 function ConvertTo-BackupProxyUri {
     param([string]$Endpoint)
 
@@ -50,6 +51,7 @@ function Initialize-BackupNetwork {
         } else {
             $settings = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
             if ([int]$settings.ProxyEnable -ne 1) {
+                foreach($name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY')){ [Environment]::SetEnvironmentVariable($name,$null,'Process') }
                 return [pscustomobject]@{ Applied = $false; Source = 'direct'; Http = $null; Https = $null }
             }
             $proxyServer = [string]$settings.ProxyServer
@@ -179,7 +181,7 @@ function Resolve-ConfiguredRcloneRemote {
         }
     }
 
-    $configured = @(& rclone listremotes 2>&1 | ForEach-Object { $_.ToString().Trim() })
+    $configured = @(Invoke-BackupRclone listremotes 2>&1 | ForEach-Object { $_.ToString().Trim() })
     if ($LASTEXITCODE -ne 0) {
         return [pscustomobject]@{ Success = $false; Remote = $requested; Reason = 'remote_inventory_failed'; Source = $source }
     }
@@ -203,7 +205,7 @@ function Test-RcloneRemoteFileMatchesLocal {
     # check compares directory trees; lsjson --stat addresses one exact object,
     # including a dated remote name whose local source is latest.zip.
     try {
-        $metadata = @(& rclone lsjson $RemotePath --stat --hash --hash-type MD5 `
+        $metadata = @(Invoke-BackupRclone lsjson $RemotePath --stat --hash --hash-type MD5 `
             --contimeout 15s --timeout 30s --retries 2 --low-level-retries 4 2>$null)
         $exitCode = $LASTEXITCODE
     } catch {
@@ -239,19 +241,8 @@ function Test-RcloneRemoteFileMatchesLocal {
 }
 
 function Get-DrivePackageSnapshot {
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$OutDir, [Parameter(Mandatory)][string]$StateDir)
-    $recordPath = Join-Path $StateDir 'latest.sha256'
-    if (-not (Test-Path -LiteralPath $recordPath -PathType Leaf)) { throw 'local_snapshot_manifest_missing' }
-    $record = (Get-Content -LiteralPath $recordPath -Raw -Encoding ASCII).Trim()
-    if ($record -notmatch '^([a-fA-F0-9]{64})\s+(devconfig-[0-9-]+\.zip)$') { throw 'local_snapshot_manifest_invalid' }
-    $expectedHash = $Matches[1]
-    $name = $Matches[2]
-    $zip = Join-Path $OutDir $name
-    if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { throw 'local_snapshot_file_missing' }
-    $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256 -ErrorAction Stop).Hash
-    if ($hash -ine $expectedHash) { throw 'local_snapshot_hash_mismatch' }
-    [pscustomobject]@{ Zip = $zip; Sha = $hash; Name = $name; MB = [math]::Round((Get-Item -LiteralPath $zip).Length / 1MB, 2) }
+    param([string]$OutDir,[string]$StateDir)
+    return Get-VerifiedDevConfigPackage -OutDir $OutDir
 }
 
 function Get-DriveUploadState {
@@ -424,7 +415,7 @@ function Invoke-RcloneDrivePreflight {
 
     $rcloneCommand = Get-Command rclone -ErrorAction SilentlyContinue
     $rclonePath = if ($rcloneCommand) { [string]$rcloneCommand.Source } else { 'unavailable' }
-    $configOutput = @(& rclone config file 2>&1 | ForEach-Object { $_.ToString() })
+    $configOutput = @(Invoke-BackupRclone config file 2>&1 | ForEach-Object { $_.ToString() })
     $configPath = if ($LASTEXITCODE -eq 0 -and $configOutput.Count -gt 0) {
         [string]$configOutput[-1]
     } else {
@@ -435,7 +426,7 @@ function Invoke-RcloneDrivePreflight {
     $lastCategory = 'unknown'
     $output = @()
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-        $output = @(& rclone about $Remote --json --contimeout $ConnectTimeout --timeout $Timeout `
+        $output = @(Invoke-BackupRclone about $Remote --json --contimeout $ConnectTimeout --timeout $Timeout `
             --retries 1 --low-level-retries 3 `
             --tpslimit 2 --tpslimit-burst 2 `
             --drive-pacer-min-sleep 1s --drive-pacer-burst 2 2>&1 |
