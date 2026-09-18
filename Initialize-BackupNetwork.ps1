@@ -224,7 +224,11 @@ function Test-RcloneRemoteFileMatchesLocal {
             throw 'remote_object_hash_unavailable'
         }
         $before = Get-Item -LiteralPath $LocalPath -ErrorAction Stop
-        $hash = (Get-FileHash -LiteralPath $LocalPath -Algorithm MD5 -ErrorAction Stop).Hash
+        $stream=$null; $algorithm=[Security.Cryptography.MD5]::Create()
+        try {
+            $stream=[IO.FileStream]::new($LocalPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read,1048576,[IO.FileOptions]::SequentialScan)
+            $hash=([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-','')
+        } finally { if($stream){$stream.Dispose()}; $algorithm.Dispose() }
         $after = Get-Item -LiteralPath $LocalPath -ErrorAction Stop
         $sameObject = [long]$remote.Size -eq $after.Length -and
             $before.Length -eq $after.Length -and
