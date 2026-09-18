@@ -38,7 +38,7 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -Json
 
 ## 成功发布与失败隔离
 
-DevConfig 每轮使用独立 staging，检查必需源、复制、系统导出和重装清单结果。打包必须通过 7-Zip 检测，再生成成功回执；只有完整成功版本可以更新 `current.json`。失败不会替换成功指针，也不能因失败采集而淘汰旧成功包。
+DevConfig 每轮使用独立 staging，检查必需源、复制、系统导出和重装清单结果。每个文件以最多三次有界重试取得稳定读取并核对复制结果；采集结束再次核对来源路径集合。已捕获文件随后被应用更新，会单列 changed_after_capture_count，不冒充整个运行中应用在同一时点的快照；源项新增或消失、文件始终无法稳定读取仍会失败。打包必须通过 7-Zip 检测，再生成成功回执；只有完整成功版本可以更新 `current.json`。失败不会替换成功指针，也不能因失败采集而淘汰旧成功包。
 
 每个日期包携带 `.sha256`、`.receipt.json`、`.manifest.json`，包内还有 `backup-manifest.json`。`current.json` 绑定包名、哈希、完整采集状态和目标。`latest.zip` 与附属文件是兼容别名，恢复时必须核验，不能只看文件名或修改时间。旧 `state/latest.sha256` 仅作兼容记录，不能单独证明采集成功或准许上云。
 

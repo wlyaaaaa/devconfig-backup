@@ -52,10 +52,37 @@ function Get-DevConfigSourceInventory {
 }
 function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
  [void][IO.Directory]::CreateDirectory($Destination)
- foreach($directory in $Inventory.directories){[void][IO.Directory]::CreateDirectory((Join-Path $Destination $directory))}
- foreach($file in $Inventory.files){Copy-BackupFileVerified $file.full_path (Join-Path $Destination $file.relative_path) $file.sha256}
- Assert-BackupSourceUnchanged $Inventory
+ foreach($directory in @($Inventory.directories)){[void][IO.Directory]::CreateDirectory((Join-Path $Destination $directory))}
+ foreach($file in @($Inventory.files)){
+  for($attempt=1;$attempt-le 3;$attempt++){
+   try{
+    $before=Get-Item -LiteralPath $file.full_path -Force -ErrorAction Stop
+    $hash=Get-BackupStableFileHash $file.full_path
+    Copy-BackupFileVerified $file.full_path (Join-Path $Destination $file.relative_path) $hash
+    $after=Get-Item -LiteralPath $file.full_path -Force -ErrorAction Stop
+    if($before.Length-ne $after.Length -or $before.LastWriteTimeUtc.Ticks-ne $after.LastWriteTimeUtc.Ticks){throw 'backup_source_changed_during_capture'}
+    $file.sha256=$hash;$file.length=[long]$after.Length;$file.mtime_ticks=[long]$after.LastWriteTimeUtc.Ticks
+    break
+   }catch{
+    $_.Exception.Data['backup_source_path']=$file.full_path
+    if($attempt-ge 3 -or ($_.Exception.Message-notmatch 'backup_source_changed|backup_copy_hash_mismatch' -and $_.Exception-isnot [IO.IOException] -and $_.Exception.InnerException-isnot [IO.IOException])){throw}
+    Start-Sleep -Milliseconds 150
+   }
+  }
+ }
+ $Inventory.bytes=[long](($Inventory.files|Measure-Object length -Sum).Sum)
 }
+function Test-DevConfigSelectionAfterCapture($Captured,$Current){
+ # Per-file capture is not a point-in-time application snapshot. Changes to files
+ # already captured are counted, while changed selection (missing/new paths) fails.
+ $left=@(@($Captured.directories|ForEach-Object{'d|'+$_})+@($Captured.files|ForEach-Object{'f|'+$_.relative_path}))
+ $right=@(@($Current.directories|ForEach-Object{'d|'+$_})+@($Current.files|ForEach-Object{'f|'+$_.relative_path}))
+ if(($left-join "`n")-cne ($right-join "`n")){throw 'backup_source_selection_changed_during_collection'}
+ $byPath=@{};foreach($file in $Captured.files){$byPath[$file.relative_path]=$file}
+ $changes=0;foreach($file in $Current.files){$old=$byPath[$file.relative_path];if($old.length-ne $file.length -or $old.mtime_ticks-ne $file.mtime_ticks){$changes++}}
+ return $changes
+}
+
 function Invoke-DevConfigSystemExport($Config,[string]$Stage){
  $system=Join-Path $Stage '_system';$man=Join-Path $Stage '_manifests';$missing=[Collections.Generic.List[string]]::new()
  [void][IO.Directory]::CreateDirectory($system);[void][IO.Directory]::CreateDirectory($man)

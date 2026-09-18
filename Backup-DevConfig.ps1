@@ -91,20 +91,21 @@ function Push-Drive($Pack){
  [IO.File]::WriteAllText((Join-Path $StateDir 'last-drive-success.txt'),(Get-BackupUtc),[Text.Encoding]::ASCII)
 }
 function New-DevConfigCandidate([string]$Container){
- $stage=Join-Path $Container 'payload';$inventory=Get-DevConfigSourceInventory $cfg $ProfileRoot -IncludeHistory:$IncludeHistory -Hash
+ $stage=Join-Path $Container 'payload';$inventory=Get-DevConfigSourceInventory $cfg $ProfileRoot -IncludeHistory:$IncludeHistory
  Copy-DevConfigSourceInventory $inventory $stage
  $script:run.optional_tools_absent=@(if($SkipSystemExport){'system_export_explicitly_skipped'}else{Invoke-DevConfigSystemExport $cfg $stage})
  $binding=Join-Path $StateDir 'rclone-remote-binding.json'
  if([IO.File]::Exists($binding)){$null=Copy-RcloneRemoteBindingToManifest -BindingPath $binding -ManifestDirectory (Join-Path $stage '_manifests')}
  $again=Get-DevConfigSourceInventory $cfg $ProfileRoot -IncludeHistory:$IncludeHistory
- if((Get-BackupInventoryDigest $again -Metadata)-cne (Get-BackupInventoryDigest $inventory -Metadata)){throw 'backup_source_changed_during_collection'}
+ $captureChanges=Test-DevConfigSelectionAfterCapture $inventory $again
+ $script:run.capture_consistency='per_file_verified_not_point_in_time';$script:run.changed_after_capture_count=$captureChanges
  $payload=Get-BackupTreeInventory $stage -Hash;$treeHash=Get-BackupInventoryDigest $payload
  $policyHash=Get-BackupTextHash ((Get-BackupStableFileHash $SourcesFile)+'|'+[string]$IncludeHistory+'|'+[string]$SkipSystemExport)
  $contentHash=Get-BackupTextHash ($treeHash+'|'+$policyHash)
  $script:run.collection='complete';$script:run.package='running';Write-BackupJsonAtomic $runPath $script:run
  $previous=$null;try{$previous=Get-VerifiedDevConfigPackage $OutDir}catch{}
  if($previous -and $previous.Receipt.content_sha256-ceq $contentHash){$script:run.package='reused';return $previous}
- $manifest=[ordered]@{schema='devconfig.payload-manifest.v1';content_sha256=$contentHash;payload_tree_sha256=$treeHash;policy_sha256=$policyHash;file_count=$payload.file_count;bytes=$payload.bytes;directories=$payload.directories;files=@($payload.files|Select-Object relative_path,length,mtime_ticks,sha256);sources=$inventory.sources;application_consistency='not_proven'}
+ $manifest=[ordered]@{schema='devconfig.payload-manifest.v1';capture_consistency='per_file_verified_not_point_in_time';changed_after_capture_count=$captureChanges;content_sha256=$contentHash;payload_tree_sha256=$treeHash;policy_sha256=$policyHash;file_count=$payload.file_count;bytes=$payload.bytes;directories=$payload.directories;files=@($payload.files|Select-Object relative_path,length,mtime_ticks,sha256);sources=$inventory.sources;application_consistency='not_proven'}
  Write-BackupJsonAtomic (Join-Path $stage 'backup-manifest.json') $manifest
  $name='devconfig-'+(Get-Date -Format yyyyMMdd-HHmmss)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)+'.zip';$zip=Join-Path $Container $name
  $zipExe=Get-BackupExecutable 7z -FallbackPath $SevenZipPath
@@ -117,7 +118,7 @@ function New-DevConfigCandidate([string]$Container){
  }
  & $zipExe t -bso0 -bsp0 -- $zip *> $null;if($LASTEXITCODE-ne 0){throw 'backup_archive_test_failed'}
  $hash=Get-BackupStableFileHash $zip
- $receipt=[ordered]@{schema='devconfig.package-receipt.v2';status='complete';collection_status='complete';archive_verification='7z_test_pass';completed_utc=(Get-BackupUtc);package_name=$name;sha256=$hash;package_bytes=(Get-Item $zip).Length;content_sha256=$contentHash;payload_tree_sha256=$treeHash;file_count=$payload.file_count;application_recovery='not_tested'}
+ $receipt=[ordered]@{schema='devconfig.package-receipt.v2';capture_consistency='per_file_verified_not_point_in_time';status='complete';collection_status='complete';archive_verification='7z_test_pass';completed_utc=(Get-BackupUtc);package_name=$name;sha256=$hash;package_bytes=(Get-Item $zip).Length;content_sha256=$contentHash;payload_tree_sha256=$treeHash;file_count=$payload.file_count;application_recovery='not_tested'}
  Write-BackupJsonAtomic ($zip+'.manifest.json') $manifest;Write-BackupJsonAtomic ($zip+'.receipt.json') $receipt
  [IO.File]::WriteAllText(($zip+'.sha256'),($hash+'  '+$name+"`n"),[Text.Encoding]::ASCII)
  return [pscustomobject]@{Zip=$zip;Sha=$hash;Name=$name;Receipt=[pscustomobject]$receipt;MB=[math]::Round($receipt.package_bytes/1MB,2)}
