@@ -109,7 +109,7 @@ function New-DevConfigCandidate([string]$Container){
  Write-BackupJsonAtomic (Join-Path $stage 'backup-manifest.json') $manifest
  $name='devconfig-'+(Get-Date -Format yyyyMMdd-HHmmss)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)+'.zip';$zip=Join-Path $Container $name
  $zipExe=Get-BackupExecutable 7z -FallbackPath $SevenZipPath
- $zipOutput=@(& $zipExe a -tzip -mx=5 -mmt=4 -bso0 -bsp0 -- $zip ($stage+'\*') 2>&1 | ForEach-Object {$_.ToString()})
+ $zipOutput=@(& $zipExe a -tzip -mcu=on -mx=5 -mmt=4 -bso0 -bsp0 -- $zip ($stage+'\*') 2>&1 | ForEach-Object {$_.ToString()})
  $zipExit=$LASTEXITCODE
  if($zipExit-ne 0 -or -not [IO.File]::Exists($zip)){
   $script:run.pack_native_exit=$zipExit;$script:run.pack_output_lines=$zipOutput.Count
@@ -117,8 +117,9 @@ function New-DevConfigCandidate([string]$Container){
   throw 'backup_pack_failed'
  }
  & $zipExe t -bso0 -bsp0 -- $zip *> $null;if($LASTEXITCODE-ne 0){throw 'backup_archive_test_failed'}
+ Assert-BackupArchiveManifest $zip $manifest
  $hash=Get-BackupStableFileHash $zip
- $receipt=[ordered]@{schema='devconfig.package-receipt.v2';capture_consistency='per_file_verified_not_point_in_time';status='complete';collection_status='complete';archive_verification='7z_test_pass';completed_utc=(Get-BackupUtc);package_name=$name;sha256=$hash;package_bytes=(Get-Item $zip).Length;content_sha256=$contentHash;payload_tree_sha256=$treeHash;file_count=$payload.file_count;application_recovery='not_tested'}
+ $receipt=[ordered]@{schema='devconfig.package-receipt.v2';zip_entry_encoding='utf-8';capture_consistency='per_file_verified_not_point_in_time';status='complete';collection_status='complete';archive_verification='7z_test_pass';completed_utc=(Get-BackupUtc);package_name=$name;sha256=$hash;package_bytes=(Get-Item $zip).Length;content_sha256=$contentHash;payload_tree_sha256=$treeHash;file_count=$payload.file_count;application_recovery='not_tested'}
  Write-BackupJsonAtomic ($zip+'.manifest.json') $manifest;Write-BackupJsonAtomic ($zip+'.receipt.json') $receipt
  [IO.File]::WriteAllText(($zip+'.sha256'),($hash+'  '+$name+"`n"),[Text.Encoding]::ASCII)
  return [pscustomobject]@{Zip=$zip;Sha=$hash;Name=$name;Receipt=[pscustomobject]$receipt;MB=[math]::Round($receipt.package_bytes/1MB,2)}

@@ -9,7 +9,7 @@
 param([string]$Archive='G:\80_Backup\DevConfig\latest.zip',[string]$Destination='E:\Projects\RecoveryTests\DevConfig',[switch]$Execute,[switch]$ReplaceExisting,[switch]$Json)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Backup.Common.ps1')
-Add-Type -AssemblyName System.IO.Compression.FileSystem
+Add-Type -AssemblyName System.IO.Compression,System.IO.Compression.FileSystem
 $Archive=[IO.Path]::GetFullPath($Archive);$Destination=Resolve-BackupPath $Destination
 Assert-BackupPathsIndependent $Archive $Destination;Assert-BackupPathChain $Destination;Assert-BackupPathChain $Archive
 $receipt=Read-BackupJson ($Archive+'.receipt.json') -Required;$manifest=Read-BackupJson ($Archive+'.manifest.json') -Required
@@ -17,7 +17,8 @@ if($receipt.schema-cne 'devconfig.package-receipt.v2' -or $receipt.status-cne 'c
 if($manifest.schema-cne 'devconfig.payload-manifest.v1' -or $manifest.payload_tree_sha256-cne $receipt.payload_tree_sha256 -or $manifest.content_sha256-cne $receipt.content_sha256){throw 'restore_manifest_binding_invalid'}
 $item=Get-Item -LiteralPath $Archive -ErrorAction Stop
 if($item.Length-ne [long]$receipt.package_bytes -or (Get-BackupStableFileHash $Archive)-cne $receipt.sha256){throw 'restore_archive_hash_mismatch'}
-$entries=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase);$zip=[IO.Compression.ZipFile]::OpenRead($Archive)
+$entryEncoding=Get-BackupArchiveEncoding $Archive $manifest
+$entries=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase);$zip=[IO.Compression.ZipFile]::Open($Archive,[IO.Compression.ZipArchiveMode]::Read,$entryEncoding)
 try{
  foreach($entry in $zip.Entries){
   $name=$entry.FullName.Replace('\','/').TrimEnd('/');if(-not $name){continue}
@@ -36,7 +37,7 @@ $lease=Open-BackupResourceLock $Destination;$incoming=$Destination+'.incoming-'+
 try{
  $nonEmpty=[IO.Directory]::Exists($Destination) -and [IO.Directory]::GetFileSystemEntries($Destination).Length-gt 0
  if($nonEmpty -and -not $ReplaceExisting){throw 'restore_replace_existing_required'}
- [IO.Compression.ZipFile]::ExtractToDirectory($Archive,$incoming)
+ [IO.Compression.ZipFile]::ExtractToDirectory($Archive,$incoming,$entryEncoding)
  $internal=Read-BackupJson (Join-Path $incoming 'backup-manifest.json') -Required
  if($internal.payload_tree_sha256-cne $manifest.payload_tree_sha256 -or $internal.content_sha256-cne $manifest.content_sha256){throw 'restore_internal_manifest_mismatch'}
  $actual=Get-BackupTreeInventory $incoming -Hash;$actual.files=@($actual.files|Where-Object{$_.relative_path-cne 'backup-manifest.json'})

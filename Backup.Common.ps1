@@ -218,3 +218,32 @@ function Invoke-BackupRclone {
  $output=@(& rclone @Arguments 2>&1);$exitCode=$global:LASTEXITCODE;Set-Variable -Name LASTEXITCODE -Value $exitCode -Scope 1
  foreach($line in $output){$line.ToString()}
 }
+
+function Get-BackupArchiveEncoding {
+ param([Parameter(Mandatory)][string]$Archive,[Parameter(Mandatory)]$Manifest)
+ Add-Type -AssemblyName System.IO.Compression,System.IO.Compression.FileSystem
+ # New archives explicitly use UTF-8. Older Windows 7-Zip archives can use the
+ # source host OEM codepage without the UTF-8 flag; select only by exact manifest
+ # path/length agreement, never silently accept mojibake or missing payloads.
+ foreach($codepage in @(65001,437,936)){
+  $encoding=[Text.Encoding]::GetEncoding($codepage)
+  $zip=[IO.Compression.ZipFile]::Open($Archive,[IO.Compression.ZipArchiveMode]::Read,$encoding)
+  try {
+   $entries=@{};$count=0;$valid=$true
+   foreach($entry in $zip.Entries){
+    $name=$entry.FullName.Replace('\','/').TrimEnd('/')
+    if(-not $name -or $name.StartsWith('/') -or $name-match '(^|/)\.\.(/|$)|:|[\r\n]' -or $entries.ContainsKey($name)){$valid=$false;break}
+    $entries[$name]=$entry
+    if(-not $entry.FullName.EndsWith('/')){$count++}
+   }
+   if(-not $entries.ContainsKey('backup-manifest.json') -or $count-ne (@($Manifest.files).Count+1)){$valid=$false}
+   if($valid){foreach($file in @($Manifest.files)){$entry=$entries[[string]$file.relative_path];if($null-eq $entry -or [long]$entry.Length-ne [long]$file.length){$valid=$false;break}}}
+   if($valid){return $encoding}
+  }finally{$zip.Dispose()}
+ }
+ throw 'backup_archive_manifest_mismatch'
+}
+function Assert-BackupArchiveManifest {
+ param([Parameter(Mandatory)][string]$Archive,[Parameter(Mandatory)]$Manifest)
+ $null=Get-BackupArchiveEncoding $Archive $Manifest
+}
