@@ -108,11 +108,17 @@ function Test-BackupScheduledTaskDefinition {
 function Assert-BackupScheduledTaskDefinitions {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)] [object[]] $Definitions
+        [Parameter(Mandatory = $true)] [object[]] $Definitions,
+        [switch] $AllowSubset
     )
 
     $names = @($Definitions | ForEach-Object { [string]$_.Name })
-    if ($names.Count -ne $script:BackupScheduledTaskNames.Count -or
+    if ($AllowSubset) {
+        if ($names.Count -lt 1 -or $names.Count -gt $script:BackupScheduledTaskNames.Count -or
+            @($names | Where-Object { $_ -notin $script:BackupScheduledTaskNames }).Count -gt 0) {
+            throw 'Scheduled task definitions must contain only known owned backup task names.'
+        }
+    } elseif ($names.Count -ne $script:BackupScheduledTaskNames.Count -or
         @(Compare-Object -ReferenceObject $script:BackupScheduledTaskNames -DifferenceObject $names).Count -gt 0) {
         throw 'Scheduled task definitions must contain exactly the four owned backup task names.'
     }
@@ -138,10 +144,11 @@ function Get-BackupScheduledTaskPreimages {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)] [object[]] $Definitions,
-        [Parameter(Mandatory = $true)] [hashtable] $Api
+        [Parameter(Mandatory = $true)] [hashtable] $Api,
+        [switch] $AllowSubset
     )
 
-    Assert-BackupScheduledTaskDefinitions -Definitions $Definitions
+    Assert-BackupScheduledTaskDefinitions -Definitions $Definitions -AllowSubset:$AllowSubset
     $exportTask = $Api.ExportTask
     if ($null -eq $exportTask) { throw 'Scheduled task API must provide ExportTask.' }
 
@@ -220,13 +227,14 @@ function Invoke-BackupScheduledTaskRegistrationTransaction {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)] [object[]] $Definitions,
-        [Parameter(Mandatory = $true)] [hashtable] $Api
+        [Parameter(Mandatory = $true)] [hashtable] $Api,
+        [switch] $AllowSubset
     )
 
-    Assert-BackupScheduledTaskDefinitions -Definitions $Definitions
+    Assert-BackupScheduledTaskDefinitions -Definitions $Definitions -AllowSubset:$AllowSubset
     $registerDefinition = $Api.RegisterDefinition
     if ($null -eq $registerDefinition) { throw 'Scheduled task API must provide RegisterDefinition.' }
-    $preimages = @(Get-BackupScheduledTaskPreimages -Definitions $Definitions -Api $Api)
+    $preimages = @(Get-BackupScheduledTaskPreimages -Definitions $Definitions -Api $Api -AllowSubset:$AllowSubset)
     $mutations = @{}
 
     try {

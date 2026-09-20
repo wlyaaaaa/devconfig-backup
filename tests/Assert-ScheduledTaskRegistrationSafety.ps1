@@ -232,6 +232,18 @@ foreach ($definition in $definitions) {
     Assert-Condition (Test-BackupScheduledTaskDefinition -Task $successStore[$definition.Name] -Definition $definition) "Full readback does not match $($definition.Name)."
 }
 
+# A selected existing task can use the same transaction without touching the other owned tasks.
+$hotOnlyDefinitions = @($definitions | Where-Object Name -CEQ 'WeChatBackup-Hot-Daily')
+$hotOnlyStore = @{}
+$hotOnlyEvents = New-Object System.Collections.ArrayList
+$hotOnlyApi = New-TestTaskApi -Store $hotOnlyStore -Definitions $hotOnlyDefinitions -Events $hotOnlyEvents
+$hotOnlyResult = Invoke-BackupScheduledTaskRegistrationTransaction -Definitions $hotOnlyDefinitions -Api $hotOnlyApi -AllowSubset
+Assert-Condition ($hotOnlyResult.Success -and $hotOnlyStore.Count -eq 1 -and $hotOnlyStore.ContainsKey('WeChatBackup-Hot-Daily')) 'Selected task registration must update only the requested known task.'
+Assert-Condition ($hotOnlyStore['WeChatBackup-Hot-Daily'].Principal.RunLevel -eq 'Highest') 'Selected WeChat Hot registration must preserve the Highest principal.'
+$unknownRejected = $false
+try { Assert-BackupScheduledTaskDefinitions -Definitions @([pscustomobject]@{ Name = 'Unknown-Task' }) -AllowSubset } catch { $unknownRejected = $_.Exception.Message -match 'known owned backup task names' }
+Assert-Condition $unknownRejected 'Selected task validation must reject names outside the owned task set.'
+
 # Run the production setup script only against in-memory Task Scheduler command mocks.
 $global:DevConfigBackupTaskRegistrationMock = @{}
 try {
@@ -286,6 +298,15 @@ try {
         $expectedRunLevel = if ($task.TaskName -eq 'WeChatBackup-Hot-Daily') { 'Highest' } else { 'Limited' }
         Assert-Condition ($task.Principal.UserId -eq $env:USERNAME -and $task.Principal.LogonType -eq 'Interactive' -and $task.Principal.RunLevel -eq $expectedRunLevel) 'Task principal changed.'
     }
+
+    $global:DevConfigBackupTaskRegistrationMock = @{}
+    & $setupPath -TaskName WeChatBackup-Hot-Daily
+    Assert-Condition ($global:DevConfigBackupTaskRegistrationMock.Count -eq 1 -and $global:DevConfigBackupTaskRegistrationMock.ContainsKey('WeChatBackup-Hot-Daily')) 'Setup -TaskName must register only the selected existing task.'
+    $hotOnlyProduction = $global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Hot-Daily']
+    Assert-Condition ($hotOnlyProduction.Actions[0].Arguments -match 'Backup-WeChat-Hidden\.vbs" Hot$' -and $hotOnlyProduction.Principal.RunLevel -eq 'Highest') 'Setup -TaskName must retain Hot action and Highest principal.'
+    $unknownSetupRejected = $false
+    try { & $setupPath -TaskName Unknown-Task } catch { $unknownSetupRejected = $true }
+    Assert-Condition ($unknownSetupRejected -and $global:DevConfigBackupTaskRegistrationMock.Count -eq 1) 'Setup must reject unsupported task names without touching registered tasks.'
 }
 finally {
     foreach ($name in @('New-ScheduledTaskPrincipal', 'New-ScheduledTaskAction', 'New-ScheduledTaskSettingsSet', 'New-ScheduledTaskTrigger', 'Get-ScheduledTask', 'Export-ScheduledTask', 'Unregister-ScheduledTask', 'Register-ScheduledTask')) {

@@ -33,6 +33,7 @@ try {
     $setupText = Get-Content -LiteralPath (Join-Path $repo 'Setup-ScheduledTasks.ps1') -Raw
     Check ($hiddenText -match 'LCase\(target\) = "hot"' -and $hiddenText -match 'vssArg = " -UseVss"') 'The existing Hot launcher passes UseVss without changing Drive'
     Check ($setupText -match '\$weChatHotPrincipal\s*=\s*New-ScheduledTaskPrincipal' -and $setupText -match 'RunLevel Highest' -and $setupText -match 'Principal = \$weChatHotPrincipal') 'The installer declares Highest only for the existing WeChat Hot task'
+    Check ($setupText -match '\[string\[\]\]\s*\$TaskName' -and $setupText -match 'Invoke-BackupScheduledTaskRegistrationTransaction .*AllowSubset') 'The installer exposes exact task selection through the existing transaction'
     Check ((Resolve-BackupPath '\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy999\fixture') -match '(?i)HarddiskVolumeShadowCopy999') 'VSS device paths resolve without a filesystem provider lookup'
 
     $record = Invoke-VerifiedBackupTree -Source $source -SourceIdentity $source -Destination $target

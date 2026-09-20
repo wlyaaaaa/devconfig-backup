@@ -9,6 +9,7 @@
   说明: 本地/G 热备与 Drive 拆成独立任务，离线不会阻断本地保护，Drive 失败会返回非零并自动重试。
   H盘是默认锁定的人工冷备，不注册自动写入任务；Drive 依靠 rclone copy 自动跳过已存在文件。
   DevConfig/Drive/WeChat Drive 保持当前用户 Limited；WeChat Hot 使用同一用户、Interactive、Highest，以便创建 Windows VSS 快照。实际注册/提权仍由 PCConfig 负责。
+  可用 -TaskName 只收敛一个已登记任务；省略时保持四项任务的默认安装语义。
 .NOTES
   计划任务动作固定走 wscript.exe + VBS hidden launcher，避免 PowerShell 窗口一闪而过。
   VBS 内部仍使用 Windows PowerShell 5.1 执行业务脚本，脚本本身兼容 5.1 与 7。
@@ -21,7 +22,9 @@ param(
     [string] $WeChatHotAt = '18:30',
     [ValidateSet('Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday')]
     [string] $WeChatDriveWeeklyDay = 'Sunday',
-    [string] $WeChatDriveWeeklyAt = '20:00'
+    [string] $WeChatDriveWeeklyAt = '20:00',
+    [ValidateSet('DevConfigBackup-Local','DevConfigBackup-Drive-Daily','WeChatBackup-Hot-Daily','WeChatBackup-Drive-Weekly')]
+    [string[]] $TaskName = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -105,6 +108,11 @@ $taskDefinitions = @(
     }
 )
 
+$allowSubset = $TaskName.Count -gt 0
+if ($allowSubset) {
+    $taskDefinitions = @($taskDefinitions | Where-Object { $_.Name -in $TaskName })
+}
+
 $nativeTaskApi = @{
     GetTask = {
         param([string] $Name)
@@ -151,7 +159,7 @@ $nativeTaskApi = @{
     }
 }
 
-$registration = Invoke-BackupScheduledTaskRegistrationTransaction -Definitions $taskDefinitions -Api $nativeTaskApi
+$registration = Invoke-BackupScheduledTaskRegistrationTransaction -Definitions $taskDefinitions -Api $nativeTaskApi -AllowSubset:$allowSubset
 foreach ($name in $registration.Names) {
     Write-Host "  [OK] $name" -ForegroundColor Green
 }
