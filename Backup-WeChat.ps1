@@ -16,7 +16,7 @@ param(
     [string]$LocalRoot='E:\WeChatBackup\xwechat_files',
     [string]$GDriveRemote='gdrive:', [string]$GDriveFolder='Backups/WeChat/xwechat_files',
     [string]$BwLimit='4M', [string]$MaxTransfer='8G', [switch]$DriveFull,
-    [switch]$DbOnly, [Alias('List')][switch]$Plan, [switch]$Json,
+    [switch]$DbOnly, [Alias('List')][switch]$Plan, [switch]$Json, [switch]$UseVss,
     [string]$StateRoot=''
 )
 if(-not $StateRoot){$StateRoot=Join-Path $PSScriptRoot 'state'}
@@ -24,6 +24,7 @@ $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Backup.Common.ps1')
 . (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
 $script:GDriveRemoteWasExplicit=$PSBoundParameters.ContainsKey('GDriveRemote')
+$script:SourceCaptureMode=if($UseVss){'vss_crash_consistent'}else{'live_source'}
 $selection=Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'wechat-sources.psd1')
 $exclDirs=@($selection.ExcludeDirs)
 $Target=@(@($Target)|ForEach-Object{$_-split ','}|ForEach-Object{$_.Trim()}|Where-Object{$_}|Select-Object -Unique)
@@ -41,7 +42,7 @@ function Get-WeChatSummary {
     $portable=[string]$Manifest.destination+'.backup-manifest.json'
     $manifestHash=Get-BackupStableFileHash $portable
     $manifestBytes=[long](Get-Item -LiteralPath $portable -ErrorAction Stop).Length
-    return [ordered]@{manifest_sha256=$manifestHash;manifest_bytes=$manifestBytes;schema=('wechat.'+$Kind+'-backup-receipt.v2');status='complete';completed_utc=(Get-BackupUtc);source=$Source;destination=$Manifest.destination;generation_id=$Manifest.run_id;collection_status='complete';verification_status='sha256_full_tree';retention_status='source_follow_verified';content_sha256=$Manifest.content_sha256;file_count=$Manifest.file_count;bytes=$Manifest.bytes;excluded_directory_count=$exclDirs.Count;payload_names_emitted=$false;payload_content_interpreted=$false;application_consistency='not_proven';application_recovery='not_tested'}
+    return [ordered]@{manifest_sha256=$manifestHash;manifest_bytes=$manifestBytes;schema=('wechat.'+$Kind+'-backup-receipt.v2');status='complete';completed_utc=(Get-BackupUtc);source=$Source;destination=$Manifest.destination;generation_id=$Manifest.run_id;collection_status='complete';verification_status='sha256_full_tree';retention_status='source_follow_verified';content_sha256=$Manifest.content_sha256;file_count=$Manifest.file_count;bytes=$Manifest.bytes;excluded_directory_count=$exclDirs.Count;payload_names_emitted=$false;payload_content_interpreted=$false;capture_consistency=$script:SourceCaptureMode;application_consistency='not_proven';application_recovery='not_tested'}
 }
 function Invoke-WeChatDrivePublication {
     param($Snapshot)
@@ -83,15 +84,17 @@ function Invoke-WeChatDrivePublication {
     return $receipt
 }
 if($Plan){
+    if($UseVss){throw 'backup_vss_plan_requires_execution'}
     $plans=@();foreach($kind in $Target){$destination=if($kind-eq 'Hot'){$HotRoot}else{$LocalRoot};$planned=Invoke-VerifiedBackupTree -Source $Source -Destination $destination -ExcludeDirs $exclDirs -Plan;$plans+=[pscustomobject]@{target=$kind;destination=$destination;source_files=$planned.file_count;source_bytes=$planned.bytes;difference=$planned.difference;cloud='not_contacted'}}
     $result=[ordered]@{schema='wechat.backup-plan.v1';write_mode='zero_write';targets=$plans;application_consistency='not_proven';application_recovery='not_tested'}
     if($Json){$result|ConvertTo-Json -Depth 10}else{[pscustomobject]$result|Format-List};exit 0
 }
-$run=[ordered]@{schema='wechat.run.v2';run_id=[guid]::NewGuid().ToString('N');started_utc=(Get-BackupUtc);completed_utc=$null;status='running';targets=$Target;hot='not_requested';local='not_requested';drive='not_requested';failure=$null;application_recovery='not_tested'}
+$run=[ordered]@{schema='wechat.run.v2';run_id=[guid]::NewGuid().ToString('N');started_utc=(Get-BackupUtc);completed_utc=$null;status='running';targets=$Target;hot='not_requested';local='not_requested';drive='not_requested';failure=$null;capture_consistency=$script:SourceCaptureMode;application_recovery='not_tested'}
 $runPath=Join-Path $StateRoot ('wechat-'+$(if($Target.Count-eq 1 -and $Target[0]-eq 'Drive'){'drive'}else{'local'})+'-last.json')
-$code=0;$lease=$null;$snapshot=$null
+$code=0;$lease=$null;$snapshot=$null;$vssCapture=$null;$sourceForCapture=$Source
 try{
     Write-BackupJsonAtomic $runPath $run
+    if($UseVss){$vssCapture=New-BackupVssSnapshot -Source $Source -StateRoot $StateRoot -RunId $run.run_id;$sourceForCapture=$vssCapture.SnapshotSource}
     if($Target-contains 'Hot'){
         try {
          $run.hot='running';Write-BackupJsonAtomic $runPath $run
@@ -99,7 +102,7 @@ try{
          try {
          # A custom Hot root may not write a receipt into the production G location.
          $receiptPath=if($PSBoundParameters.ContainsKey('HotRoot') -and -not $PSBoundParameters.ContainsKey('HotReceiptPath')){$HotRoot+'.hot-receipt.json'}else{$HotReceiptPath}
-         $hot=Invoke-VerifiedBackupTree -Source $Source -Destination $HotRoot -ExcludeDirs $exclDirs -LockHeld -PostCommitReceiptPath $receiptPath -PostCommit {
+         $hot=Invoke-VerifiedBackupTree -Source $sourceForCapture -SourceIdentity $Source -Destination $HotRoot -ExcludeDirs $exclDirs -LockHeld -PostCommitReceiptPath $receiptPath -PostCommit {
              param($record)
              Write-BackupJsonAtomic $receiptPath (Get-WeChatSummary $record 'hot')
          }
@@ -110,7 +113,7 @@ try{
     if($Target-contains 'Local' -or $Target-contains 'Drive'){
         $lease=Open-BackupResourceLock $LocalRoot
         $run.local='running';Write-BackupJsonAtomic $runPath $run
-        $snapshot=Invoke-VerifiedBackupTree -Source $Source -Destination $LocalRoot -ExcludeDirs $exclDirs -LockHeld
+        $snapshot=Invoke-VerifiedBackupTree -Source $sourceForCapture -SourceIdentity $Source -Destination $LocalRoot -ExcludeDirs $exclDirs -LockHeld
         $null=Get-VerifiedBackupTreeManifest $LocalRoot
         $run.local='complete';Write-BackupJsonAtomic $runPath $run
         if($Target-contains 'Drive'){
@@ -124,7 +127,9 @@ try{
     $run.status='failed';$run.failure=Get-BackupFailureCode $_;$code=1
     foreach($phase in @('hot','local','drive')){if($run[$phase]-eq 'running'){$run[$phase]='failed'}}
 }finally{
-    if($lease){$lease.Dispose()};$run.completed_utc=Get-BackupUtc
+    if($lease){$lease.Dispose()}
+    if($vssCapture){try{Remove-BackupVssSnapshot $vssCapture}catch{$code=1;$run.status='failed';$run.failure='backup_vss_cleanup_failed'}}
+    $run.completed_utc=Get-BackupUtc
     try{Write-BackupJsonAtomic $runPath $run}catch{$code=1;$run.status='failed';$run.failure='run_status_publication_failed'}
 }
 if($Json){$run|ConvertTo-Json -Depth 8}else{[pscustomobject]$run|Format-List}

@@ -5,8 +5,50 @@ function Get-BackupTextHash([string]$Text) {
 }
 function Resolve-BackupPath([string]$Path){
  if([string]::IsNullOrWhiteSpace($Path)){throw 'backup_path_required'}
- $full=[IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)).TrimEnd('\','/')
+ $raw=$Path.Trim()
+ $full=if($raw.StartsWith('\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy',[StringComparison]::OrdinalIgnoreCase)){[IO.Path]::GetFullPath($raw)}else{[IO.Path]::GetFullPath($ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($raw))}
+ $full=$full.TrimEnd('\','/')
  if($full-eq [IO.Path]::GetPathRoot($full).TrimEnd('\','/')){throw 'backup_drive_root_forbidden'};return $full
+}
+function Test-BackupAdministrator {
+ $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$principal=[Security.Principal.WindowsPrincipal]::new($identity);return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)}finally{$identity.Dispose()}
+}
+function Get-BackupVssVolumeIdentity([string]$VolumeRoot){
+ $root=[IO.Path]::GetFullPath($VolumeRoot);if($root -notmatch '^[A-Za-z]:\\$'){throw 'backup_vss_volume_root_invalid'}
+ $drive=$root.Substring(0,1);$volumes=@(Get-Volume -DriveLetter $drive -ErrorAction Stop);if($volumes.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$volumes[0].UniqueId)){throw 'backup_vss_volume_unavailable'};return [string]$volumes[0].UniqueId
+}
+function Get-BackupVssSourcePath([Parameter(Mandatory)]$Shadow,[Parameter(Mandatory)][string]$Source){
+ $sourceFull=Resolve-BackupPath $Source;$volumeRoot=[IO.Path]::GetPathRoot($sourceFull);$device=[string]$Shadow.DeviceObject
+ if([string]::IsNullOrWhiteSpace($device) -or $device -notmatch '(?i)HarddiskVolumeShadowCopy[0-9]+$'){throw 'backup_vss_device_invalid'}
+ $relative=$sourceFull.Substring($volumeRoot.Length).TrimStart('\','/');$snapshot=if($relative){$device.TrimEnd('\')+'\'+$relative}else{$device.TrimEnd('\')}
+ if(-not [IO.Directory]::Exists($snapshot)){throw 'backup_vss_source_snapshot_missing'};return $snapshot
+}
+function Remove-BackupVssSnapshotExact([Parameter(Mandatory)][string]$ShadowId){
+ if($ShadowId -notmatch '^\{[0-9A-Fa-f-]{36}\}$'){throw 'backup_vss_shadow_id_invalid'}
+ $targets=@(Get-CimInstance -ClassName Win32_ShadowCopy -Namespace root/cimv2 -ErrorAction Stop|Where-Object{$_.ID-ceq $ShadowId});if($targets.Count -ne 1){throw 'backup_vss_delete_target_not_unique'}
+ $targets[0]|Remove-CimInstance -ErrorAction Stop
+ if(@(Get-CimInstance -ClassName Win32_ShadowCopy -Namespace root/cimv2 -ErrorAction Stop|Where-Object{$_.ID-ceq $ShadowId}).Count -ne 0){throw 'backup_vss_delete_readback_failed'}
+}
+function Get-BackupVssJournalPath([string]$StateRoot){return Join-Path (Resolve-BackupPath $StateRoot) 'wechat-vss-active.json'}
+function Repair-BackupVssJournal([string]$StateRoot,[string]$VolumeRoot,[string]$Source){
+ $journalPath=Get-BackupVssJournalPath $StateRoot;if(-not [IO.File]::Exists($journalPath)){return};$journal=Read-BackupJson $journalPath -Required;$sourceFull=Resolve-BackupPath $Source;$root=[IO.Path]::GetFullPath($VolumeRoot)
+ if($journal.schema-cne 'devconfig.wechat-vss-journal.v1' -or $journal.shadow_id-cnotmatch '^\{[0-9A-Fa-f-]{36}\}$' -or [IO.Path]::GetFullPath([string]$journal.volume_root)-ine $root -or [IO.Path]::GetFullPath([string]$journal.source)-ine $sourceFull){throw 'backup_vss_journal_invalid'}
+ Remove-BackupVssSnapshotExact ([string]$journal.shadow_id);[IO.File]::Delete($journalPath)
+}
+function New-BackupVssSnapshot([string]$Source,[string]$StateRoot,[string]$RunId){
+ if(-not (Test-BackupAdministrator)){throw 'backup_vss_administrator_required'};$sourceFull=Resolve-BackupPath $Source;$volumeRoot=[IO.Path]::GetPathRoot($sourceFull);$volumeId=Get-BackupVssVolumeIdentity $volumeRoot;Repair-BackupVssJournal $StateRoot $volumeRoot $sourceFull
+ $class=[System.Management.ManagementClass]::new('root\cimv2','Win32_ShadowCopy',$null);$shadowId=$null
+ try{$parameters=$class.GetMethodParameters('Create');$parameters['Volume']=$volumeRoot;$parameters['Context']='ClientAccessible';$result=$class.InvokeMethod('Create',$parameters,$null);if([uint32]$result['ReturnValue'] -ne 0 -or [string]::IsNullOrWhiteSpace([string]$result['ShadowID'])){throw "backup_vss_create_failed:$([uint32]$result['ReturnValue'])"};$shadowId=[string]$result['ShadowID']}finally{$class.Dispose()}
+ $journalPath=Get-BackupVssJournalPath $StateRoot
+ try{
+  Write-BackupJsonAtomic $journalPath ([ordered]@{schema='devconfig.wechat-vss-journal.v1';shadow_id=$shadowId;volume_root=$volumeRoot;volume_id=$volumeId;source=$sourceFull;snapshot_source=$null;state='created';run_id=$RunId;created_utc=(Get-BackupUtc)})
+  $shadow=@(Get-CimInstance -ClassName Win32_ShadowCopy -Namespace root/cimv2 -Filter ("ID='{0}'"-f $shadowId) -ErrorAction Stop);if($shadow.Count -ne 1){throw 'backup_vss_readback_failed'};$shadow=$shadow[0];$expectedVolume=Get-BackupVssVolumeIdentity $volumeRoot;if(-not ([string]$shadow.VolumeName).Equals($volumeId,[StringComparison]::OrdinalIgnoreCase) -or [int]$shadow.State -ne 12 -or -not [bool]$shadow.ClientAccessible -or -not [bool]$shadow.NoAutoRelease){throw 'backup_vss_snapshot_identity_invalid'};$snapshotSource=Get-BackupVssSourcePath $shadow $sourceFull
+  Write-BackupJsonAtomic $journalPath ([ordered]@{schema='devconfig.wechat-vss-journal.v1';shadow_id=[string]$shadow.ID;volume_root=$volumeRoot;volume_id=$expectedVolume;source=$sourceFull;snapshot_source=$snapshotSource;state='active';run_id=$RunId;created_utc=(Get-BackupUtc)})
+  return [pscustomobject]@{ShadowId=[string]$shadow.ID;SnapshotSource=$snapshotSource;Source=$sourceFull;VolumeRoot=$volumeRoot;JournalPath=$journalPath}
+ }catch{try{Remove-BackupVssSnapshotExact $shadowId;if([IO.File]::Exists($journalPath)){[IO.File]::Delete($journalPath)}}catch{};throw}
+}
+function Remove-BackupVssSnapshot([Parameter(Mandatory)]$Capture){
+ Remove-BackupVssSnapshotExact ([string]$Capture.ShadowId);$journalPath=[string]$Capture.JournalPath;if($journalPath -and [IO.File]::Exists($journalPath)){[IO.File]::Delete($journalPath)}
 }
 function Assert-BackupPathChain([string]$Path){
  $current=[IO.Path]::GetFullPath($Path)
@@ -171,8 +213,8 @@ function Repair-BackupTreeTransaction([string]$Destination){
  [IO.File]::Delete($journalPath)
 }
 function Invoke-VerifiedBackupTree {
- param([string]$Source,[string]$Destination,[string[]]$ExcludeDirs=@(),[string[]]$ExcludeFiles=@(),[switch]$Plan,[switch]$LockHeld,[scriptblock]$PostCommit,[string]$PostCommitReceiptPath='')
- $src=Resolve-BackupPath $Source;$dest=Resolve-BackupPath $Destination;Assert-BackupPathsIndependent $src $dest;Assert-BackupPathChain $dest
+ param([string]$Source,[string]$Destination,[string[]]$ExcludeDirs=@(),[string[]]$ExcludeFiles=@(),[switch]$Plan,[switch]$LockHeld,[scriptblock]$PostCommit,[string]$PostCommitReceiptPath='', [string]$SourceIdentity='')
+ $src=Resolve-BackupPath $Source;$dest=Resolve-BackupPath $Destination;$sourceIdentityPath=if($SourceIdentity){Resolve-BackupPath $SourceIdentity}else{$src};Assert-BackupPathsIndependent $src $dest;Assert-BackupPathsIndependent $sourceIdentityPath $dest;Assert-BackupPathChain $dest
  if($PostCommit -and [string]::IsNullOrWhiteSpace($PostCommitReceiptPath)){throw 'backup_post_commit_receipt_path_required'}
  if($Plan){
   $inventory=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles
@@ -204,7 +246,7 @@ function Invoke-VerifiedBackupTree {
   $sourceAgain=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles
   if((Get-BackupInventoryDigest $sourceAgain -Metadata)-cne (Get-BackupInventoryDigest $inventory -Metadata)){throw 'backup_source_changed_before_publication'}
   $hadTarget=[IO.Directory]::Exists($dest)
-  $record=[ordered]@{schema='devconfig.tree-manifest.v1';status='complete';run_id=$run;completed_utc=(Get-BackupUtc);source=$src;destination=$dest;content_sha256=$digest;verification='sha256_full_tree';file_count=$inventory.file_count;bytes=$inventory.bytes;directories=$inventory.directories;files=@($inventory.files|Select-Object relative_path,length,mtime_ticks,sha256);previous_path=$(if($hadTarget){$previous}else{$null})}
+  $record=[ordered]@{schema='devconfig.tree-manifest.v1';status='complete';run_id=$run;completed_utc=(Get-BackupUtc);source=$sourceIdentityPath;destination=$dest;content_sha256=$digest;verification='sha256_full_tree';file_count=$inventory.file_count;bytes=$inventory.bytes;directories=$inventory.directories;files=@($inventory.files|Select-Object relative_path,length,mtime_ticks,sha256);previous_path=$(if($hadTarget){$previous}else{$null})}
    Write-BackupJsonAtomic ($dest+'.backup-transaction.json') @{schema='devconfig.tree-transaction.v1';run_id=$run;destination=$dest;incoming=$incoming;previous=$previous;had_target=$hadTarget;had_manifest=$hadManifest;had_receipt=$hadReceipt;previous_manifest_path=$previousManifestBackup;previous_receipt_path=$previousReceiptBackup;post_commit_receipt_path=$postReceiptPath;old_previous_path=$oldPreviousPath}
    if($hadTarget){[IO.Directory]::Move($dest,$previous)}
    [IO.Directory]::Move($incoming,$dest)
