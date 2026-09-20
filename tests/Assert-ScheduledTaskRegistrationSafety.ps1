@@ -23,7 +23,8 @@ function New-TestAction {
 }
 
 function New-TestPrincipal {
-    [pscustomobject]@{ UserId = 'test-user'; LogonType = 'Interactive'; RunLevel = 'Limited' }
+    param([string] $RunLevel = 'Limited')
+    [pscustomobject]@{ UserId = 'test-user'; LogonType = 'Interactive'; RunLevel = $RunLevel }
 }
 
 function New-TestSettings {
@@ -47,6 +48,7 @@ function New-TestTrigger {
 
 function New-TestDefinitions {
     $principal = New-TestPrincipal
+    $weChatHotPrincipal = New-TestPrincipal 'Highest'
     @(
         [pscustomobject]@{
             Name = 'DevConfigBackup-Local'; Action = New-TestAction 'Local,Hot'; Principal = $principal
@@ -59,7 +61,7 @@ function New-TestDefinitions {
             Settings = New-TestSettings $true 3 3 15; Description = 'drive'
         },
         [pscustomobject]@{
-            Name = 'WeChatBackup-Hot-Daily'; Action = New-TestAction 'Hot'; Principal = $principal
+            Name = 'WeChatBackup-Hot-Daily'; Action = New-TestAction 'Hot'; Principal = $weChatHotPrincipal
             Triggers = @((New-TestTrigger 'daily' '18:30'))
             Settings = New-TestSettings $false 3 4 15; Description = 'wechat-hot'
         },
@@ -281,7 +283,8 @@ try {
     Assert-Condition ($mockWeChatHot.Settings.RestartCount -eq 3 -and -not $mockWeChatHot.Settings.RunOnlyIfNetworkAvailable) 'WeChat hot task settings changed.'
     Assert-Condition ($mockWeChatDrive.Triggers[0].Type -eq 'weekly' -and $mockWeChatDrive.Triggers[0].DaysOfWeek -eq 'Sunday' -and $mockWeChatDrive.Settings.RestartCount -eq 5) 'WeChat Drive schedule or retry settings changed.'
     foreach ($task in @($mockLocal, $mockDrive, $mockWeChatHot, $mockWeChatDrive)) {
-        Assert-Condition ($task.Principal.UserId -eq $env:USERNAME -and $task.Principal.LogonType -eq 'Interactive' -and $task.Principal.RunLevel -eq 'Limited') 'Task principal changed.'
+        $expectedRunLevel = if ($task.TaskName -eq 'WeChatBackup-Hot-Daily') { 'Highest' } else { 'Limited' }
+        Assert-Condition ($task.Principal.UserId -eq $env:USERNAME -and $task.Principal.LogonType -eq 'Interactive' -and $task.Principal.RunLevel -eq $expectedRunLevel) 'Task principal changed.'
     }
 }
 finally {

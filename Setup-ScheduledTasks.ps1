@@ -8,7 +8,7 @@
   - WeChatBackup-Drive-Weekly    : 每周日 20:00             -> -Target Drive（Google Drive）
   说明: 本地/G 热备与 Drive 拆成独立任务，离线不会阻断本地保护，Drive 失败会返回非零并自动重试。
   H盘是默认锁定的人工冷备，不注册自动写入任务；Drive 依靠 rclone copy 自动跳过已存在文件。
-  以当前用户、仅登录时运行，无需密码与管理员权限。
+  DevConfig/Drive/WeChat Drive 保持当前用户 Limited；WeChat Hot 使用同一用户、Interactive、Highest，以便创建 Windows VSS 快照。实际注册/提权仍由 PCConfig 负责。
 .NOTES
   计划任务动作固定走 wscript.exe + VBS hidden launcher，避免 PowerShell 窗口一闪而过。
   VBS 内部仍使用 Windows PowerShell 5.1 执行业务脚本，脚本本身兼容 5.1 与 7。
@@ -38,6 +38,7 @@ if (-not (Test-Path $wxWrapper)) { throw "找不到 $wxWrapper" }
 $launcher = Join-Path $env:WINDIR 'System32\wscript.exe'
 
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive -RunLevel Limited
+$weChatHotPrincipal = New-ScheduledTaskPrincipal -UserId "$env:USERNAME" -LogonType Interactive -RunLevel Highest
 function New-Action([string]$Wrapper, [string]$ScriptArgs) {
     New-ScheduledTaskAction -Execute $launcher `
         -Argument "`"$Wrapper`" $ScriptArgs" `
@@ -90,7 +91,7 @@ $taskDefinitions = @(
         Name = 'WeChatBackup-Hot-Daily'
         Triggers = @((New-ScheduledTaskTrigger -Daily -At $WeChatHotAt))
         Action = New-Action $wxWrapper 'Hot'
-        Principal = $principal
+        Principal = $weChatHotPrincipal
         Settings = $sWeChatHot
         Description = '微信聊天记录：每日增量到G盘热备（失败重试3次）'
     },
