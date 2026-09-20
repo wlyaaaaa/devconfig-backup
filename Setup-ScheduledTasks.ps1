@@ -159,6 +159,21 @@ $nativeTaskApi = @{
     }
 }
 
+if ($allowSubset) {
+    foreach ($definition in $taskDefinitions) {
+        $lookup = Get-BackupScheduledTaskLookup -Api $nativeTaskApi -Name $definition.Name
+        if ($lookup.Status -eq 'found') {
+            if (-not (Test-BackupScheduledTaskAction -Task $lookup.Task -ExpectedAction $definition.Action)) {
+                throw "Refusing to reuse settings from a non-owned scheduled task: $($definition.Name)"
+            }
+            # A selected existing task keeps its live timing/settings preimage;
+            # the new Action and Principal still go through the normal transaction.
+            $definition.Triggers = @($lookup.Task.Triggers)
+            $definition.Settings = $lookup.Task.Settings
+        }
+    }
+}
+
 $registration = Invoke-BackupScheduledTaskRegistrationTransaction -Definitions $taskDefinitions -Api $nativeTaskApi -AllowSubset:$allowSubset
 foreach ($name in $registration.Names) {
     Write-Host "  [OK] $name" -ForegroundColor Green

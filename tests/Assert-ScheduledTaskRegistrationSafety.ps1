@@ -287,7 +287,7 @@ try {
         [CmdletBinding()]
         param([string] $TaskName, [string] $TaskPath, [string] $Xml, $Action, [object[]] $Trigger, $Principal, $Settings, [string] $Description, [switch] $Force)
         if ($PSBoundParameters.ContainsKey('Xml')) { throw 'Production setup mock did not expect XML restoration for absent tasks.' }
-        if ($Force) { throw 'Production setup mock must not force-create absent tasks.' }
+        if ($Force -and -not $global:DevConfigBackupTaskRegistrationMock.ContainsKey($TaskName)) { throw 'Production setup mock must not force-create absent tasks.' }
         $task = [pscustomobject]@{ TaskName = $TaskName; TaskPath = $TaskPath; State = 'Ready'; Actions = @($Action); Principal = $Principal; Triggers = @($Trigger); Settings = $Settings; Description = $Description; Xml = "mock:$TaskName" }
         $global:DevConfigBackupTaskRegistrationMock[$TaskName] = $task
         return $task
@@ -312,11 +312,18 @@ try {
         Assert-Condition ($task.Principal.UserId -eq $env:USERNAME -and $task.Principal.LogonType -eq 'Interactive' -and $task.Principal.RunLevel -eq $expectedRunLevel) 'Task principal changed.'
     }
 
-    $global:DevConfigBackupTaskRegistrationMock = @{}
+    $legacyHot = New-TestTask -Definition $definitions[2] -Xml 'xml:legacy-hot'
+    $legacyHot.Actions[0].Execute = (Join-Path $env:WINDIR 'System32\wscript.exe')
+    $legacyHot.Actions[0].Arguments = ('"' + (Join-Path $RepoRoot 'Backup-WeChat-Hidden.vbs') + '" Hot')
+    $legacyHot.Actions[0].WorkingDirectory = $RepoRoot
+    $legacyHot.Principal.RunLevel = 'Limited'
+    $legacyHot.Settings.ExecutionTimeLimit = [TimeSpan]::FromHours(3)
+    $legacyHot.Triggers[0].At = 'legacy-date'
+    $global:DevConfigBackupTaskRegistrationMock = @{ 'WeChatBackup-Hot-Daily' = $legacyHot }
     & $setupPath -TaskName WeChatBackup-Hot-Daily
     Assert-Condition ($global:DevConfigBackupTaskRegistrationMock.Count -eq 1 -and $global:DevConfigBackupTaskRegistrationMock.ContainsKey('WeChatBackup-Hot-Daily')) 'Setup -TaskName must register only the selected existing task.'
     $hotOnlyProduction = $global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Hot-Daily']
-    Assert-Condition ($hotOnlyProduction.Actions[0].Arguments -match 'Backup-WeChat-Hidden\.vbs" Hot$' -and $hotOnlyProduction.Principal.RunLevel -eq 'Highest') 'Setup -TaskName must retain Hot action and Highest principal.'
+    Assert-Condition ($hotOnlyProduction.Actions[0].Arguments -match 'Backup-WeChat-Hidden\.vbs" Hot$' -and $hotOnlyProduction.Principal.RunLevel -eq 'Highest' -and $hotOnlyProduction.Settings.ExecutionTimeLimit -eq [TimeSpan]::FromHours(3) -and $hotOnlyProduction.Triggers[0].At -eq 'legacy-date') 'Setup -TaskName must retain live timing/settings while changing only the required Hot principal.'
     $unknownSetupRejected = $false
     try { & $setupPath -TaskName Unknown-Task } catch { $unknownSetupRejected = $true }
     Assert-Condition ($unknownSetupRejected -and $global:DevConfigBackupTaskRegistrationMock.Count -eq 1) 'Setup must reject unsupported task names without touching registered tasks.'
