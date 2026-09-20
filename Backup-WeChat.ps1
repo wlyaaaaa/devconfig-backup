@@ -94,14 +94,16 @@ try{
     Write-BackupJsonAtomic $runPath $run
     if($Target-contains 'Hot'){
         try {
-        $run.hot='running';Write-BackupJsonAtomic $runPath $run
-        $hotLease=Open-BackupResourceLock $HotRoot
-        try {
-        $hot=Invoke-VerifiedBackupTree -Source $Source -Destination $HotRoot -ExcludeDirs $exclDirs -LockHeld
-        # A custom Hot root may not write a receipt into the production G location.
-        $receiptPath=if($PSBoundParameters.ContainsKey('HotRoot') -and -not $PSBoundParameters.ContainsKey('HotReceiptPath')){$HotRoot+'.hot-receipt.json'}else{$HotReceiptPath}
-        Write-BackupJsonAtomic $receiptPath (Get-WeChatSummary $hot 'hot')
-        } finally {$hotLease.Dispose()}
+         $run.hot='running';Write-BackupJsonAtomic $runPath $run
+         $hotLease=Open-BackupResourceLock $HotRoot
+         try {
+         # A custom Hot root may not write a receipt into the production G location.
+         $receiptPath=if($PSBoundParameters.ContainsKey('HotRoot') -and -not $PSBoundParameters.ContainsKey('HotReceiptPath')){$HotRoot+'.hot-receipt.json'}else{$HotReceiptPath}
+         $hot=Invoke-VerifiedBackupTree -Source $Source -Destination $HotRoot -ExcludeDirs $exclDirs -LockHeld -PostCommitReceiptPath $receiptPath -PostCommit {
+             param($record)
+             Write-BackupJsonAtomic $receiptPath (Get-WeChatSummary $record 'hot')
+         }
+         } finally {$hotLease.Dispose()}
         $run.hot='complete';Write-BackupJsonAtomic $runPath $run
         } catch { $run.hot='failed';$run.failure=Get-BackupFailureCode $_;$code=1;Write-BackupJsonAtomic $runPath $run }
     }

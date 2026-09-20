@@ -121,34 +121,74 @@ function Get-VerifiedBackupTreeManifest([string]$Destination,[switch]$VerifyCont
  if($record.schema-cne 'devconfig.tree-manifest.v1' -or $record.status-cne 'complete' -or $record.destination-ine $dest -or $record.content_sha256-cnotmatch '^[a-f0-9]{64}$' -or $record.verification-cne 'sha256_full_tree'){throw 'backup_tree_manifest_invalid'}
  if($VerifyContent -and (Get-BackupInventoryDigest (Get-BackupTreeInventory $dest -Hash))-cne $record.content_sha256){throw 'backup_tree_hash_mismatch'};return $record
 }
+function Test-BackupTreeReceiptBound([string]$ReceiptPath,[string]$Destination,$Manifest){
+ try{
+  if([string]::IsNullOrWhiteSpace($ReceiptPath) -or -not [IO.File]::Exists($ReceiptPath)){return $false}
+  $receipt=Read-BackupJson $ReceiptPath -Required;$manifestPath=$Destination+'.backup-manifest.json';$item=Get-Item -LiteralPath $manifestPath -Force -ErrorAction Stop
+  return ($receipt.schema-ceq 'wechat.hot-backup-receipt.v2' -and $receipt.status-ceq 'complete' -and $receipt.collection_status-ceq 'complete' -and $receipt.verification_status-ceq 'sha256_full_tree' -and $receipt.retention_status-ceq 'source_follow_verified' -and [string]$receipt.destination-ceq [string]$Destination -and [string]$receipt.generation_id-ceq [string]$Manifest.run_id -and [string]$receipt.content_sha256-ceq [string]$Manifest.content_sha256 -and [long]$receipt.manifest_bytes-eq [long]$item.Length -and [string]$receipt.manifest_sha256-ceq (Get-BackupStableFileHash $manifestPath))
+ }catch{return $false}
+}
 function Repair-BackupTreeTransaction([string]$Destination){
  $dest=Resolve-BackupPath $Destination;$journalPath=$dest+'.backup-transaction.json';$journal=Read-BackupJson $journalPath
  if(-not $journal){return};$name=[IO.Path]::GetFileName($dest);$parent=[IO.Path]::GetDirectoryName($dest)
  if($journal.destination-ine $dest -or $journal.run_id-cnotmatch '^[a-f0-9]{32}$' -or $journal.incoming-ine ($dest+'.incoming-'+$journal.run_id) -or $journal.previous-ine ($dest+'.previous-'+$journal.run_id)){throw 'backup_tree_journal_invalid'}
- $current=Read-BackupJson ($dest+'.backup-manifest.json')
- if($current -and $current.run_id-ceq $journal.run_id -and $current.status-ceq 'complete' -and [IO.Directory]::Exists($dest)){[IO.File]::Delete($journalPath);return}
+ $manifestPath=$dest+'.backup-manifest.json';$current=Read-BackupJson $manifestPath
+ $hasReceiptBinding=$journal.PSObject.Properties.Name-ccontains 'post_commit_receipt_path' -and -not [string]::IsNullOrWhiteSpace([string]$journal.post_commit_receipt_path)
+ $hasManifestBinding=$hasReceiptBinding -and $journal.PSObject.Properties.Name-ccontains 'had_manifest'
+ $hasReceiptBackup=$hasReceiptBinding -and $journal.PSObject.Properties.Name-ccontains 'had_receipt'
+ $previousManifestPath=$null;if($journal.PSObject.Properties.Name-ccontains 'previous_manifest_path'){$previousManifestPath=[string]$journal.previous_manifest_path}
+ $previousReceiptPath=$null;if($journal.PSObject.Properties.Name-ccontains 'previous_receipt_path'){$previousReceiptPath=[string]$journal.previous_receipt_path}
+ $oldPreviousPath=$null;if($journal.PSObject.Properties.Name-ccontains 'old_previous_path'){$oldPreviousPath=[string]$journal.old_previous_path}
+ if($previousManifestPath -and $previousManifestPath-cne ($dest+'.backup-manifest.previous-'+$journal.run_id+'.json')){throw 'backup_tree_journal_invalid'}
+ if($previousReceiptPath -and $hasReceiptBinding -and $previousReceiptPath-cne (([string]$journal.post_commit_receipt_path)+'.previous-'+$journal.run_id+'.json')){throw 'backup_tree_journal_invalid'}
+ $currentComplete=$current -and $current.run_id-ceq $journal.run_id -and $current.status-ceq 'complete' -and [IO.Directory]::Exists($dest)
+ if($currentComplete -and (-not $hasReceiptBinding -or (Test-BackupTreeReceiptBound ([string]$journal.post_commit_receipt_path) $dest $current))){
+  if($previousManifestPath -and [IO.File]::Exists($previousManifestPath)){[IO.File]::Delete($previousManifestPath)}
+  if($previousReceiptPath -and [IO.File]::Exists($previousReceiptPath)){[IO.File]::Delete($previousReceiptPath)}
+  if($oldPreviousPath){Remove-BackupOwnedDirectory $oldPreviousPath $parent ('^'+[regex]::Escape($name)+'\.previous-[a-f0-9]{32}$')}
+  [IO.File]::Delete($journalPath);return
+ }
  if([IO.Directory]::Exists($journal.previous)){
   if([IO.Directory]::Exists($dest)){if([IO.Directory]::Exists($journal.incoming)){throw 'backup_tree_recovery_ambiguous'};[IO.Directory]::Move($dest,$journal.incoming)}
   [IO.Directory]::Move($journal.previous,$dest)
  }elseif(-not $journal.had_target -and [IO.Directory]::Exists($dest)){
   if([IO.Directory]::Exists($journal.incoming)){throw 'backup_tree_recovery_ambiguous'};[IO.Directory]::Move($dest,$journal.incoming)
  }
+ if($hasManifestBinding){
+  if([bool]$journal.had_manifest){
+   if(-not $previousManifestPath -or -not [IO.File]::Exists($previousManifestPath)){throw 'backup_tree_recovery_manifest_missing'}
+   Copy-BackupFileVerified $previousManifestPath $manifestPath (Get-BackupStableFileHash $previousManifestPath)
+  }elseif([IO.File]::Exists($manifestPath)){[IO.File]::Delete($manifestPath)}
+  if($previousManifestPath -and [IO.File]::Exists($previousManifestPath)){[IO.File]::Delete($previousManifestPath)}
+ }
+ if($hasReceiptBinding){
+  if($previousReceiptPath -and [IO.File]::Exists($previousReceiptPath)){
+   if([bool]$journal.had_receipt){Copy-BackupFileVerified $previousReceiptPath ([string]$journal.post_commit_receipt_path) (Get-BackupStableFileHash $previousReceiptPath)}elseif([IO.File]::Exists([string]$journal.post_commit_receipt_path)){[IO.File]::Delete([string]$journal.post_commit_receipt_path)}
+   [IO.File]::Delete($previousReceiptPath)
+  }elseif(-not [bool]$journal.had_receipt -and [IO.File]::Exists([string]$journal.post_commit_receipt_path)){[IO.File]::Delete([string]$journal.post_commit_receipt_path)}
+ }
  Remove-BackupOwnedDirectory $journal.incoming $parent ('^'+[regex]::Escape($name)+'\.incoming-[a-f0-9]{32}$')
  [IO.File]::Delete($journalPath)
 }
 function Invoke-VerifiedBackupTree {
- param([string]$Source,[string]$Destination,[string[]]$ExcludeDirs=@(),[string[]]$ExcludeFiles=@(),[switch]$Plan,[switch]$LockHeld)
+ param([string]$Source,[string]$Destination,[string[]]$ExcludeDirs=@(),[string[]]$ExcludeFiles=@(),[switch]$Plan,[switch]$LockHeld,[scriptblock]$PostCommit,[string]$PostCommitReceiptPath='')
  $src=Resolve-BackupPath $Source;$dest=Resolve-BackupPath $Destination;Assert-BackupPathsIndependent $src $dest;Assert-BackupPathChain $dest
+ if($PostCommit -and [string]::IsNullOrWhiteSpace($PostCommitReceiptPath)){throw 'backup_post_commit_receipt_path_required'}
  if($Plan){
   $inventory=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles
   $old=if([IO.Directory]::Exists($dest)){Get-BackupTreeInventory $dest}else{$null}
   return [pscustomobject]@{write_mode='zero_write';file_count=$inventory.file_count;bytes=$inventory.bytes;difference=(Get-BackupDifference $inventory $old)}
  }
- $lease=$null;$incoming=$null;$committed=$false;$run=[guid]::NewGuid().ToString('N');$parent=[IO.Path]::GetDirectoryName($dest);$leaf=[IO.Path]::GetFileName($dest)
+  $lease=$null;$incoming=$null;$committed=$false;$run=[guid]::NewGuid().ToString('N');$parent=[IO.Path]::GetDirectoryName($dest);$leaf=[IO.Path]::GetFileName($dest);$postReceiptPath=if($PostCommit){Resolve-BackupPath $PostCommitReceiptPath}else{$null};$previousManifestBackup=$null;$previousReceiptBackup=$null
  try{
   if(-not $LockHeld){$lease=Open-BackupResourceLock $dest};Repair-BackupTreeTransaction $dest
   $inventory=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles -Hash
-  $digest=Get-BackupInventoryDigest $inventory;$old=Read-BackupJson ($dest+'.backup-manifest.json')
+   $digest=Get-BackupInventoryDigest $inventory;$manifestPath=$dest+'.backup-manifest.json';$old=Read-BackupJson $manifestPath;$hadManifest=[IO.File]::Exists($manifestPath);$oldPreviousPath=if($old -and $old.previous_path){[string]$old.previous_path}else{$null}
+   $hadReceipt=if($postReceiptPath){[IO.File]::Exists($postReceiptPath)}else{$false}
+   if($PostCommit){
+    if($hadManifest){$previousManifestBackup=$dest+'.backup-manifest.previous-'+$run+'.json';Copy-BackupFileVerified $manifestPath $previousManifestBackup (Get-BackupStableFileHash $manifestPath)}
+    if($hadReceipt){$previousReceiptBackup=$postReceiptPath+'.previous-'+$run+'.json';Copy-BackupFileVerified $postReceiptPath $previousReceiptBackup (Get-BackupStableFileHash $postReceiptPath)}
+   }
   $incoming=$dest+'.incoming-'+$run;$previous=$dest+'.previous-'+$run
   [void][IO.Directory]::CreateDirectory($incoming)
   foreach($directory in $inventory.directories){[void][IO.Directory]::CreateDirectory((Join-Path $incoming $directory))}
@@ -165,12 +205,16 @@ function Invoke-VerifiedBackupTree {
   if((Get-BackupInventoryDigest $sourceAgain -Metadata)-cne (Get-BackupInventoryDigest $inventory -Metadata)){throw 'backup_source_changed_before_publication'}
   $hadTarget=[IO.Directory]::Exists($dest)
   $record=[ordered]@{schema='devconfig.tree-manifest.v1';status='complete';run_id=$run;completed_utc=(Get-BackupUtc);source=$src;destination=$dest;content_sha256=$digest;verification='sha256_full_tree';file_count=$inventory.file_count;bytes=$inventory.bytes;directories=$inventory.directories;files=@($inventory.files|Select-Object relative_path,length,mtime_ticks,sha256);previous_path=$(if($hadTarget){$previous}else{$null})}
-  Write-BackupJsonAtomic ($dest+'.backup-transaction.json') @{schema='devconfig.tree-transaction.v1';run_id=$run;destination=$dest;incoming=$incoming;previous=$previous;had_target=$hadTarget}
-  if($hadTarget){[IO.Directory]::Move($dest,$previous)}
-  [IO.Directory]::Move($incoming,$dest)
-  Write-BackupJsonAtomic ($dest+'.backup-manifest.json') $record;$committed=$true;[IO.File]::Delete($dest+'.backup-transaction.json')
-  if($old -and $old.previous_path){Remove-BackupOwnedDirectory $old.previous_path $parent ('^'+[regex]::Escape($leaf)+'\.previous-[a-f0-9]{32}$')}
-  return [pscustomobject]$record
+   Write-BackupJsonAtomic ($dest+'.backup-transaction.json') @{schema='devconfig.tree-transaction.v1';run_id=$run;destination=$dest;incoming=$incoming;previous=$previous;had_target=$hadTarget;had_manifest=$hadManifest;had_receipt=$hadReceipt;previous_manifest_path=$previousManifestBackup;previous_receipt_path=$previousReceiptBackup;post_commit_receipt_path=$postReceiptPath;old_previous_path=$oldPreviousPath}
+   if($hadTarget){[IO.Directory]::Move($dest,$previous)}
+   [IO.Directory]::Move($incoming,$dest)
+   Write-BackupJsonAtomic ($dest+'.backup-manifest.json') $record
+   if($PostCommit){& $PostCommit ([pscustomobject]$record)}
+   $committed=$true;[IO.File]::Delete($dest+'.backup-transaction.json')
+   if($previousManifestBackup -and [IO.File]::Exists($previousManifestBackup)){[IO.File]::Delete($previousManifestBackup)}
+   if($previousReceiptBackup -and [IO.File]::Exists($previousReceiptBackup)){[IO.File]::Delete($previousReceiptBackup)}
+   if($oldPreviousPath){Remove-BackupOwnedDirectory $oldPreviousPath $parent ('^'+[regex]::Escape($leaf)+'\.previous-[a-f0-9]{32}$')}
+   return [pscustomobject]$record
  }catch{
   if(-not $committed -and [IO.File]::Exists($dest+'.backup-transaction.json')){Repair-BackupTreeTransaction $dest};throw
  }finally{
