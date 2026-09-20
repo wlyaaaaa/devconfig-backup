@@ -18,6 +18,7 @@ foreach($name in @('Backup-DevConfig-Hidden.vbs','Backup-WeChat-Hidden.vbs')){$t
 $cfg=Import-PowerShellDataFile (Join-Path $RepoRoot 'sources.psd1')
 Check ('sessions'-in $cfg.HistoryDirs -and 'logs_2.sqlite*'-in $cfg.HistoryFiles) 'Default history exclusions are retained'
 Check ('.env'-in $cfg.ExcludeFiles -and 'auth.json'-in $cfg.ExcludeFiles) 'Named credential exclusions remain; this is not a whole-package secret scan'
+Check ('home/.codex/.sandbox-bin'-in $cfg.ExcludeRelativePaths) 'ACL-locked ephemeral Codex sandbox binaries are excluded by exact relative path'
 $pc='E:\PCConfig\registries\core_recovery.json'
 if(Test-Path $pc){$manifest=Get-Content $pc -Raw -Encoding UTF8|ConvertFrom-Json;Check ($manifest.maintenance.cold_copy_mode-eq 'source_follow_verified_prune') 'PCConfig cold policy follows the verified source view'}
 Check ((Get-Content (Join-Path $RepoRoot 'README.md') -Raw)-match 'Invoke-CoreRecoveryMaintenance') 'Machine cold recovery is routed to PCConfig'

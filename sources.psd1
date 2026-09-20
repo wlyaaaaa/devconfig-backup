@@ -133,7 +133,10 @@
     # Do not exclude *.lock generally: dependency lockfiles remain recoverable.
     ExcludeRelativePaths = @(
         'appdata-roaming/WhirlwindFX/SignalRgb/QtWebEngine/*/Local Storage/leveldb/LOCK',
-        'home/.gemini/antigravity-cli/presence/*.lock'
+        'home/.gemini/antigravity-cli/presence/*.lock',
+        # Codex-managed sandbox executables are ephemeral and intentionally ACL-locked;
+        # excluding the exact subtree keeps collection fail-closed for selected sources.
+        'home/.codex/.sandbox-bin'
     )
 
     # 历史/对话日志目录名（默认排除；-IncludeHistory 时保留）
