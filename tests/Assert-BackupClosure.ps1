@@ -18,6 +18,8 @@ try{
  [void][IO.Directory]::CreateDirectory($script:FixtureRoot)
  $refused=$false;try{Remove-BackupOwnedDirectory $repo ([IO.Path]::GetDirectoryName($repo)) '^backup-closure-[a-f0-9]{32}$'}catch{$refused=$true}
  Check ($refused -and [IO.File]::Exists((Join-Path $repo 'Backup.Common.ps1'))) 'Cleanup rejects source repository even if a test variable accidentally points to it'
+ $readonlyOwned=Join-Path $script:FixtureRoot 'owned-readonly';Put (Join-Path $readonlyOwned 'fixture.bin') 'read-only cleanup';[IO.File]::SetAttributes((Join-Path $readonlyOwned 'fixture.bin'),[IO.FileAttributes]::ReadOnly);Remove-BackupOwnedDirectory $readonlyOwned $script:FixtureRoot '^owned-readonly$'
+ Check (-not [IO.Directory]::Exists($readonlyOwned)) 'Owned cleanup clears read-only attributes before removing its exact directory'
  $profile=Join-Path $script:FixtureRoot 'profile';$output=Join-Path $script:FixtureRoot 'output';$hot=Join-Path $script:FixtureRoot 'hot'
  Put (Join-Path $profile '.gitconfig') 'synthetic required configuration';Put (Join-Path $profile 'settings\one.txt') 'AAAA'
  $sources=Join-Path $script:FixtureRoot 'sources.psd1';Put $sources "@{HomeFiles=@('.gitconfig','optional-absent');HomeDirs=@('settings');RequiredSources=@('home/.gitconfig');ExcludeDirs=@();ExcludeFiles=@();HistoryDirs=@();HistoryFiles=@()}"

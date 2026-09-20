@@ -154,7 +154,13 @@ function Remove-BackupOwnedDirectory([string]$Path,[string]$Parent,[string]$Name
  $full=Resolve-BackupPath $Path;$parentFull=Resolve-BackupPath $Parent
  if([IO.Path]::GetDirectoryName($full)-ine $parentFull -or [IO.Path]::GetFileName($full)-cnotmatch $NamePattern){throw 'backup_cleanup_scope_invalid'}
  Assert-BackupPathChain $full
- if([IO.Directory]::Exists($full)){[IO.Directory]::Delete($full,$true)}
+ if([IO.Directory]::Exists($full)){
+  $clear=[IO.FileAttributes]::ReadOnly -bor [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::System
+  foreach($item in @(Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction Stop)){
+   if(($item.Attributes-band $clear)-ne 0){[IO.File]::SetAttributes($item.FullName,$item.Attributes-band (-bnot $clear))}
+  }
+  [IO.Directory]::Delete($full,$true)
+ }
 }
 function Get-VerifiedBackupTreeManifest([string]$Destination,[switch]$VerifyContent){
  $dest=Resolve-BackupPath $Destination
