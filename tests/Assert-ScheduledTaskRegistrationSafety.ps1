@@ -228,8 +228,10 @@ $driftStore = @{
 $driftEvents = New-Object System.Collections.ArrayList
 $driftApi = New-TestTaskApi -Store $driftStore -Definitions $definitions -Events $driftEvents -DriftRegisterName 'DevConfigBackup-Local'
 $driftRolledBack = $false
-try { Invoke-BackupScheduledTaskRegistrationTransaction -Definitions $definitions -Api $driftApi | Out-Null } catch { $driftRolledBack = $_.Exception.Message -match 'Definition readback failed' -and $_.Exception.Message -match 'Exact preimages were restored' }
+$driftMessage = ''
+try { Invoke-BackupScheduledTaskRegistrationTransaction -Definitions $definitions -Api $driftApi | Out-Null } catch { $driftMessage = $_.Exception.Message; $driftRolledBack = $driftMessage -match 'Definition readback failed' -and $driftMessage -match 'Exact preimages were restored' }
 Assert-Condition $driftRolledBack 'Readback settings drift must trigger exact XML rollback.'
+Assert-Condition ($driftMessage -match 'Settings\.') 'Readback failure must identify the normalized non-secret settings field.'
 Assert-Condition ($driftStore['DevConfigBackup-Local'].Xml -ceq 'xml:drift-local') 'Settings-drift rollback did not restore XML preimage.'
 
 # Fully absent definitions create without -Force and pass the complete definition comparator.

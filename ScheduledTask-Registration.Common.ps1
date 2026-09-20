@@ -65,16 +65,68 @@ function Get-BackupScheduledTaskTriggerSignature {
         $kind = [string]$Trigger.CimClass.CimClassName
     }
     $parts = @('kind=' + $kind)
-    foreach ($property in @(
-        'At', 'StartBoundary', 'EndBoundary', 'Enabled', 'User', 'UserId', 'Delay',
+    $dateIndependent = $kind -match '(?i)(Daily|Weekly)Trigger'
+    $properties = @(
+        'At', 'EndBoundary', 'Enabled', 'User', 'UserId', 'Delay',
         'DaysInterval', 'WeeksInterval', 'DaysOfWeek', 'RandomDelay'
-    )) {
+    )
+    if (-not $dateIndependent) { $properties = @('StartBoundary') + $properties }
+    foreach ($property in $properties) {
         $value = $Trigger.PSObject.Properties[$property]
         if ($null -ne $value) {
             $parts += ('{0}={1}' -f $property, (ConvertTo-BackupScheduledTaskValue $value.Value))
         }
     }
+    if ($dateIndependent) {
+        $boundary = $Trigger.PSObject.Properties['StartBoundary']
+        if ($null -ne $boundary) {
+            try { $startTime = [DateTimeOffset]::Parse([string]$boundary.Value).ToLocalTime().ToString('HH:mm:ss') }
+            catch { $startTime = ConvertTo-BackupScheduledTaskValue $boundary.Value }
+            $parts += ('StartTimeLocal={0}' -f $startTime)
+        }
+    }
     return ($parts -join ';')
+}
+
+function Get-BackupScheduledTaskDefinitionMismatch {
+    param($Task, $Definition)
+
+    $diff = [Collections.Generic.List[string]]::new()
+    foreach ($property in @('Execute', 'Arguments', 'WorkingDirectory')) {
+        $actual = Get-BackupScheduledTaskPropertyValue -Object @($Task.Actions)[0] -Property $property
+        $expected = Get-BackupScheduledTaskPropertyValue -Object $Definition.Action -Property $property
+        if (-not [string]::Equals((ConvertTo-BackupScheduledTaskValue $actual), (ConvertTo-BackupScheduledTaskValue $expected), [StringComparison]::OrdinalIgnoreCase)) {
+            # Keep action diagnostics to field names so local paths are never echoed.
+            $diff.Add('Action.' + $property)
+        }
+    }
+    foreach ($property in @('UserId', 'LogonType', 'RunLevel')) {
+        $actual = Get-BackupScheduledTaskPropertyValue -Object $Task.Principal -Property $property
+        $expected = Get-BackupScheduledTaskPropertyValue -Object $Definition.Principal -Property $property
+        if (-not [string]::Equals((ConvertTo-BackupScheduledTaskValue $actual), (ConvertTo-BackupScheduledTaskValue $expected), [StringComparison]::OrdinalIgnoreCase)) {
+            $diff.Add(('Principal.{0}(expected={1};actual={2})' -f $property, (ConvertTo-BackupScheduledTaskValue $expected), (ConvertTo-BackupScheduledTaskValue $actual)))
+        }
+    }
+    foreach ($property in @('StartWhenAvailable', 'RunOnlyIfNetworkAvailable', 'AllowStartIfOnBatteries', 'DontStopIfGoingOnBatteries', 'MultipleInstances', 'ExecutionTimeLimit', 'RestartCount', 'RestartInterval')) {
+        $actual = Get-BackupScheduledTaskPropertyValue -Object $Task.Settings -Property $property
+        $expected = Get-BackupScheduledTaskPropertyValue -Object $Definition.Settings -Property $property
+        if (-not [string]::Equals((ConvertTo-BackupScheduledTaskValue $actual), (ConvertTo-BackupScheduledTaskValue $expected), [StringComparison]::OrdinalIgnoreCase)) {
+            $diff.Add(('Settings.{0}(expected={1};actual={2})' -f $property, (ConvertTo-BackupScheduledTaskValue $expected), (ConvertTo-BackupScheduledTaskValue $actual)))
+        }
+    }
+    $actualTriggers = @($Task.Triggers);$expectedTriggers = @($Definition.Triggers)
+    if ($actualTriggers.Count -ne $expectedTriggers.Count) {
+        $diff.Add(('Triggers.Count(expected={0};actual={1})' -f $expectedTriggers.Count, $actualTriggers.Count))
+    } else {
+        for ($index = 0; $index -lt $expectedTriggers.Count; $index++) {
+            $expectedSignature = Get-BackupScheduledTaskTriggerSignature $expectedTriggers[$index]
+            $actualSignature = Get-BackupScheduledTaskTriggerSignature $actualTriggers[$index]
+            if (-not [string]::Equals($actualSignature, $expectedSignature, [StringComparison]::OrdinalIgnoreCase)) {
+                $diff.Add(('Triggers[{0}].Signature(expected={1};actual={2})' -f $index, $expectedSignature, $actualSignature))
+            }
+        }
+    }
+    return @($diff)
 }
 
 function Test-BackupScheduledTaskAction {
@@ -277,7 +329,8 @@ function Invoke-BackupScheduledTaskRegistrationTransaction {
             $readback = Get-BackupScheduledTaskLookup -Api $Api -Name $definition.Name
             if ($readback.Status -ne 'found' -or
                 -not (Test-BackupScheduledTaskDefinition -Task $readback.Task -Definition $definition)) {
-                throw "Definition readback failed for scheduled task: $($definition.Name)"
+                $mismatch = if ($readback.Status -eq 'found') { @(Get-BackupScheduledTaskDefinitionMismatch -Task $readback.Task -Definition $definition) -join ',' } else { 'Task.NotFound' }
+                throw "Definition readback failed for scheduled task: $($definition.Name) Differences: $mismatch"
             }
             if (-not $preimage.Exists) { $mutation.CreatedConfirmed = $true }
         }
@@ -286,7 +339,8 @@ function Invoke-BackupScheduledTaskRegistrationTransaction {
             $readback = Get-BackupScheduledTaskLookup -Api $Api -Name $definition.Name
             if ($readback.Status -ne 'found' -or
                 -not (Test-BackupScheduledTaskDefinition -Task $readback.Task -Definition $definition)) {
-                throw "Final definition readback failed for scheduled task: $($definition.Name)"
+                $mismatch = if ($readback.Status -eq 'found') { @(Get-BackupScheduledTaskDefinitionMismatch -Task $readback.Task -Definition $definition) -join ',' } else { 'Task.NotFound' }
+                throw "Final definition readback failed for scheduled task: $($definition.Name) Differences: $mismatch"
             }
         }
     } catch {
