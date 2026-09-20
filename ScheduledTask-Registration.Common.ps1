@@ -18,17 +18,34 @@ function ConvertTo-BackupScheduledTaskValue {
     return [string]$Value
 }
 
+function Get-BackupScheduledTaskPropertyValue {
+    param($Object, [string] $Property)
+
+    if ($null -eq $Object) { return $null }
+    $direct = $Object.PSObject.Properties[$Property]
+    if ($null -ne $direct) { return $direct.Value }
+    if ($Property -ceq 'AllowStartIfOnBatteries') {
+        $disallow = $Object.PSObject.Properties['DisallowStartIfOnBatteries']
+        if ($null -ne $disallow) { return -not [bool]$disallow.Value }
+    }
+    if ($Property -ceq 'DontStopIfGoingOnBatteries') {
+        $stop = $Object.PSObject.Properties['StopIfGoingOnBatteries']
+        if ($null -ne $stop) { return -not [bool]$stop.Value }
+    }
+    return $null
+}
+
 function Test-BackupScheduledTaskPropertySet {
     param($Actual, $Expected, [string[]] $Properties)
 
     if ($null -eq $Actual -or $null -eq $Expected) { return $false }
     foreach ($property in $Properties) {
-        $actualProperty = $Actual.PSObject.Properties[$property]
-        $expectedProperty = $Expected.PSObject.Properties[$property]
-        if ($null -eq $actualProperty -or $null -eq $expectedProperty) { return $false }
+        $actualValue = Get-BackupScheduledTaskPropertyValue -Object $Actual -Property $property
+        $expectedValue = Get-BackupScheduledTaskPropertyValue -Object $Expected -Property $property
+        if ($null -eq $actualValue -or $null -eq $expectedValue) { return $false }
         if (-not [string]::Equals(
-                (ConvertTo-BackupScheduledTaskValue $actualProperty.Value),
-                (ConvertTo-BackupScheduledTaskValue $expectedProperty.Value),
+                (ConvertTo-BackupScheduledTaskValue $actualValue),
+                (ConvertTo-BackupScheduledTaskValue $expectedValue),
                 [System.StringComparison]::OrdinalIgnoreCase
             )) {
             return $false

@@ -158,6 +158,17 @@ Assert-Condition ($setupText -notmatch "TaskName 'DevConfigBackup-\*'|TaskName '
 . $commonPath
 $definitions = New-TestDefinitions
 
+# Exercise the real ScheduledTasks constructor and the live CIM property aliases.
+$realSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 4) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 15)
+$logicalBatterySettings = [pscustomobject]@{ AllowStartIfOnBatteries = $true; DontStopIfGoingOnBatteries = $true }
+Assert-Condition (Test-BackupScheduledTaskPropertySet -Actual $realSettings -Expected $logicalBatterySettings -Properties @('AllowStartIfOnBatteries', 'DontStopIfGoingOnBatteries')) 'Real New-ScheduledTaskSettingsSet battery aliases must normalize to logical properties.'
+try {
+    $liveHotTask = Get-ScheduledTask -TaskName 'WeChatBackup-Hot-Daily' -TaskPath '\' -ErrorAction Stop
+    Assert-Condition (Test-BackupScheduledTaskPropertySet -Actual $liveHotTask.Settings -Expected $logicalBatterySettings -Properties @('AllowStartIfOnBatteries', 'DontStopIfGoingOnBatteries')) 'Live CIM task settings must normalize battery aliases.'
+} catch [System.Management.Automation.ItemNotFoundException] {
+    Write-Host 'SKIP: WeChatBackup-Hot-Daily is not registered in the test environment.'
+}
+
 # A same-name task with another wrapper is foreign and must not be replaced.
 $foreignAction = New-TestAction 'Foreign'
 $foreignStore = @{
