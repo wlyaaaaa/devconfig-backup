@@ -136,7 +136,9 @@
         'home/.gemini/antigravity-cli/presence/*.lock',
         # Codex-managed sandbox executables are ephemeral and intentionally ACL-locked;
         # excluding the exact subtree keeps collection fail-closed for selected sources.
-        'home/.codex/.sandbox-bin'
+        'home/.codex/.sandbox-bin',
+        # AICLI child leases are runtime coordination state, not recoverable configuration.
+        'home/.codex/aicli-background-children'
     )
 
     # 历史/对话日志目录名（默认排除；-IncludeHistory 时保留）
