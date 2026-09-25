@@ -50,7 +50,7 @@ G 热备从同一个不可变包发布所有名称，先写临时文件并校验
 
 微信构建并核验候选树，确认来源稳定后切换当前树和清单。事务失败恢复前一可用树；当前树与一个有界前代保留，更早前代只在后续成功后淘汰。新增、修改、删除和合法清空均收敛；离线或不可读源不触发删除。未变文件可以复用目标树中的硬链接，但不与活动原应用数据建立硬链接。备份目标不应作为活动工作目录编辑。
 
-Drive 只消费已经完成并锁定的本地微信快照：先复制、核对当前源内容，再按相同过滤范围清理旧对象，最后进行严格比对。快照失败不进入云端写入。`-DbOnly` 只处理数据库，不清理已有媒体，也不冒充新完成的全量恢复包。默认 `-MaxTransfer 8G` 限制传输命令，显式 `0` 才取消；中断状态与全量完成状态分开。
+Drive 不再读取正在运行的微信目录，也不在 E 盘另存副本：它只上传 G 盘上当前那一代微信热备（每日 Hot 任务用 VSS 快照复制并逐文件 SHA-256 核验的那份）。上传前持有 G 资源锁，并确认 G 回执为完整、核验通过、来自 VSS 快照、与当前清单绑定，且完成时间不超过 `-MaxHotAgeHours`（默认 48 小时）；再核对 G 当前树的目录、文件路径和大小仍与清单一致（不比时间：未变文件从上一代硬链接复用，会保留旧时间）。任一条件不满足就不上传，`state/wechat-drive-last.json` 的 `upload_source.refusal` 写明原因（如 `wechat_hot_receipt_stale`、`wechat_hot_receipt_not_verified`、`wechat_hot_capture_not_vss`、`wechat_hot_resource_busy`）；通过时记录所上传 G 版本的 `hot_generation_id` 与 `hot_completed_utc`。`-AllowLiveSourceHot` 仅供手动接受非 VSS 的 G 版本。`-Target Drive -Plan -Json` 只读执行同一核验门，不加锁、不联网。上传时先复制、核对，再按相同过滤范围清理旧对象，最后严格比对并确认 G 清单未变。回执只记录云端文件夹，不写远端账户名。上传期间占用 G 锁，同时间段的 Hot 任务会以资源忙失败、次日重试。`-DbOnly` 只处理数据库，不清理已有媒体，也不冒充新完成的全量恢复包。默认 `-MaxTransfer 8G` 限制传输命令，显式 `0` 才取消；中断状态与全量完成状态分开。
 
 ## 开发配置恢复
 
@@ -97,7 +97,7 @@ pwsh -File Restore-WeChat.ps1 -BackupRoot 'X:\backup\xwechat_files' -Target 'E:\
 
 四个正式任务由 `Setup-ScheduledTasks.ps1` 的事务式注册流程管理：精确名称、原定义前像、逐项回读和失败回滚。隐藏启动器优先 PowerShell 7，缺失才回退 5.1，并传递实际业务退出码。本地/G 与 Drive 分离，网络不可用不阻断本地保护；实际时间、启用状态及下次执行以 Task Scheduler 为准。
 
-`Install-WeChatDriveMonitor.ps1` 默认保留已有启用状态，新建默认禁用；显式 `-Enable` 才启用，不自动恢复已经停用的监控。补传传递完整源、快照、远端与限额参数，采集阶段也视为资源忙。监控同时读取 stdout/stderr，超时仅处理自己启动的查询。最终成功依据锁定且验证过的快照与完整远端核对，不是固定容量百分比。禁用监控不等于终止此前已经启动的上传。
+`Install-WeChatDriveMonitor.ps1` 默认保留已有启用状态，新建默认禁用；显式 `-Enable` 才启用，不自动恢复已经停用的监控。补传以 G 热备为快照，传递 G 路径、回执、远端与限额参数，Hot 写入期间也视为资源忙。监控同时读取 stdout/stderr，超时仅处理自己启动的查询。最终成功依据锁定且验证过的快照与完整远端核对，不是固定容量百分比。禁用监控不等于终止此前已经启动的上传。
 
 所有云端入口使用同一远端 binding 和网络初始化。远端不存在、binding 损坏时失败，不改用“第一个可用账户”。代理关闭时清除旧进程代理变量；命令以实际退出码判定，不把 PowerShell 5.1 包装出的正常 stderr 通知误判为失败。
 
@@ -109,6 +109,7 @@ pwsh -File Restore-WeChat.ps1 -BackupRoot 'X:\backup\xwechat_files' -Target 'E:\
 pwsh -NoProfile -File tests\Assert-BackupClosure.ps1
 powershell -NoProfile -File tests\Assert-BackupClosure.ps1
 pwsh -NoProfile -File tests\Assert-BackupEntrypoints.ps1
+pwsh -NoProfile -File tests\Assert-WeChatDriveFromHot.ps1
 ```
 
 其余 `tests/Assert-*.ps1` 覆盖源范围、公开产物隔离、任务注册、代理、云端对象完整性和原生恢复。测试只能使用随机命名的专属临时目录；清理必须同时核对固定父目录及随机目录名称，误指向源码目录必须拒绝。代码应先保存到独立 Git 分支，再执行有写入的隔离验证。

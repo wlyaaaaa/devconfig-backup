@@ -87,17 +87,11 @@ try{
   $cloud=Join-Path $script:FixtureRoot 'cloud';$r=Run 'Backup-DevConfig.ps1' ($base+@('-Tier','Drive','-GDriveRemote','fixture-local:','-GDriveFolder',$cloud.Replace('\','/'),'-KeepDrive','1'))
   Check ($r.Exit-eq 0) ('Cloud protocol with isolated local backend: '+$r.Text)
   Check ((Get-VerifiedDevConfigPackage $cloud).Sha-ceq $changed.Sha) 'Remote success pointer and portable archive agree'
-  $wc=Join-Path $script:FixtureRoot 'wechat-cloud';$wl=Join-Path $script:FixtureRoot 'wechat-local';$state=Join-Path $script:FixtureRoot 'wechat-state'
-  Put (Join-Path $ws 'account\db_storage\fixture.bin') 'cloud data';Put (Join-Path $ws 'account\media.bin') 'cloud media';Put (Join-Path $wc 'obsolete.bin') 'obsolete'
-  $wx=@('-Source',$ws,'-LocalRoot',$wl,'-HotRoot',(Join-Path $script:FixtureRoot 'unused-hot'),'-StateRoot',$state,'-Target','Drive','-GDriveRemote','fixture-local:','-GDriveFolder',$wc.Replace('\','/'),'-Json')
-  $r=Run 'Backup-WeChat.ps1' $wx;Check ($r.Exit-eq 0 -and -not [IO.File]::Exists((Join-Path $wc 'obsolete.bin'))) ('WeChat verifies before cloud pruning: '+$r.Text)
-  Check ([IO.File]::Exists($wc+'.backup-manifest.json')) 'Full native cloud copy carries its portable manifest'
-  $locked=Join-Path $ws 'account\db_storage\fixture.bin';$lease=[IO.File]::Open($locked,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
-  Put (Join-Path $wc 'must-survive.bin') 'keep after failed snapshot'
-  try{$r=Run 'Backup-WeChat.ps1' $wx}finally{$lease.Dispose()}
-  Check ($r.Exit-ne 0 -and [IO.File]::Exists((Join-Path $wc 'must-survive.bin'))) 'Failed snapshot cannot enter any cloud mutation'
-  [IO.File]::Delete((Join-Path $ws 'account\media.bin'));$r=Run 'Backup-WeChat.ps1' ($wx+@('-DbOnly'))
-  Check ($r.Exit-eq 0 -and [IO.File]::Exists((Join-Path $wc 'account\media.bin'))) 'Database-only mode does not delete excluded remote media'
+  # WeChat Drive consumes only the verified G generation; see tests\Assert-WeChatDriveFromHot.ps1.
+  $locked=Join-Path $ws 'account\db_storage\fixture.bin';Put $locked 'locked source';$lease=[IO.File]::Open($locked,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
+  $failedHot=Join-Path $script:FixtureRoot 'wechat-failed-hot'
+  try{$r=Run 'Backup-WeChat.ps1' @('-Source',$ws,'-HotRoot',$failedHot,'-StateRoot',(Join-Path $script:FixtureRoot 'wechat-state'),'-Target','Hot','-Json')}finally{$lease.Dispose()}
+  Check ($r.Exit-ne 0 -and -not [IO.File]::Exists($failedHot+'.hot-receipt.json') -and -not [IO.File]::Exists($failedHot+'.backup-manifest.json')) 'Failed Hot snapshot publishes no receipt that Drive could consume'
  }
  $production=Import-PowerShellDataFile (Join-Path $repo 'sources.psd1')
  Check ('thread-writer-locks'-in $production.ExcludeDirs -and '*.lock'-notin $production.ExcludeFiles) 'Runtime coordination exclusion does not remove dependency lockfiles generally'

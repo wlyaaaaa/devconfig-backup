@@ -2,11 +2,11 @@
 .SYNOPSIS
   Optional WeChat catchup monitor. No task is installed or enabled by this script.
 .DESCRIPTION
-  Completion requires a locked, verified native snapshot and exact cloud check,
+  Completion requires the locked, verified G hot generation and exact cloud check,
   not a percentage or byte threshold. All follow-up parameters are preserved.
 #>
 [CmdletBinding()]
-param([string]$LocalRoot='E:\WeChatBackup\xwechat_files',[string]$GDriveRemote='gdrive:',[string]$GDriveFolder='Backups/WeChat/xwechat_files',[string]$MonitorTaskName='WeChatDrive-Monitor-Hourly',[double]$CompletePercent=99.5,[ValidateRange(1,3600)][int]$RcloneTimeoutSec=900,[string]$Source='E:\Documents\xwechat_files',[string]$BwLimit='4M',[string]$MaxTransfer='8G',[switch]$Plan)
+param([string]$HotRoot='G:\80_Backup\WeChat\xwechat_files',[string]$HotReceiptPath='G:\80_Backup\ControlPlane\wechat-hot-last.json',[string]$GDriveRemote='gdrive:',[string]$GDriveFolder='Backups/WeChat/xwechat_files',[string]$MonitorTaskName='WeChatDrive-Monitor-Hourly',[double]$CompletePercent=99.5,[ValidateRange(1,3600)][int]$RcloneTimeoutSec=900,[string]$BwLimit='4M',[string]$MaxTransfer='8G',[switch]$Plan)
 $ErrorActionPreference='Stop';$Root=$PSScriptRoot
 . (Join-Path $Root 'Backup.Common.ps1')
 . (Join-Path $Root 'Initialize-BackupNetwork.ps1')
@@ -30,12 +30,12 @@ function Invoke-RcloneWithTimeout {
  }finally{$p.Dispose()}
 }
 function Test-WeChatRcloneActive {
- $path=$LocalRoot.TrimEnd('\','/')+'.backup.lock';if(-not [IO.File]::Exists($path)){return $false}
+ $path=$HotRoot.TrimEnd('\','/')+'.backup.lock';if(-not [IO.File]::Exists($path)){return $false}
  try{$lease=[IO.File]::Open($path,[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None);$lease.Dispose();return $false}catch [IO.IOException]{return $true}
 }
 function Start-WeChatDriveCatchup {
  $exe=Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe';if(-not [IO.File]::Exists($exe)){$exe=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'}
- $items=@('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'Backup-WeChat.ps1'),'-Target','Drive','-Source',$Source,'-LocalRoot',$LocalRoot,'-GDriveRemote',$script:resolvedRemote,'-GDriveFolder',$GDriveFolder,'-BwLimit',$BwLimit,'-MaxTransfer',$MaxTransfer)
+ $items=@('-NoProfile','-ExecutionPolicy','Bypass','-File',(Join-Path $Root 'Backup-WeChat.ps1'),'-Target','Drive','-HotRoot',$HotRoot,'-HotReceiptPath',$HotReceiptPath,'-GDriveRemote',$script:resolvedRemote,'-GDriveFolder',$GDriveFolder,'-BwLimit',$BwLimit,'-MaxTransfer',$MaxTransfer)
  $arguments=@($items|ForEach-Object{ConvertTo-BackupProcessArgument $_})-join ' '
  $process=Start-Process -FilePath $exe -ArgumentList $arguments -WorkingDirectory $Root -WindowStyle Hidden -PassThru
  return $process.Id
@@ -45,7 +45,7 @@ function Disable-SelfMonitor([string]$Name){
  if(@($task.Actions|Where-Object{$_.Arguments-like ('*'+(Join-Path $Root 'Monitor-WeChatDrive.ps1')+'*')}).Count-ne 1){throw 'monitor_task_identity_mismatch'}
  Disable-ScheduledTask -TaskName $Name -TaskPath '\' -ErrorAction Stop|Out-Null
 }
-if($Plan){[pscustomobject]@{mode='plan';write_mode='zero_write';source=$Source;snapshot=$LocalRoot;cloud='not_contacted';task=$MonitorTaskName}|ConvertTo-Json;exit 0}
+if($Plan){[pscustomobject]@{mode='plan';write_mode='zero_write';snapshot=$HotRoot;cloud='not_contacted';task=$MonitorTaskName}|ConvertTo-Json;exit 0}
 $monitorLease=$null;$snapshotLease=$null;$code=0
 $result=[ordered]@{schema='wechat.drive-monitor.v2';observed_utc=(Get-BackupUtc);status='running';snapshot='unknown';cloud='unknown';catchup='not_started';application_recovery='not_tested'}
 try{
@@ -55,10 +55,10 @@ try{
  if(-not $resolved.Success){throw 'monitor_remote_unavailable'};$script:resolvedRemote=$resolved.Remote
  if(Test-WeChatRcloneActive){$result.status='busy'}else{
   $verified=$false
-  try{$snapshotLease=Open-BackupResourceLock $LocalRoot;$null=Get-VerifiedBackupTreeManifest $LocalRoot -VerifyContent;$verified=$true;$result.snapshot='sha256_verified'}catch{$result.snapshot='not_verified'}
+  try{$snapshotLease=Open-BackupResourceLock $HotRoot;$null=Get-VerifiedBackupTreeManifest $HotRoot -VerifyContent;$verified=$true;$result.snapshot='sha256_verified'}catch{$result.snapshot='not_verified'}
   if($verified){
    $selection=Import-PowerShellDataFile (Join-Path $Root 'wechat-sources.psd1');$filter=@();foreach($name in $selection.ExcludeDirs){$filter+=@('--exclude',($name+'/**'))}
-   $check=Invoke-RcloneWithTimeout -Arguments (@('check',$LocalRoot,($resolved.Remote+$GDriveFolder),'--checkers','8','--retries','2','--contimeout','20s','--timeout','120s')+$filter) -TimeoutSec $RcloneTimeoutSec -Purpose 'cloud check'
+   $check=Invoke-RcloneWithTimeout -Arguments (@('check',$HotRoot,($resolved.Remote+$GDriveFolder),'--checkers','8','--retries','2','--contimeout','20s','--timeout','120s')+$filter) -TimeoutSec $RcloneTimeoutSec -Purpose 'cloud check'
    $result.cloud=if($check.ExitCode-eq 0){'verified'}else{'incomplete_or_unavailable'}
   }
   if($snapshotLease){$snapshotLease.Dispose();$snapshotLease=$null}
