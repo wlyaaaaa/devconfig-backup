@@ -93,6 +93,7 @@ function Push-Drive($Pack){
 function New-DevConfigCandidate([string]$Container){
  $stage=Join-Path $Container 'payload';$inventory=Get-DevConfigSourceInventory $cfg $ProfileRoot -IncludeHistory:$IncludeHistory
  Copy-DevConfigSourceInventory $inventory $stage
+ $skipped=@($inventory.skipped_files|Select-Object relative_path,reason);$script:run.skipped_file_count=$skipped.Count;$script:run.skipped_files=$skipped
  $script:run.optional_tools_absent=@(if($SkipSystemExport){'system_export_explicitly_skipped'}else{Invoke-DevConfigSystemExport $cfg $stage})
  $binding=Join-Path $StateDir 'rclone-remote-binding.json'
  if([IO.File]::Exists($binding)){$null=Copy-RcloneRemoteBindingToManifest -BindingPath $binding -ManifestDirectory (Join-Path $stage '_manifests')}
@@ -102,10 +103,10 @@ function New-DevConfigCandidate([string]$Container){
  $payload=Get-BackupTreeInventory $stage -Hash;$treeHash=Get-BackupInventoryDigest $payload
  $policyHash=Get-BackupTextHash ((Get-BackupStableFileHash $SourcesFile)+'|'+[string]$IncludeHistory+'|'+[string]$SkipSystemExport)
  $contentHash=Get-BackupTextHash ($treeHash+'|'+$policyHash)
- $script:run.collection='complete';$script:run.package='running';Write-BackupJsonAtomic $runPath $script:run
+ $script:run.collection=$(if($skipped.Count){'complete_with_skipped_files'}else{'complete'});$script:run.package='running';Write-BackupJsonAtomic $runPath $script:run
  $previous=$null;try{$previous=Get-VerifiedDevConfigPackage $OutDir}catch{}
  if($previous -and $previous.Receipt.content_sha256-ceq $contentHash){$script:run.package='reused';return $previous}
- $manifest=[ordered]@{schema='devconfig.payload-manifest.v1';capture_consistency='per_file_verified_not_point_in_time';changed_after_capture_count=$captureChanges;content_sha256=$contentHash;payload_tree_sha256=$treeHash;policy_sha256=$policyHash;file_count=$payload.file_count;bytes=$payload.bytes;directories=$payload.directories;files=@($payload.files|Select-Object relative_path,length,mtime_ticks,sha256);sources=$inventory.sources;application_consistency='not_proven'}
+ $manifest=[ordered]@{schema='devconfig.payload-manifest.v1';capture_consistency='per_file_verified_not_point_in_time';changed_after_capture_count=$captureChanges;content_sha256=$contentHash;payload_tree_sha256=$treeHash;policy_sha256=$policyHash;file_count=$payload.file_count;bytes=$payload.bytes;directories=$payload.directories;files=@($payload.files|Select-Object relative_path,length,mtime_ticks,sha256);sources=$inventory.sources;skipped_file_count=$skipped.Count;skipped_files=$skipped;application_consistency='not_proven'}
  Write-BackupJsonAtomic (Join-Path $stage 'backup-manifest.json') $manifest
  $name='devconfig-'+(Get-Date -Format yyyyMMdd-HHmmss)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)+'.zip';$zip=Join-Path $Container $name
  $zipExe=Get-BackupExecutable 7z -FallbackPath $SevenZipPath
@@ -119,7 +120,7 @@ function New-DevConfigCandidate([string]$Container){
  & $zipExe t -bso0 -bsp0 -- $zip *> $null;if($LASTEXITCODE-ne 0){throw 'backup_archive_test_failed'}
  Assert-BackupArchiveManifest $zip $manifest
  $hash=Get-BackupStableFileHash $zip
- $receipt=[ordered]@{schema='devconfig.package-receipt.v2';zip_entry_encoding='utf-8';capture_consistency='per_file_verified_not_point_in_time';status='complete';collection_status='complete';archive_verification='7z_test_pass';completed_utc=(Get-BackupUtc);package_name=$name;sha256=$hash;package_bytes=(Get-Item $zip).Length;content_sha256=$contentHash;payload_tree_sha256=$treeHash;file_count=$payload.file_count;application_recovery='not_tested'}
+ $receipt=[ordered]@{schema='devconfig.package-receipt.v2';zip_entry_encoding='utf-8';capture_consistency='per_file_verified_not_point_in_time';status='complete';collection_status='complete';archive_verification='7z_test_pass';completed_utc=(Get-BackupUtc);package_name=$name;sha256=$hash;package_bytes=(Get-Item $zip).Length;content_sha256=$contentHash;payload_tree_sha256=$treeHash;file_count=$payload.file_count;skipped_file_count=$skipped.Count;collection_warnings=@(if($skipped.Count){'skipped_unreadable_files'});application_recovery='not_tested'}
  Write-BackupJsonAtomic ($zip+'.manifest.json') $manifest;Write-BackupJsonAtomic ($zip+'.receipt.json') $receipt
  [IO.File]::WriteAllText(($zip+'.sha256'),($hash+'  '+$name+"`n"),[Text.Encoding]::ASCII)
  return [pscustomobject]@{Zip=$zip;Sha=$hash;Name=$name;Receipt=[pscustomobject]$receipt;MB=[math]::Round($receipt.package_bytes/1MB,2)}
@@ -132,7 +133,7 @@ if($Plan){
  if($Json){$result|ConvertTo-Json -Depth 8}else{[pscustomobject]$result|Format-List};exit 0
 }
 $script:overallExitCode=0;$outLease=$null;$pin=$null;$container=$null;$pack=$null
-$script:run=[ordered]@{schema='devconfig.run.v2';run_id=[guid]::NewGuid().ToString('N');status='running';started_utc=(Get-BackupUtc);completed_utc=$null;tiers=$Tier;collection='not_requested';package='not_requested';hot='not_requested';drive='not_requested';retention='not_requested';failure=$null;optional_tools_absent=@();application_recovery='not_tested'}
+$script:run=[ordered]@{schema='devconfig.run.v2';run_id=[guid]::NewGuid().ToString('N');status='running';started_utc=(Get-BackupUtc);completed_utc=$null;tiers=$Tier;collection='not_requested';package='not_requested';hot='not_requested';drive='not_requested';retention='not_requested';failure=$null;skipped_file_count=0;skipped_files=@();optional_tools_absent=@();application_recovery='not_tested'}
 $runPath=Join-Path $StateDir ('devconfig-'+$(if($Tier.Count-eq 1 -and $Tier[0]-eq 'Drive'){'drive'}else{'local'})+'-last.json')
 try{
  Write-BackupJsonAtomic $runPath $run
@@ -154,10 +155,12 @@ try{
  Write-BackupJsonAtomic $runPath $run
  if($Tier-contains 'Hot'){$run.hot='running';Write-BackupJsonAtomic $runPath $run;try{Push-Hot $pack;$run.hot='complete'}catch{$run.hot='failed';$run.failure=Get-BackupFailureCode $_;$script:overallExitCode=1}}
  if($Tier-contains 'Drive'){$run.drive='running';Write-BackupJsonAtomic $runPath $run;try{Push-Drive $pack;$run.drive='complete'}catch{$run.drive='failed';$run.failure=Get-BackupFailureCode $_;$script:overallExitCode=1}}
- $run.status=if($script:overallExitCode-eq 0){'complete'}else{'failed'}
+ # Skipped unreadable files keep the task successful but are never reported as plain complete.
+ $run.status=if($script:overallExitCode-ne 0){'failed'}elseif($run.skipped_file_count-gt 0){'complete_with_skipped_files'}else{'complete'}
 }catch{
  $script:overallExitCode=1;$run.status='failed';$run.failure=Get-BackupFailureCode $_;$run.failure_type=$_.Exception.GetType().Name
  $run.failure_site=@($_.ScriptStackTrace-split "`n")[0]
+ try{$run.failure_path=Get-BackupFailureSourcePath $_ @(@('profile',$ProfileRoot),@('output',$OutputRoot));$run.failure_io_reason=Get-BackupUnreadableReason $_.Exception}catch{$run.failure_path=$null}
  foreach($phase in @('collection','package','hot','drive','retention')){if($run[$phase]-eq 'running'){$run[$phase]='failed'}}
 }finally{
  if($pin){$pin.Dispose()};if($outLease){$outLease.Dispose()}

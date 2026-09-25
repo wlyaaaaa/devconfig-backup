@@ -278,6 +278,32 @@ function Get-BackupFailureCode($ErrorRecord){
  $text=$ErrorRecord.Exception.Message
  if($text-match '^([a-z][a-z0-9_]+)(?::[a-z0-9_]+)?$'){return $text};return 'backup_io_or_dependency_failure'
 }
+function Get-BackupUnreadableReason($Exception){
+ # Only another process holding the file (share/byte-range lock) or an ACL denial
+ # counts as "this single file cannot be read now"; every other error stays fatal.
+ $e=$Exception
+ while($e){
+  if($e-is [UnauthorizedAccessException]){return 'access_denied'}
+  if($e-is [IO.IOException] -and $e-isnot [IO.FileNotFoundException] -and $e-isnot [IO.DirectoryNotFoundException]){$code=$e.HResult-band 0xFFFF;if($code-eq 32){return 'sharing_violation'};if($code-eq 33){return 'lock_violation'}}
+  $e=$e.InnerException
+ }
+ return $null
+}
+function Get-BackupFailureSourcePath($ErrorRecord,[object[]]$Roots=@()){
+ # Report which source failed as a relative, label-prefixed path; never payload bytes.
+ $e=$ErrorRecord.Exception;$full=$null
+ while($e){
+  $relative=[string]$e.Data['backup_source_relative_path'];if($relative){return $relative}
+  if(-not $full){$full=[string]$e.Data['backup_source_path']}
+  $e=$e.InnerException
+ }
+ if(-not $full){return $null}
+ foreach($root in $Roots){
+  $base=[IO.Path]::GetFullPath([string]$root[1]).TrimEnd('\')
+  if($full.StartsWith($base+'\',[StringComparison]::OrdinalIgnoreCase)){return ([string]$root[0])+'/'+$full.Substring($base.Length+1).Replace('\','/')}
+ }
+ return 'unmapped/'+[IO.Path]::GetFileName($full)
+}
 function Get-VerifiedDevConfigPackage([string]$OutDir,[switch]$MetadataOnly){
  $OutDir=Resolve-BackupPath $OutDir
  $pointer=Read-BackupJson (Join-Path $OutDir 'current.json') -Required

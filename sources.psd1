@@ -138,7 +138,10 @@
         # excluding the exact subtree keeps collection fail-closed for selected sources.
         'home/.codex/.sandbox-bin',
         # AICLI child leases are runtime coordination state, not recoverable configuration.
-        'home/.codex/aicli-background-children'
+        'home/.codex/aicli-background-children',
+        # Clash Verge holds a byte-range lock on its single-instance guard while running;
+        # the zero-length marker is runtime coordination state, not configuration.
+        'appdata-roaming/io.github.clash-verge-rev.clash-verge-rev/singleton-instance.lock'
     )
 
     # 历史/对话日志目录名（默认排除；-IncludeHistory 时保留）

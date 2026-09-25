@@ -50,36 +50,56 @@ function Get-DevConfigSourceInventory {
  $files=@($keys|ForEach-Object{$fileMap[$_]});[long]$bytes=0;foreach($file in $files){$bytes+=$file.length}
  return [pscustomobject]@{root=$profile;files=$files;directories=@($dirSet);sources=@($sources);file_count=$files.Count;bytes=$bytes;source_count=$sources.Count;optional_absent_count=@($sources|Where-Object{$_.status-eq 'optional_absent'}).Count;hashes_computed=[bool]$Hash}
 }
+function Test-DevConfigRequiredPath([string]$RelativePath,$Inventory){
+ foreach($source in @($Inventory.sources|Where-Object{$_.required})){$id=[string]$source.id;if($RelativePath-ieq $id -or $RelativePath.StartsWith($id+'/',[StringComparison]::OrdinalIgnoreCase)){return $true}};return $false
+}
 function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
+ # A single file held open exclusively (or ACL-denied) by a running application is
+ # skipped and reported; required sources and every other failure stay fatal.
  [void][IO.Directory]::CreateDirectory($Destination)
  foreach($directory in @($Inventory.directories)){[void][IO.Directory]::CreateDirectory((Join-Path $Destination $directory))}
+ $kept=[Collections.Generic.List[object]]::new();$skipped=[Collections.Generic.List[object]]::new()
  foreach($file in @($Inventory.files)){
+  $target=Join-Path $Destination $file.relative_path
   for($attempt=1;$attempt-le 3;$attempt++){
    try{
     $before=Get-Item -LiteralPath $file.full_path -Force -ErrorAction Stop
     $hash=Get-BackupStableFileHash $file.full_path
-    Copy-BackupFileVerified $file.full_path (Join-Path $Destination $file.relative_path) $hash
+    Copy-BackupFileVerified $file.full_path $target $hash
     $after=Get-Item -LiteralPath $file.full_path -Force -ErrorAction Stop
     if($before.Length-ne $after.Length -or $before.LastWriteTimeUtc.Ticks-ne $after.LastWriteTimeUtc.Ticks){throw 'backup_source_changed_during_capture'}
     $file.sha256=$hash;$file.length=[long]$after.Length;$file.mtime_ticks=[long]$after.LastWriteTimeUtc.Ticks
-    break
+    $kept.Add($file);break
    }catch{
-    $_.Exception.Data['backup_source_path']=$file.full_path
-    if($attempt-ge 3 -or ($_.Exception.Message-notmatch 'backup_source_changed|backup_copy_hash_mismatch' -and $_.Exception-isnot [IO.IOException] -and $_.Exception.InnerException-isnot [IO.IOException])){throw}
-    Start-Sleep -Milliseconds 150
+    $_.Exception.Data['backup_source_path']=$file.full_path;$_.Exception.Data['backup_source_relative_path']=$file.relative_path
+    $reason=Get-BackupUnreadableReason $_.Exception
+    $retryable=$_.Exception.Message-match 'backup_source_changed|backup_copy_hash_mismatch' -or ($reason-ne 'access_denied' -and ($_.Exception-is [IO.IOException] -or $_.Exception.InnerException-is [IO.IOException]))
+    if($attempt-lt 3 -and $retryable){Start-Sleep -Milliseconds 150;continue}
+    if(-not $reason){throw}
+    if(Test-DevConfigRequiredPath $file.relative_path $Inventory){
+     $required=[Management.Automation.RuntimeException]::new('required_backup_source_unreadable',$_.Exception)
+     $required.Data['backup_source_relative_path']=$file.relative_path;$required.Data['backup_unreadable_reason']=$reason;throw $required
+    }
+    if([IO.File]::Exists($target)){[IO.File]::Delete($target)}
+    $skipped.Add([pscustomobject]@{relative_path=$file.relative_path;reason=$reason});break
    }
   }
  }
+ $Inventory.files=$kept.ToArray();$Inventory.file_count=$kept.Count
+ $Inventory|Add-Member -NotePropertyName skipped_files -NotePropertyValue $skipped.ToArray() -Force
  $Inventory.bytes=[long](($Inventory.files|Measure-Object length -Sum).Sum)
 }
 function Test-DevConfigSelectionAfterCapture($Captured,$Current){
  # Per-file capture is not a point-in-time application snapshot. Changes to files
  # already captured are counted, while changed selection (missing/new paths) fails.
+ # Files reported as skipped during capture are compared only by their absence here.
+ $skippedPaths=@{};foreach($entry in @($Captured.skipped_files)){if($entry){$skippedPaths[[string]$entry.relative_path]=$true}}
+ $currentFiles=@($Current.files|Where-Object{-not $skippedPaths.ContainsKey([string]$_.relative_path)})
  $left=@(@($Captured.directories|ForEach-Object{'d|'+$_})+@($Captured.files|ForEach-Object{'f|'+$_.relative_path}))
- $right=@(@($Current.directories|ForEach-Object{'d|'+$_})+@($Current.files|ForEach-Object{'f|'+$_.relative_path}))
+ $right=@(@($Current.directories|ForEach-Object{'d|'+$_})+@($currentFiles|ForEach-Object{'f|'+$_.relative_path}))
  if(($left-join "`n")-cne ($right-join "`n")){throw 'backup_source_selection_changed_during_collection'}
  $byPath=@{};foreach($file in $Captured.files){$byPath[$file.relative_path]=$file}
- $changes=0;foreach($file in $Current.files){$old=$byPath[$file.relative_path];if($old.length-ne $file.length -or $old.mtime_ticks-ne $file.mtime_ticks){$changes++}}
+ $changes=0;foreach($file in $currentFiles){$old=$byPath[$file.relative_path];if($old.length-ne $file.length -or $old.mtime_ticks-ne $file.mtime_ticks){$changes++}}
  return $changes
 }
 

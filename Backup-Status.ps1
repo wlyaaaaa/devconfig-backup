@@ -54,18 +54,18 @@ function Get-BackupStatusSnapshot {
   $drive.status=if($probe.Success){'reachable_not_content_verified'}else{'unreachable'}
  }catch{$drive.status='unavailable';$drive.reason=Get-BackupFailureCode $_}}
  $local=Get-PackageStatus (Join-Path $OutputRoot 'out');$hot=Get-PackageStatus $HotRoot
- $health=if(@($attempts|Where-Object{$_.status-in @('failed','unreadable')}).Count -or $local.status-ne 'current' -or $hot.status-ne 'current' -or $wechat.status-ne 'current'){'attention_required'}else{'receipts_current'}
+ $health=if(@($attempts|Where-Object{$_.status-in @('failed','unreadable')}).Count -or $local.status-ne 'current' -or $hot.status-ne 'current' -or $wechat.status-ne 'current'){'attention_required'}elseif(@($attempts|Where-Object{$_.status-eq 'complete_with_skipped_files'}).Count){'receipts_current_with_skipped_files'}else{'receipts_current'}
  return [pscustomobject][ordered]@{schema='devconfig.backup-status.v2';observed_utc=(Get-BackupUtc);write_mode=$(if($LiveDrive -and -not $NoDrive){'metadata_query_may_refresh_oauth'}else{'zero_write'});status=$health;local=$local;hot=$hot;wechat_hot=[pscustomobject]$wechat;drive=[pscustomobject]$drive;last_attempts=$attempts;scheduled_tasks=$tasks;application_recovery='not_tested';log_payloads='not_read'}
 }
 function Format-BackupStatusForHuman($Snapshot){
- $labels=@{current='当前有效';stale='已过期';unknown='尚未验证';legacy_or_unverified='旧版或未验证';complete='完成';failed='失败';running='进行中';not_requested='本次未请求';not_contacted='未联网检查';attention_required='需要处理';receipts_current='成功回执均在有效期内';Ready='就绪';Disabled='已禁用'}
+ $labels=@{current='当前有效';stale='已过期';unknown='尚未验证';legacy_or_unverified='旧版或未验证';complete='完成';failed='失败';running='进行中';not_requested='本次未请求';not_contacted='未联网检查';attention_required='需要处理';receipts_current='成功回执均在有效期内';complete_with_skipped_files='完成，但跳过了被占用的文件';receipts_current_with_skipped_files='成功回执均在有效期内，但最近一次跳过了被占用的文件';Ready='就绪';Disabled='已禁用'}
  function Label([string]$Value){if($labels.ContainsKey($Value)){return $labels[$Value]};return $Value}
  $lines=[Collections.Generic.List[string]]::new();$lines.Add('DevConfig / 微信备份状态');$lines.Add('检查时间：'+$Snapshot.observed_utc);$lines.Add('总体：'+(Label $Snapshot.status));$lines.Add('')
  foreach($entry in @(@('本地配置',$Snapshot.local),@('G 盘配置',$Snapshot.hot),@('G 盘微信',$Snapshot.wechat_hot))){
   $item=$entry[1];$lines.Add($entry[0]+'：'+(Label $item.status));if($item.completed_utc){$lines.Add('  最近成功：'+$item.completed_utc)}
   if($null-ne $item.bytes){$lines.Add(('  大小：{0:N2} GiB' -f ([double]$item.bytes/1GB)))};$lines.Add('  校验依据：'+$item.verification);if($item.reason){$lines.Add('  原因：'+$item.reason)}
  }
- $lines.Add('');$lines.Add('最近尝试（失败不会覆盖上一个成功版本）：');foreach($attempt in $Snapshot.last_attempts){$lines.Add(('  {0}：{1}  {2}' -f $attempt.schema,(Label $attempt.status),$attempt.failure))}
+ $lines.Add('');$lines.Add('最近尝试（失败不会覆盖上一个成功版本）：');foreach($attempt in $Snapshot.last_attempts){$lines.Add(('  {0}：{1}  {2}' -f $attempt.schema,(Label $attempt.status),$attempt.failure));if($attempt.failure_path){$lines.Add('    出错文件：'+$attempt.failure_path)};foreach($skip in @($attempt.skipped_files|Where-Object{$_})){$lines.Add(('    已跳过：{0}（{1}）' -f $skip.relative_path,$skip.reason))}}
  $lines.Add('');$lines.Add('计划任务：');foreach($task in $Snapshot.scheduled_tasks){$lines.Add(('  {0}：{1}；上次返回 {2}；下次 {3}' -f $task.name,(Label $task.state),$task.last_exit,$task.next_run))}
  $lines.Add('');$lines.Add('云端：'+(Label $Snapshot.drive.status));$lines.Add('文件校验、复制成功与官方客户端恢复是不同结果；此页不证明应用已经恢复。')
  $lines.Add('界面每分钟刷新。关闭窗口不停止备份；启停任务请使用“管理计划任务”。')

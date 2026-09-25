@@ -30,7 +30,9 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -Json
 
 `RequiredSources` 可登记必要的来源标识，例如 `home/.gitconfig`；必需项缺失会失败。未安装软件可以标为 `optional_absent`，但卷离线、权限错误、读取失败不是“可选软件不存在”。正常可读来源的删除跟随有效保留视图，不从旧副本复活。
 
-运行时协调锁不是恢复数据：只排除 Codex 的 `thread-writer-locks` 目录、指定 SignalRGB LevelDB 的 `LOCK` 文件和 Gemini presence 的进程锁。**不全局排除 `*.lock`**，依赖版本锁文件继续保留。已打开文件采用共享读取，并检查字节哈希、大小和时间；实际字节锁或采集期间变化会导致本轮失败，保留原成功版本。不停止应用、不绕过实际文件锁，也不将读取失败记为成功。
+运行时协调锁不是恢复数据：按精确路径排除 Codex 的 `thread-writer-locks` 目录、沙箱二进制与 AICLI 子租约、指定 SignalRGB LevelDB 的 `LOCK` 文件、Gemini presence 的进程锁，以及 Clash Verge 运行时加字节锁的 `singleton-instance.lock`。**不全局排除 `*.lock`**，依赖版本锁文件继续保留。已打开文件采用共享读取，并检查字节哈希、大小和时间。
+
+单个文件被其他程序独占打开或加字节锁（`sharing_violation` / `lock_violation`）、或被拒绝访问（`access_denied`）时，有界重试后跳过这个文件，其余文件照常采集、打包和核验：运行回执 `state/devconfig-local-last.json` 的状态为 `complete_with_skipped_files`（区别于 `complete` 和 `failed`），`skipped_files` 列出相对路径和原因，包清单与包回执同样记录跳过数。跳过不等于已备份；`RequiredSources` 下的文件读不了仍判整轮失败。其他读取错误和采集期间持续变化同样失败并保留原成功版本，失败回执的 `failure_path` 给出出错文件的相对路径（不含文件内容）。不停止应用，也不绕过实际文件锁。
 
 配置包仍可能含 `.gnupg` 私钥、工具配置中的 API 凭据、环境变量和无线网络恢复信息。原有 Wi-Fi 明文恢复导出保持不变，但值不会输出到公开仓库或状态面板。`.env`、`auth.json` 等明确排除项继续排除；Password Center 管理的独立凭据仍走自己的恢复入口。**排除几个文件名不等于整个包不含秘密。** 不随意删改原始凭据来制造“安全”结果，也不能把真实配置包推到公开 Git 仓库。
 
@@ -38,7 +40,7 @@ pwsh -File Backup-WeChat.ps1 -Target Drive -Json
 
 ## 成功发布与失败隔离
 
-DevConfig 每轮使用独立 staging，检查必需源、复制、系统导出和重装清单结果。每个文件以最多三次有界重试取得稳定读取并核对复制结果；采集结束再次核对来源路径集合。已捕获文件随后被应用更新，会单列 changed_after_capture_count，不冒充整个运行中应用在同一时点的快照；源项新增或消失、文件始终无法稳定读取仍会失败。打包必须通过 7-Zip 检测，再生成成功回执；只有完整成功版本可以更新 `current.json`。失败不会替换成功指针，也不能因失败采集而淘汰旧成功包。
+DevConfig 每轮使用独立 staging，检查必需源、复制、系统导出和重装清单结果。每个文件以最多三次有界重试取得稳定读取并核对复制结果；采集结束再次核对来源路径集合。已捕获文件随后被应用更新，会单列 changed_after_capture_count，不冒充整个运行中应用在同一时点的快照；源项新增或消失、文件在采集期间持续变化仍会失败；被占用而跳过的文件只按上文规则记为警告。打包必须通过 7-Zip 检测，再生成成功回执；只有完整成功版本可以更新 `current.json`。失败不会替换成功指针，也不能因失败采集而淘汰旧成功包。
 
 每个日期包携带 `.sha256`、`.receipt.json`、`.manifest.json`，包内还有 `backup-manifest.json`。`current.json` 绑定包名、哈希、完整采集状态和目标。`latest.zip` 与附属文件是兼容别名，恢复时必须核验，不能只看文件名或修改时间。旧 `state/latest.sha256` 仅作兼容记录，不能单独证明采集成功或准许上云。
 
