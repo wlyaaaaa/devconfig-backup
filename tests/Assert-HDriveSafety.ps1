@@ -16,7 +16,7 @@ foreach($task in @('DevConfigBackup-Local','DevConfigBackup-Drive-Daily','WeChat
 Check ($setup-match 'RestartCount 3' -and $setup-match 'RestartCount 5' -and $setup-match 'RunOnlyIfNetworkAvailable') 'Task retry and network-specific availability remain'
 foreach($name in @('Backup-DevConfig-Hidden.vbs','Backup-WeChat-Hidden.vbs')){$t=Get-Content (Join-Path $RepoRoot $name) -Raw;Check ($t-match 'WScript.Quit exitCode' -and $t-match 'shell.Run\(command, 0, True\)') 'Hidden launcher preserves actual exit code'}
 $cfg=Import-PowerShellDataFile (Join-Path $RepoRoot 'sources.psd1')
-Check ('sessions'-in $cfg.HistoryDirs -and 'logs_2.sqlite*'-in $cfg.HistoryFiles) 'Default history exclusions are retained'
+Check ('sessions'-in $cfg.HistoryDirs -and 'logs_2.sqlite*'-in $cfg.HistoryFiles -and 'thread_history_*.sqlite*'-in $cfg.HistoryFiles) 'Default history exclusions are retained'
 Check ('.env'-in $cfg.ExcludeFiles -and 'auth.json'-in $cfg.ExcludeFiles) 'Named credential exclusions remain; this is not a whole-package secret scan'
 Check ('home/.codex/.sandbox-bin'-in $cfg.ExcludeRelativePaths) 'ACL-locked ephemeral Codex sandbox binaries are excluded by exact relative path'
 Check ('home/.codex/aicli-background-children'-in $cfg.ExcludeRelativePaths) 'Runtime AICLI child leases are excluded by exact relative path'

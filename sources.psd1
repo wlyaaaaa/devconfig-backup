@@ -152,7 +152,11 @@
 
     # 历史数据库文件（默认排除；-IncludeHistory 时保留）
     HistoryFiles = @(
-        'logs_2.sqlite*'
+        'logs_2.sqlite*',
+        # Codex thread history is conversation history; the Codex conversation
+        # backup captures it from a VSS snapshot. Copied live it changes while
+        # being hashed and fails the whole DevConfig run.
+        'thread_history_*.sqlite*'
     )
 
     # 自定义计划任务白名单（通配匹配 TaskName）
