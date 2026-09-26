@@ -1,32 +1,15 @@
-# DevConfig Backup Agent Rules
+# 开发配置备份的项目约定
 
-This repository is public-safe backup tooling for DevConfig and WeChat backup automation. Keep it as a tool repository, not a second configuration and recovery center.
-
-## Ownership Boundary
-
-- `E:\PCConfig` is the machine configuration and recovery center. It owns machine facts, path inventory, scheduled task meaning, restore order, migration gates, and private configuration recovery runbooks.
-- `E:\GitHub总索引` owns GitHub repository identity, visibility, branch state, push policy, and public-safe synchronization records.
-- This repository owns only the backup scripts, source selection rules, hidden launchers, focused tests, and tool-local documentation for DevConfig and WeChat backup flows.
-- When a change affects paths, scheduled tasks, restore semantics, local data sources, drive targets, rclone behavior, or migration state, update or consult PCConfig instead of duplicating those facts here.
-
-## Public Boundary
-
-- Treat this repository as public-safe backup tooling even if GitHub visibility changes later.
-- Do not commit real backup data, expanded staging content, raw credentials, secret values, chat databases, private logs, screenshots, or machine recovery dumps.
-- Keep generated backup directories out of Git: `out/`, `staging/`, `state/`, and `logs/`.
-- Keep backup and secret container files out of Git: `*.zip`, `*.7z`, `*.reg`, `*.kdbx`, `*.pfx`, `*.pem`, `*.key`, and `.env` files.
-- Keep WeChat restore materials out of Git: SQLCipher keys, `xwechat_files`, `db_storage`, message databases, media backups, and extracted chat content.
-
-## Change Rules
-
-- Prefer editing `sources.psd1` for backup source selection changes before changing script logic.
-- Keep PowerShell scripts compatible with Windows PowerShell 5.1 unless a wrapper explicitly chooses PowerShell 7.
-- PowerShell scripts containing non-ASCII constants must be saved as UTF-8 with BOM.
-- Before finishing a change, run the focused tests under `tests/` and a parse check for changed PowerShell scripts.
-- If a test or script needs current machine facts, read them from PCConfig or the owning runtime instead of copying private state into this repository.
-
-## Verification
-
-- Run `powershell -NoProfile -ExecutionPolicy Bypass -File tests\Assert-NoBackupArtifacts.ps1` before staging changes.
-- Run the relevant focused test for the area changed, such as `tests\Assert-DockerScope.ps1` or `tests\Assert-HDriveSafety.ps1`.
-- Before any push while the repository remains public, verify that `git ls-files` contains no backup artifacts or secret containers.
+- 本库是可公开的备份工具（public-safe backup tooling），负责脚本、来源选择、隐藏入口和测试；PCConfig 是机器配置与恢复中心（configuration and recovery center），负责路径、计划任务和恢复顺序。
+- 真实备份、微信数据库与媒体、凭据和原始日志不入 Git。生成区 `out/`、`staging/`、`state/`、`logs/` 以及 `*.zip`、`*.7z`、`*.reg`、`*.kdbx`、`*.pfx`、`*.pem`、`*.key`、`.env` 保持排除。
+- 配置来源先改 `sources.psd1`，微信来源改 `wechat-sources.psd1`；PowerShell 脚本兼容 Windows PowerShell 5.1，入口明确选择 PowerShell 7 的除外。
+- `RequiredSources` 不可读须失败；未安装的可选软件与离线、拒绝访问、读取失败不同。当前文件锁只按精确路径排除，不能全局排除 `*.lock`。
+- 采集普通文件遇占用或拒绝访问，有界重试后可跳过并报告 `complete_with_skipped_files`；必要来源失败、其他读取错误或持续变化不能报成功。运行中源的后续修改另列，不能声称同一时刻的完整快照。
+- 配置包要经压缩包检测、清单与哈希核验后发布；G 和云端独立报告结果。失败保留原成功版本，内容与策略未变时复用已验证包，不为了刷新时间重复上传。
+- 微信保留数据库的 WAL/SHM/journal 伴随文件。云端上传只消费 G 的已核验 VSS（卷影快照）版本，默认最多 48 小时；不能改成直接读活动微信目录或在 E 再存一份。
+- 默认传输上限为 8G，显式 `0` 才取消。`-DbOnly` 不删除媒体，也不算新完成的全量恢复包。复制后按相同过滤范围清理并完整比对，离线或不可读来源不能触发删除。
+- 云端使用已选远端 binding；缺失或损坏就失败，不回退到第一个账号。代理状态与脚本实际退出码分别处理。
+- 备份收集到的配置仍可能含凭据，排除几个文件名不代表整个包可公开。恢复不自动导入注册表、覆盖软件配置或恢复登录；微信文件复制完成后仍需官方客户端确认。
+- 本库不直接自动写 H；监控安装保留已有启用状态，新建默认禁用。正式任务、网络和恢复接口见 [docs/recovery.md](docs/recovery.md)。
+- 根 README 末尾保留现有测试读取的两条恢复接口说明；正文入口和这些接口应同步维护。
+- 运行 `tests/Assert-NoBackupArtifacts.ps1` 和受影响的 `tests/Assert-*.ps1`。测试只用专属临时目录；语法、隔离测试、正式任务、真实云端、H 介质和客户端验收分别报告。
