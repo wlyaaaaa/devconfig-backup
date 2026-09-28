@@ -174,7 +174,14 @@
         'home/.gemini/antigravity-cli/knowledge',
         'home/.gemini/antigravity-cli/conversation_summaries.db',
         'home/.gemini/antigravity-cli/history.jsonl',
-        'home/.gemini/antigravity-cli/jetbox_summaries_proto.pb'
+        'home/.gemini/antigravity-cli/jetbox_summaries_proto.pb',
+        # Codex 对话内容只由 G/H 的 Codex 对话备份负责，不随配置包上云盘
+        # （决定：9 月 29 日“Codex 对话不随配置包上云盘”）；设置、技能、扩展记忆和状态库照带。
+        'home/.codex/thread-backups',
+        'home/.codex/attachments',
+        'home/.codex/generated_images',
+        'home/.codex/visualizations',
+        'home/.codex/dictation-history'
     )
 
     # 历史/对话日志目录名（默认排除；-IncludeHistory 时保留）

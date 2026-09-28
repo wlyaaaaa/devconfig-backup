@@ -64,7 +64,12 @@ $forbidden = @($paths | Where-Object {
     $_ -like 'home/.gemini/antigravity-cli/implicit/*' -or
     $_ -like 'home/.gemini/antigravity-cli/annotations/*' -or
     $_ -like 'home/.gemini/antigravity-cli/brain/*' -or
-    $_ -like 'home/.gemini/antigravity-cli/knowledge/*'
+    $_ -like 'home/.gemini/antigravity-cli/knowledge/*' -or
+    $_ -like 'home/.codex/thread-backups/*' -or
+    $_ -like 'home/.codex/attachments/*' -or
+    $_ -like 'home/.codex/generated_images/*' -or
+    $_ -like 'home/.codex/visualizations/*' -or
+    $_ -like 'home/.codex/dictation-history/*'
 })
 if ($missing.Count -or $missingMemory.Count -or $emptyTrees.Count -or $forbidden.Count) {
     throw ("first_ai_backup_scope_mismatch: missing_core={0}, missing_memories={1}, empty_trees={2}, forbidden={3}" -f
