@@ -52,23 +52,23 @@ function New-TestDefinitions {
     @(
         [pscustomobject]@{
             Name = 'DevConfigBackup-Local'; Action = New-TestAction 'Local,Hot'; Principal = $principal
-            Triggers = @((New-TestTrigger 'daily' '21:05'), (New-TestTrigger 'logon' '' 'test-user' '' 'PT20M'))
+            Triggers = @((New-TestTrigger 'daily' '23:05'), (New-TestTrigger 'logon' '' 'test-user' '' 'PT20M'))
             Settings = New-TestSettings $false 3 2 10; Description = 'local'
         },
         [pscustomobject]@{
             Name = 'DevConfigBackup-Drive-Daily'; Action = New-TestAction 'Drive'; Principal = $principal
-            Triggers = @((New-TestTrigger 'daily' '22:00'))
+            Triggers = @((New-TestTrigger 'daily' '00:00'))
             Settings = New-TestSettings $true 3 3 15; Description = 'drive'
         },
         [pscustomobject]@{
             Name = 'WeChatBackup-Hot-Daily'; Action = New-TestAction 'Hot'; Principal = $weChatHotPrincipal
-            Triggers = @((New-TestTrigger 'daily' '18:30'))
-            Settings = New-TestSettings $false 3 4 15; Description = 'wechat-hot'
+            Triggers = @((New-TestTrigger 'daily' '20:30'))
+            Settings = New-TestSettings $false 3 3 15; Description = 'wechat-hot'
         },
         [pscustomobject]@{
             Name = 'WeChatBackup-Drive-Weekly'; Action = New-TestAction 'Drive'; Principal = $principal
-            Triggers = @((New-TestTrigger 'weekly' '20:00' '' 'Sunday'))
-            Settings = New-TestSettings $true 5 8 30; Description = 'wechat-drive'
+            Triggers = @((New-TestTrigger 'weekly' '22:00' '' 'Sunday'))
+            Settings = New-TestSettings $true 3 4 30; Description = 'wechat-drive'
         }
     )
 }
@@ -306,7 +306,7 @@ try {
     Assert-Condition ($mockLocal.Triggers.Count -eq 2 -and $mockLocal.Triggers[1].Delay -eq 'PT20M') 'Local task triggers changed.'
     Assert-Condition ($mockDrive.Settings.RunOnlyIfNetworkAvailable -and $mockDrive.Settings.RestartCount -eq 3) 'Drive task settings changed.'
     Assert-Condition ($mockWeChatHot.Settings.RestartCount -eq 3 -and -not $mockWeChatHot.Settings.RunOnlyIfNetworkAvailable) 'WeChat hot task settings changed.'
-    Assert-Condition ($mockWeChatDrive.Triggers[0].Type -eq 'weekly' -and $mockWeChatDrive.Triggers[0].DaysOfWeek -eq 'Sunday' -and $mockWeChatDrive.Settings.RestartCount -eq 5) 'WeChat Drive schedule or retry settings changed.'
+    Assert-Condition ($mockWeChatDrive.Triggers[0].Type -eq 'weekly' -and $mockWeChatDrive.Triggers[0].DaysOfWeek -eq 'Sunday' -and $mockWeChatDrive.Settings.RestartCount -eq 3 -and $mockWeChatDrive.Settings.ExecutionTimeLimit -eq [TimeSpan]::FromHours(4)) 'WeChat Drive schedule or retry settings changed.'
     foreach ($task in @($mockLocal, $mockDrive, $mockWeChatHot, $mockWeChatDrive)) {
         $expectedRunLevel = if ($task.TaskName -eq 'WeChatBackup-Hot-Daily') { 'Highest' } else { 'Limited' }
         Assert-Condition ($task.Principal.UserId -eq $env:USERNAME -and $task.Principal.LogonType -eq 'Interactive' -and $task.Principal.RunLevel -eq $expectedRunLevel) 'Task principal changed.'

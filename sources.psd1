@@ -36,6 +36,7 @@
     # 目录根本身不受 ExcludeDirs/HistoryDirs 名称过滤，用来补回被通用排除名误伤的配置。
     HomePreciseDirs = @(
         '.docker\contexts',
+        '.config\opencode',
         # Codex 记忆的扩展笔记（全局排除名 extensions 会漏掉它）
         '.codex\memories\extensions',
         # Antigravity 项目与插件登记（全局排除名 projects、plugins 会漏掉它们）
@@ -59,6 +60,17 @@
         '.copilot',
         '.cagent',
         '.agents'
+    )
+
+    # 这台机器的核心 AI 配置与记忆来源；整段消失不能算作「未安装的可选软件」。
+    # 其他来源仍可选；已存在却拒绝访问或读取失败也会使采集失败。
+    RequiredSources = @(
+        'home/.codex',
+        'home/.codex/memories/extensions',
+        'home/.claude',
+        'home/.gemini',
+        'home/.gemini/antigravity/antigravity_state.pbtxt',
+        'home/.config/opencode'
     )
 
     # AppData\Roaming 下目录
@@ -153,7 +165,16 @@
         'home/.codex/aicli-background-children',
         # Clash Verge holds a byte-range lock on its single-instance guard while running;
         # the zero-length marker is runtime coordination state, not configuration.
-        'appdata-roaming/io.github.clash-verge-rev.clash-verge-rev/singleton-instance.lock'
+        'appdata-roaming/io.github.clash-verge-rev.clash-verge-rev/singleton-instance.lock',
+        # Antigravity CLI 的设置与 MCP 连接保留；对话、标注和知识不属于配置。
+        'home/.gemini/antigravity-cli/conversations',
+        'home/.gemini/antigravity-cli/implicit',
+        'home/.gemini/antigravity-cli/annotations',
+        'home/.gemini/antigravity-cli/brain',
+        'home/.gemini/antigravity-cli/knowledge',
+        'home/.gemini/antigravity-cli/conversation_summaries.db',
+        'home/.gemini/antigravity-cli/history.jsonl',
+        'home/.gemini/antigravity-cli/jetbox_summaries_proto.pb'
     )
 
     # 历史/对话日志目录名（默认排除；-IncludeHistory 时保留）

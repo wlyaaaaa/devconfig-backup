@@ -19,7 +19,7 @@ function Get-DevConfigSourceInventory {
   catch [IO.DirectoryNotFoundException]{$present=$false}
   if(-not $present){
    $volume=[IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Source));$null=[IO.Directory]::GetFileSystemEntries($volume)
-   if($required){throw 'required_backup_source_missing'}
+   if($required){throw ('required_backup_source_missing: '+$Relative)}
    $sources.Add([pscustomobject]@{id=$Relative;status='optional_absent';required=$required});return
   }
   if($IsDirectory-ne (($attributes-band [IO.FileAttributes]::Directory)-ne 0)){throw 'backup_source_type_changed'}

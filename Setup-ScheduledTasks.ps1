@@ -2,27 +2,28 @@
 .SYNOPSIS
   注册 DevConfig + WeChat 备份的计划任务（幂等，可重复运行）。
 .DESCRIPTION
-  - DevConfigBackup-Local        : 每天 21:05 + 登录后20分钟 -> -Tier Local,Hot（本地包+G盘热备）
-  - DevConfigBackup-Drive-Daily  : 每天 22:00               -> -Tier Drive（Google Drive）
-  - WeChatBackup-Hot-Daily       : 每天 18:30               -> -Target Hot（G盘热备）
-  - WeChatBackup-Drive-Weekly    : 每周日 20:00             -> -Target Drive（Google Drive）
+  - DevConfigBackup-Local        : 每天 23:05 + 登录后20分钟 -> -Tier Local,Hot（本地包+G盘热备）
+  - DevConfigBackup-Drive-Daily  : 每天 00:00               -> -Tier Drive（Google Drive）
+  - WeChatBackup-Hot-Daily       : 每天 20:30               -> -Target Hot（G盘热备）
+  - WeChatBackup-Drive-Weekly    : 每周日 22:00             -> -Target Drive（Google Drive）
+  上述是当前机器的本地时刻；换机后以 PCConfig 登记的北京时间日程为准。
   说明: 本地/G 热备与 Drive 拆成独立任务，离线不会阻断本地保护，Drive 失败会返回非零并自动重试。
   H盘是默认锁定的人工冷备，不注册自动写入任务；Drive 依靠 rclone copy 自动跳过已存在文件。
   DevConfig/Drive/WeChat Drive 保持当前用户 Limited；WeChat Hot 使用同一用户、Interactive、Highest，以便创建 Windows VSS 快照。实际注册/提权仍由 PCConfig 负责。
   可用 -TaskName 只收敛一个已登记任务；省略时保持四项任务的默认安装语义。
 .NOTES
   计划任务动作固定走 wscript.exe + VBS hidden launcher，避免 PowerShell 窗口一闪而过。
-  VBS 内部仍使用 Windows PowerShell 5.1 执行业务脚本，脚本本身兼容 5.1 与 7。
+  VBS 优先使用 PowerShell 7，缺少时回退 Windows PowerShell 5.1。
   重装新机后：先跑一次 Backup-DevConfig.ps1 -Tier Local 生成 latest.zip，再运行本脚本。
 #>
 [CmdletBinding()]
 param(
-    [string] $DailyAt  = '21:05',
-    [string] $DriveAt  = '22:00',
-    [string] $WeChatHotAt = '18:30',
+    [string] $DailyAt  = '23:05',
+    [string] $DriveAt  = '00:00',
+    [string] $WeChatHotAt = '20:30',
     [ValidateSet('Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday')]
     [string] $WeChatDriveWeeklyDay = 'Sunday',
-    [string] $WeChatDriveWeeklyAt = '20:00',
+    [string] $WeChatDriveWeeklyAt = '22:00',
     [ValidateSet('DevConfigBackup-Local','DevConfigBackup-Drive-Daily','WeChatBackup-Hot-Daily','WeChatBackup-Drive-Weekly')]
     [string[]] $TaskName = @()
 )
@@ -61,15 +62,15 @@ $sDrive = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvai
 
 $sWeChatHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 15)
 
 $sWeChatDrive = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 8) `
-    -RestartCount 5 -RestartInterval (New-TimeSpan -Minutes 30)
+    -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
+    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 30)
 
-# ① 本地 + G 热备：每天21:05 + 登录后20分钟（桌面机错过晚间窗口时补一份；不走海外流量）
+# ① 本地 + G 热备：每天23:05 + 登录后20分钟（桌面机错过晚间窗口时补一份；不走海外流量）
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $logonTrigger.Delay = 'PT20M'
 
@@ -104,7 +105,7 @@ $taskDefinitions = @(
         Action = New-Action $wxWrapper 'Drive'
         Principal = $principal
         Settings = $sWeChatDrive
-        Description = '微信聊天记录：每周增量到Drive（有网才跑·失败重试5次）'
+        Description = '微信聊天记录：每周增量到Drive（有网才跑·失败重试3次）'
     }
 )
 
@@ -183,4 +184,4 @@ $registeredTasks = foreach ($name in $registration.Names) {
     Get-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction Stop
 }
 $registeredTasks | Format-Table TaskName, State -AutoSize
-Write-Host "验证：Start-ScheduledTask DevConfigBackup-Local; (Get-ScheduledTaskInfo DevConfigBackup-Local).LastTaskResult  # 0=成功"
+Write-Host "下一次自然运行后核对：(Get-ScheduledTaskInfo DevConfigBackup-Local).LastTaskResult  # 0=成功"
