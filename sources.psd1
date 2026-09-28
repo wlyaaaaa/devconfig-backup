@@ -25,12 +25,22 @@
         '.docker\windows-daemon.json',
         '.docker\mcp\config.yaml',
         '.docker\mcp\registry.yaml',
-        '.docker\mcp\tools.yaml'
+        '.docker\mcp\tools.yaml',
+        # Antigravity 桌面版状态与设置（~/.gemini/antigravity 其余是对话、brain、缓存和程序，整体仍排除）
+        '.gemini\antigravity\antigravity_state.pbtxt',
+        # OpenCode 自定义插件（全局排除名 plugins 会漏掉它）
+        '.config\opencode\plugins\huihui-backend.js'
     )
 
     # home 下精确目录（保留相对路径，避免整目录拷入二进制/缓存/会话）
+    # 目录根本身不受 ExcludeDirs/HistoryDirs 名称过滤，用来补回被通用排除名误伤的配置。
     HomePreciseDirs = @(
-        '.docker\contexts'
+        '.docker\contexts',
+        # Codex 记忆的扩展笔记（全局排除名 extensions 会漏掉它）
+        '.codex\memories\extensions',
+        # Antigravity 项目与插件登记（全局排除名 projects、plugins 会漏掉它们）
+        '.gemini\config\projects',
+        '.gemini\config\plugins'
     )
 
     # home 下目录（整目录拷入，按 ExcludeDirs/ExcludeFiles 剔除缓存/插件）
@@ -40,7 +50,6 @@
         '.claude',
         '.codex',
         '.gemini',
-        '.openclaw',
         '.cline',
         '.cursor',
         '.lingma',
@@ -78,7 +87,10 @@
         'Docker Desktop\versions.json',
         'Docker Desktop\notifications.json',
         'obs-studio\global.ini',
-        'obs-studio\user.ini'
+        'obs-studio\user.ini',
+        # OpenCode 桌面版设置（外观、快捷键、权限、通知）和首次启动标记；不带草稿库、会话布局和缓存
+        'ai.opencode.desktop\default.dat',
+        'ai.opencode.desktop\opencode.settings'
     )
 
     # AppData\Local 下目录（精确子目录，避开 GB 级缓存/安装目录）
@@ -162,7 +174,7 @@
     # 自定义计划任务白名单（通配匹配 TaskName）
     ScheduledTaskPatterns = @(
         'AutoDigitalBackupToG', 'AgentsHotMirror-Daily', 'Scripts_AutoPush', 'RAMDisk_Code_Backup',
-        'TimeAudit*', 'OpenClaw*', 'WeFlow*', 'natpierce*',
+        'TimeAudit*', 'WeFlow*', 'natpierce*',
         'Cloud', 'GCC', 'ModifyLinkUpdate', 'CleanupOrphanedMillennium'
     )
 
