@@ -45,6 +45,10 @@ pwsh -File Restore-WeChat.ps1 -BackupRoot 'X:\backup\xwechat_files' -Target 'E:\
 
 ## 单文件警告与旧副本
 
+配置采集对来源选择集合变化进行整轮重新采集：每轮重新扫描、复制到独立候选目录、导出元数据、重扫复核，默认最多 3 轮。`-CaptureAttempts` 可在 1—10 之间调整；耗尽时保持失败，旧成功指针、G 包和保留策略不变。回执的 `capture_attempt_count`、`capture_max_attempts`、`capture_retry_history` 与 `failure_stage` 给出阶段和增删条目计数，不记录内容。单文件消失若在重采后稳定缺失，仍保留本轮 `source_disappeared` 警告以保护旧包；同路径文件捕获后再修改继续用 `changed_after_capture_count` 说明逐文件快照，不新增全轮失败条件，也不声称同一时刻快照。
+
+`sources.psd1` 仅精确排除 Claude 的 `file-history`、`debug`、`paste-cache`、`image-cache`、`session-env`、`shell-snapshots`、`usage-data` 子树。官方 [Claude 目录说明](https://code.claude.com/docs/en/claude-directory#application-data) 将它们列为会话检查点、缓存或运行数据；它们不用于恢复配置。settings、skills、agents、commands、plans 与必要来源继续保留，不全局排除 `*.lock`。
+
 微信树和开发配置采集遇到 Win32 225/226（HRESULT `0x800700E1` / `0x800700E2`），或已枚举的源文件在扫描、哈希、复制、复核中消失，只跳过这一文件，其余继续完成。整体回执保持 `status=complete`，并在 `file_warnings` 中逐项记录相对路径、`reason`、`error_code`、`stage`。原因值是 `antivirus_blocked`、`antivirus_removed` 或 `source_disappeared`。下次自然运行重新尝试，不持久排除这些路径，也不修改防病毒设置。
 
 目标复制后消失，须只读匹配本轮同一精确路径的 Defender 1117 成功隔离/移除动作，才能记为 `antivirus_removed`；普通缺失、写盘失败、哈希不一致、来源根不可读和配置错误仍失败。配置文件的原有占用/ACL 跳过规则继续使用 `complete_with_skipped_files`。
@@ -54,6 +58,8 @@ pwsh -File Restore-WeChat.ps1 -BackupRoot 'X:\backup\xwechat_files' -Target 'E:\
 树清单的 `verification_scope=selected_files_excluding_file_warnings` 明确表示校验范围。完整性复核和微信 Drive/补传监控采用相同警告范围；云端的旧副本也不因这些排除路径被删除。成功回执、清单、配置包指针和 `Backup-Status.ps1 -Json` 均携带同名字段；人类状态页显示路径、错误码和阶段，汇总状态是 `receipts_current_with_file_warnings`。这表示其余文件完成，警告文件没有新的完整性承诺，恢复时先查看清单与旧副本。
 
 Defender 动作编号 2/3 对应隔离/移除，依据 [Microsoft MPTHREAT_ACTION 文档](https://learn.microsoft.com/en-us/windows/win32/lwef/mpthreat-action)。验证使用 `tests/Assert-FileWarningResilience.ps1` 的合成目录和故障注入，不使用病毒样本或 EICAR 文件。
+
+微信 Drive 与补传监控通过共用 `Get-BackupRcloneWarningFilters` 按字面转义警告路径，保留 `[]`、`{}` 等文件名字符的真实含义。过滤规则统一采用 `--filter` 并固定到来源根，依据 [rclone 官方过滤语法](https://rclone.org/filtering/#pattern-syntax)，健康文件不会因警告路径被当成通配符而漏掉复制或核对。
 
 ## 任务、网络和 H 冷备
 

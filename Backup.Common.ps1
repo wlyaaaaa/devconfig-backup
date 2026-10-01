@@ -83,6 +83,11 @@ function Open-BackupResourceLock([string]$Resource){
  try{return [IO.File]::Open(($path+'.backup.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}catch [IO.IOException]{throw 'backup_resource_busy'}
 }
 function Test-BackupNameExcluded([string]$Name,[string[]]$Patterns=@()){foreach($pattern in $Patterns){if($Name-like $pattern){return $true}};return $false}
+function Test-BackupRelativePathExcluded([string]$Path,[string[]]$Patterns=@()){
+ if(-not $Patterns.Count){return $false}
+ $candidate=$Path.Replace('\','/').TrimEnd('/')
+ while($candidate){if(Test-BackupNameExcluded $candidate $Patterns){return $true};$index=$candidate.LastIndexOf('/');if($index-lt 0){break};$candidate=$candidate.Substring(0,$index)};return $false
+}
 function Get-BackupEntryAttributes([string]$Path){return [IO.File]::GetAttributes($Path)}
 function Get-BackupFileWarning {
  param($ErrorRecord,[string]$RelativePath,[string]$Stage,[switch]$AllowSourceDisappeared)
@@ -106,6 +111,15 @@ function Add-BackupFileWarning($Warnings,$Warning){
 }
 function Test-BackupWarningPath([string]$RelativePath,$Warnings){
  foreach($warning in @($Warnings)){$path=[string]$warning.relative_path;if($path -and ($RelativePath-ieq $path -or $RelativePath.StartsWith($path.TrimEnd('/')+'/',[StringComparison]::OrdinalIgnoreCase))){return $true}};return $false
+}
+function ConvertTo-BackupRcloneLiteralPath([string]$RelativePath){
+ $path=$RelativePath.Replace('\','/').TrimEnd('/')
+ if([string]::IsNullOrWhiteSpace($path) -or $path.StartsWith('/') -or $path-match '(^|/)\.\.(/|$)|[\r\n]'){throw 'backup_warning_path_invalid'}
+ # rclone glob syntax uses backslash to escape reserved characters, even on Windows.
+ return '/'+[regex]::Replace($path,'([*?\[\]{}])','\$1')
+}
+function Get-BackupRcloneWarningFilters($Warnings){
+ $result=@();foreach($warning in @($Warnings|Where-Object{$_})){$literal=ConvertTo-BackupRcloneLiteralPath $warning.relative_path;$result+=@('--filter',('- '+$literal),'--filter',('- '+$literal+'/**'))};return $result
 }
 function Get-BackupInventoryWithoutWarnings($Inventory,$Warnings){
  return [pscustomobject]@{directories=@($Inventory.directories|Where-Object{-not (Test-BackupWarningPath $_ $Warnings)});files=@($Inventory.files|Where-Object{-not (Test-BackupWarningPath $_.relative_path $Warnings)})}
@@ -173,7 +187,7 @@ function Get-BackupTreeInventory {
    if(($isDirectory -and (Test-BackupNameExcluded $name $ExcludeDirs)) -or (-not $isDirectory -and (Test-BackupNameExcluded $name $ExcludeFiles))){$excluded++;continue}
    if(($attr-band [IO.FileAttributes]::ReparsePoint)-ne 0){if($SkipReparsePoints){$excluded++;continue};throw 'backup_unhandled_source_reparse'}
    if($relative-match '[\r\n|]'){throw 'backup_unsupported_path_character'}
-   if(Test-BackupNameExcluded $logical $ExcludeRelativePaths){$excluded++;continue}
+   if(Test-BackupRelativePathExcluded $logical $ExcludeRelativePaths){$excluded++;continue}
    if($isDirectory){$directories.Add($relative);$pending.Push($path);continue}
    try{$item=[IO.FileInfo]::new($path);$item.Refresh();$null=$item.Length;$digest=if($Hash){Get-BackupStableFileHash $path}else{$null}}catch{
     if($null-eq $FileWarnings){throw};$stage=if($Hash){'hash'}else{'scan'};$warning=if($null-ne $DestinationSince){Get-BackupDestinationWarning $_ $path $logical $stage $DestinationSince}else{Get-BackupFileWarning $_ $logical $stage -AllowSourceDisappeared:$AllowSourceDisappeared};if(-not $warning){throw};Add-BackupFileWarning $FileWarnings $warning;continue

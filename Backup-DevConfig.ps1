@@ -15,6 +15,7 @@ param(
  [switch]$Plan,[switch]$Json,[string]$ProfileRoot=$env:USERPROFILE,
  [string]$SourcesFile='',[string]$OutputRoot='',
  [string]$SevenZipPath='E:\Scoop\shims\7z.exe',[switch]$SkipSystemExport,
+ [ValidateRange(1,10)][int]$CaptureAttempts=3,
  [ValidateSet('ServerCopy','Upload')][string]$CloudLatestMode='ServerCopy'
 )
 if(-not $SourcesFile){$SourcesFile=Join-Path $PSScriptRoot 'sources.psd1'}
@@ -93,16 +94,21 @@ function Push-Drive($Pack){
 function New-DevConfigCandidate([string]$Container){
  $pendingAv=$null
  try{$oldPack=Get-VerifiedDevConfigPackage $OutDir -MetadataOnly;$oldManifest=Read-BackupJson ($oldPack.Zip+'.manifest.json') -Required;$pendingAv=[pscustomobject]@{files=@();file_warnings=@($oldManifest.file_warnings|Where-Object{$_ -and $_.reason-in @('antivirus_blocked','antivirus_removed')})}}catch{}
- $stage=Join-Path $Container 'payload';$inventory=Get-DevConfigSourceInventory $cfg $ProfileRoot -IncludeHistory:$IncludeHistory -KnownInventory $pendingAv
- Copy-DevConfigSourceInventory $inventory $stage
+ $preparation=[pscustomobject]@{file_warnings=$null}
+ $prepare={
+  param($candidateStage)
+  $preparation.file_warnings=[Collections.Generic.List[object]]::new()
+  $script:run.optional_tools_absent=@(if($SkipSystemExport){'system_export_explicitly_skipped'}else{Invoke-DevConfigSystemExport $cfg $candidateStage $preparation.file_warnings $pendingAv.file_warnings})
+  $binding=Join-Path $StateDir 'rclone-remote-binding.json'
+  if([IO.File]::Exists($binding)){$null=Copy-RcloneRemoteBindingToManifest -BindingPath $binding -ManifestDirectory (Join-Path $candidateStage '_manifests')}
+ }
+ try{$capture=Invoke-DevConfigSourceCapture $cfg $ProfileRoot $Container -IncludeHistory:$IncludeHistory -KnownInventory $pendingAv -MaxAttempts $CaptureAttempts -PostCapture $prepare}catch{
+  $script:run.capture_attempt_count=[int]$_.Exception.Data['backup_capture_attempt_count'];$script:run.capture_retry_history=@($_.Exception.Data['backup_capture_retry_history']|Where-Object{$_});throw
+ }
+ $stage=$capture.stage;$inventory=$capture.inventory;$captureChanges=$capture.changed_after_capture_count
+ $script:run.capture_attempt_count=$capture.attempt_count;$script:run.capture_retry_history=$capture.retry_history
  $skipped=@($inventory.skipped_files|Select-Object relative_path,reason);$script:run.skipped_file_count=$skipped.Count;$script:run.skipped_files=$skipped
- $exportWarnings=[Collections.Generic.List[object]]::new()
- $script:run.optional_tools_absent=@(if($SkipSystemExport){'system_export_explicitly_skipped'}else{Invoke-DevConfigSystemExport $cfg $stage $exportWarnings $pendingAv.file_warnings})
- $binding=Join-Path $StateDir 'rclone-remote-binding.json'
- if([IO.File]::Exists($binding)){$null=Copy-RcloneRemoteBindingToManifest -BindingPath $binding -ManifestDirectory (Join-Path $stage '_manifests')}
- $again=Get-DevConfigSourceInventory $cfg $ProfileRoot -IncludeHistory:$IncludeHistory -KnownInventory $inventory
- $captureChanges=Test-DevConfigSelectionAfterCapture $inventory $again
- $warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($inventory.file_warnings)+@($exportWarnings)){Add-BackupFileWarning $warnings $warning}
+ $warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($inventory.file_warnings)+@($preparation.file_warnings)){Add-BackupFileWarning $warnings $warning}
  foreach($file in $inventory.files){
   if(Test-BackupWarningPath $file.relative_path $warnings){continue};$target=Join-Path $stage $file.relative_path
   try{if((Get-BackupStableFileHash $target)-cne $file.sha256){throw 'backup_copy_hash_mismatch'}}catch{
@@ -146,7 +152,7 @@ if($Plan){
  if($Json){$result|ConvertTo-Json -Depth 8}else{[pscustomobject]$result|Format-List};exit 0
 }
 $script:overallExitCode=0;$outLease=$null;$pin=$null;$container=$null;$pack=$null
-$script:run=[ordered]@{schema='devconfig.run.v2';run_id=[guid]::NewGuid().ToString('N');status='running';started_utc=(Get-BackupUtc);completed_utc=$null;tiers=$Tier;collection='not_requested';package='not_requested';hot='not_requested';drive='not_requested';retention='not_requested';failure=$null;skipped_file_count=0;skipped_files=@();file_warnings=@();optional_tools_absent=@();application_recovery='not_tested'}
+$script:run=[ordered]@{schema='devconfig.run.v2';run_id=[guid]::NewGuid().ToString('N');status='running';started_utc=(Get-BackupUtc);completed_utc=$null;tiers=$Tier;collection='not_requested';package='not_requested';hot='not_requested';drive='not_requested';retention='not_requested';failure=$null;skipped_file_count=0;skipped_files=@();file_warnings=@();optional_tools_absent=@();capture_attempt_count=0;capture_max_attempts=$CaptureAttempts;capture_retry_history=@();application_recovery='not_tested'}
 $runPath=Join-Path $StateDir ('devconfig-'+$(if($Tier.Count-eq 1 -and $Tier[0]-eq 'Drive'){'drive'}else{'local'})+'-last.json')
 try{
  Write-BackupJsonAtomic $runPath $run
@@ -172,6 +178,7 @@ try{
  $run.status=if($script:overallExitCode-ne 0){'failed'}elseif($run.skipped_file_count-gt 0){'complete_with_skipped_files'}else{'complete'}
 }catch{
  $script:overallExitCode=1;$run.status='failed';$run.failure=Get-BackupFailureCode $_;$run.failure_type=$_.Exception.GetType().Name
+ $run.failure_stage=[string]$_.Exception.Data['backup_stage']
  $run.failure_site=@($_.ScriptStackTrace-split "`n")[0]
  try{$run.failure_path=Get-BackupFailureSourcePath $_ @(@('profile',$ProfileRoot),@('output',$OutputRoot));$run.failure_io_reason=Get-BackupUnreadableReason $_.Exception}catch{$run.failure_path=$null}
  foreach($phase in @('collection','package','hot','drive','retention')){if($run[$phase]-eq 'running'){$run[$phase]='failed'}}

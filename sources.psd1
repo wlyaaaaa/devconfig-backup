@@ -1,4 +1,4 @@
-﻿@{
+@{
     # ============================================================
     # DevConfig 备份源清单（数据，非代码）
     # ~ = $env:USERPROFILE (C:\Users\10979)
@@ -156,6 +156,15 @@
     # Exact live process coordination files, not application configuration.
     # Do not exclude *.lock generally: dependency lockfiles remain recoverable.
     ExcludeRelativePaths = @(
+        # Claude 的文件检查点、缓存、会话环境与调试日志不是恢复配置；
+        # 精确排除这些子树，保留 settings、skills、agents、commands 等真实配置。
+        'home/.claude/file-history',
+        'home/.claude/debug',
+        'home/.claude/paste-cache',
+        'home/.claude/image-cache',
+        'home/.claude/session-env',
+        'home/.claude/shell-snapshots',
+        'home/.claude/usage-data',
         'appdata-roaming/WhirlwindFX/SignalRgb/QtWebEngine/*/Local Storage/leveldb/LOCK',
         'home/.gemini/antigravity-cli/presence/*.lock',
         # Codex-managed sandbox executables are ephemeral and intentionally ACL-locked;

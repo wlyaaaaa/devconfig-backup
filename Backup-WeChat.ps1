@@ -40,9 +40,9 @@ Assert-BackupPathsIndependent $LocalRoot $HotRoot
 # A custom Hot root may not read or write a receipt at the production G location.
 $script:HotReceiptFile=if($PSBoundParameters.ContainsKey('HotRoot') -and -not $PSBoundParameters.ContainsKey('HotReceiptPath')){$HotRoot+'.hot-receipt.json'}else{$HotReceiptPath}
 function Get-WeChatCloudFilter {
-    $result=@();foreach($warning in @($script:WeChatFileWarnings)){$result+=@('--filter',('- /'+$warning.relative_path), '--filter',('- /'+$warning.relative_path.TrimEnd('/')+'/**'))}
+    $result=@(Get-BackupRcloneWarningFilters $script:WeChatFileWarnings)
     if($DbOnly -and -not $DriveFull){return $result+@('--filter','+ **/db_storage/**','--filter','- *')}
-    foreach($name in $exclDirs){$result+=@('--exclude',($name+'/**'))};return $result
+    foreach($name in $exclDirs){$result+=@('--filter',('- '+$name+'/**'))};return $result
 }
 function Get-WeChatSummary {
     param($Manifest,[string]$Kind)

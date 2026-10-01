@@ -43,7 +43,7 @@ function Get-DevConfigSourceInventory {
     $path=[string]$warning.relative_path;if(-not $path.StartsWith($Relative+'/',[StringComparison]::OrdinalIgnoreCase) -or (Test-BackupWarningPath $path $warnings)){continue}
     if($path-match '(^|/)\.\.(/|$)|[\r\n|]'){throw 'backup_warning_path_invalid'}
     $tail=$path.Substring($Relative.Length+1)
-    if((Test-BackupRelativeSelection $tail $excludeDirs $excludeFiles) -and -not (Test-BackupNameExcluded $path @($Config.ExcludeRelativePaths))){Add-BackupFileWarning $warnings (Get-BackupAntivirusRetryWarning $warning (Join-Path $Source $tail))}
+    if((Test-BackupRelativeSelection $tail $excludeDirs $excludeFiles) -and -not (Test-BackupRelativePathExcluded $path @($Config.ExcludeRelativePaths))){Add-BackupFileWarning $warnings (Get-BackupAntivirusRetryWarning $warning (Join-Path $Source $tail))}
    }
   }else{
    if(Test-BackupNameExcluded ([IO.Path]::GetFileName($Source)) $excludeFiles){return}
@@ -126,10 +126,53 @@ function Test-DevConfigSelectionAfterCapture($Captured,$Current){
  $currentFiles=@($rightInventory.files|Where-Object{-not $skippedPaths.ContainsKey([string]$_.relative_path)})
  $left=@(@($leftInventory.directories|ForEach-Object{'d|'+$_})+@($leftInventory.files|ForEach-Object{'f|'+$_.relative_path}))
  $right=@(@($rightInventory.directories|ForEach-Object{'d|'+$_})+@($currentFiles|ForEach-Object{'f|'+$_.relative_path}))
- if(($left-join "`n")-cne ($right-join "`n")){throw 'backup_source_selection_changed_during_collection'}
+ if(($left-join "`n")-cne ($right-join "`n")){
+  $leftSet=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$rightSet=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+  foreach($row in $left){[void]$leftSet.Add($row)};foreach($row in $right){[void]$rightSet.Add($row)}
+  $failure=[Management.Automation.RuntimeException]::new('backup_source_selection_changed_during_collection')
+  $failure.Data['backup_stage']='selection_recheck';$failure.Data['backup_selection_added_count']=@($right|Where-Object{-not $leftSet.Contains($_)}).Count;$failure.Data['backup_selection_removed_count']=@($left|Where-Object{-not $rightSet.Contains($_)}).Count;throw $failure
+ }
  $byPath=@{};foreach($file in $Captured.files){$byPath[$file.relative_path]=$file}
  $changes=0;foreach($file in $currentFiles){$old=$byPath[$file.relative_path];if($old.length-ne $file.length -or $old.mtime_ticks-ne $file.mtime_ticks){$changes++}}
  return $changes
+}
+
+function Invoke-DevConfigSourceCapture {
+ param($Config,[string]$ProfileRoot,[string]$Container,[switch]$IncludeHistory,$KnownInventory=$null,[ValidateRange(1,10)][int]$MaxAttempts=3,[scriptblock]$PostCapture)
+ $history=[Collections.Generic.List[object]]::new();$disappeared=[Collections.Generic.List[object]]::new()
+ for($attempt=1;$attempt-le $MaxAttempts;$attempt++){
+  $stage=Join-Path $Container ('payload-'+$attempt);$inventory=$null;$phase='source_scan'
+  try{
+   $inventory=Get-DevConfigSourceInventory $Config $ProfileRoot -IncludeHistory:$IncludeHistory -KnownInventory $KnownInventory
+   $phase='source_capture';Copy-DevConfigSourceInventory $inventory $stage
+   if($PostCapture){$phase='capture_metadata';& $PostCapture $stage}
+   $phase='selection_recheck';$again=Get-DevConfigSourceInventory $Config $ProfileRoot -IncludeHistory:$IncludeHistory -KnownInventory $inventory
+   $changes=Test-DevConfigSelectionAfterCapture $inventory $again
+   $gone=@($inventory.file_warnings|Where-Object{$_ -and $_.reason-ceq 'source_disappeared'})
+   foreach($warning in $gone){Add-BackupFileWarning $disappeared $warning}
+   # A vanished selected file is also a collection-set change. A fresh whole round
+   # can stabilize, while the original single-file warning protects its old package this run.
+   if($gone.Count){
+    $failure=[Management.Automation.RuntimeException]::new('backup_source_selection_changed_during_collection')
+    $failure.Data['backup_stage']=$phase;$failure.Data['backup_selection_added_count']=0;$failure.Data['backup_selection_removed_count']=$gone.Count;throw $failure
+   }
+   $warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($inventory.file_warnings)){Add-BackupFileWarning $warnings $warning}
+   $captured=@{};foreach($file in $inventory.files){$captured[$file.relative_path]=$true}
+   foreach($warning in $disappeared){if(-not $captured.ContainsKey($warning.relative_path)){Add-BackupFileWarning $warnings $warning}}
+   $inventory.file_warnings=$warnings.ToArray()
+   return [pscustomobject]@{stage=$stage;inventory=$inventory;changed_after_capture_count=$changes;attempt_count=$attempt;max_attempts=$MaxAttempts;retry_history=$history.ToArray()}
+  }catch{
+   if($inventory){foreach($warning in @($inventory.file_warnings|Where-Object{$_ -and $_.reason-ceq 'source_disappeared'})){Add-BackupFileWarning $disappeared $warning}}
+   $_.Exception.Data['backup_capture_attempt_count']=$attempt;$_.Exception.Data['backup_capture_max_attempts']=$MaxAttempts;$_.Exception.Data['backup_capture_retry_history']=$history.ToArray()
+   $_.Exception.Data['backup_stage']=$phase
+   $reason=Get-BackupFailureCode $_;$retryable=$reason-ceq 'backup_source_selection_changed_during_collection'
+   if(-not $retryable){throw}
+   $history.Add([pscustomobject]@{attempt=$attempt;stage=$phase;reason=$reason;added_count=[int]$_.Exception.Data['backup_selection_added_count'];removed_count=[int]$_.Exception.Data['backup_selection_removed_count']})
+   $_.Exception.Data['backup_capture_retry_history']=$history.ToArray()
+   if($attempt-eq $MaxAttempts){throw}
+   Start-Sleep -Milliseconds 150
+  }
+ }
 }
 
 function Invoke-DevConfigSystemExport($Config,[string]$Stage,$FileWarnings=$null,$KnownWarnings=@()){

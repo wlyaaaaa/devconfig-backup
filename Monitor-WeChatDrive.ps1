@@ -57,8 +57,7 @@ try{
   $verified=$false
   try{$snapshotLease=Open-BackupResourceLock $HotRoot;$manifest=Get-VerifiedBackupTreeManifest $HotRoot -VerifyContent;$result.file_warnings=@($manifest.file_warnings|Where-Object{$_});$verified=$true;$result.snapshot='sha256_verified'}catch{$result.snapshot='not_verified'}
   if($verified){
-   $selection=Import-PowerShellDataFile (Join-Path $Root 'wechat-sources.psd1');$filter=@();foreach($name in $selection.ExcludeDirs){$filter+=@('--exclude',($name+'/**'))}
-   foreach($warning in $result.file_warnings){$filter+=@('--exclude',('/'+$warning.relative_path),'--exclude',('/'+$warning.relative_path.TrimEnd('/')+'/**'))}
+   $selection=Import-PowerShellDataFile (Join-Path $Root 'wechat-sources.psd1');$filter=@(Get-BackupRcloneWarningFilters $result.file_warnings);foreach($name in $selection.ExcludeDirs){$filter+=@('--filter',('- '+$name+'/**'))}
    $check=Invoke-RcloneWithTimeout -Arguments (@('check',$HotRoot,($resolved.Remote+$GDriveFolder),'--checkers','8','--retries','2','--contimeout','20s','--timeout','120s')+$filter) -TimeoutSec $RcloneTimeoutSec -Purpose 'cloud check'
    $result.cloud=if($check.ExitCode-eq 0){'verified'}else{'incomplete_or_unavailable'}
   }
