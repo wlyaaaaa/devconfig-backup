@@ -17,10 +17,11 @@ function Get-ReceiptAgeState([string]$Timestamp){
  if($age-lt -0.1){return 'invalid_timestamp'};if($age-gt 36){return 'stale'};return 'current'
 }
 function Get-PackageStatus([string]$Directory){
- $result=[ordered]@{status='unknown';path=$Directory;package=$null;bytes=$null;completed_utc=$null;verification='unknown';reason=$null}
+ $result=[ordered]@{status='unknown';path=$Directory;package=$null;bytes=$null;completed_utc=$null;verification='unknown';reason=$null;file_warnings=@()}
  try{
   $pack=Get-VerifiedDevConfigPackage $Directory -MetadataOnly:(-not $VerifyContent)
   $result.status=Get-ReceiptAgeState $pack.Current.completed_utc;$result.package=$pack.Name;$result.bytes=$pack.Receipt.package_bytes;$result.completed_utc=$pack.Current.completed_utc
+  $result.file_warnings=@($pack.Receipt.file_warnings|Where-Object{$_})
   if($VerifyContent -and (Get-BackupStableFileHash (Join-Path $Directory 'latest.zip'))-cne $pack.Sha){throw 'latest_alias_mismatch'}
   $result.verification=if($VerifyContent){'sha256_rechecked'}else{'producer_verified_not_rehashed_by_status'}
  }catch{$result.reason=Get-BackupFailureCode $_;if([IO.File]::Exists((Join-Path $Directory 'latest.zip'))){$result.status='legacy_or_unverified'}}
@@ -35,7 +36,7 @@ function Get-BackupStatusSnapshot {
   $info=$task|Get-ScheduledTaskInfo -ErrorAction Stop
   $tasks+=[pscustomobject]@{name=$task.TaskName;state=[string]$task.State;enabled=[bool]$task.Settings.Enabled;last_exit=$info.LastTaskResult;last_run=$info.LastRunTime;next_run=$info.NextRunTime}
  }}catch{$tasks=@([pscustomobject]@{name='Task Scheduler';state='unavailable';last_exit=$null;next_run=$null})}
- $wechat=[ordered]@{status='unknown';verification='unknown';bytes=$null;completed_utc=$null;application_consistency='not_proven';application_recovery='not_tested';reason=$null}
+ $wechat=[ordered]@{status='unknown';verification='unknown';bytes=$null;completed_utc=$null;application_consistency='not_proven';application_recovery='not_tested';reason=$null;file_warnings=@()}
  try{
   $receipt=Read-BackupJson $HotReceiptPath -Required
   if($receipt.schema-cne 'wechat.hot-backup-receipt.v2' -or $receipt.status-cne 'complete' -or $receipt.collection_status-cne 'complete' -or $receipt.verification_status-cne 'sha256_full_tree' -or $receipt.retention_status-cne 'source_follow_verified'){throw 'wechat_receipt_not_verified'}
@@ -44,6 +45,7 @@ function Get-BackupStatusSnapshot {
   $bound=Get-VerifiedBackupTreeManifest $WeChatHotRoot -VerifyContent:$VerifyContent
   if($bound.run_id-cne $receipt.generation_id -or $bound.content_sha256-cne $receipt.content_sha256 -or (Get-Item $manifestPath).Length-ne $receipt.manifest_bytes -or (Get-BackupStableFileHash $manifestPath)-cne $receipt.manifest_sha256){throw 'wechat_receipt_manifest_mismatch'}
   $wechat.status=Get-ReceiptAgeState $receipt.completed_utc;$wechat.verification=if($VerifyContent){'sha256_full_tree_rechecked'}else{'producer_verified_manifest_bound'};$wechat.completed_utc=$receipt.completed_utc;$wechat.bytes=$receipt.bytes;$wechat.file_count=$receipt.file_count
+  $wechat.file_warnings=@($receipt.file_warnings|Where-Object{$_})
  }catch{$wechat.reason=Get-BackupFailureCode $_}
  $drive=[ordered]@{status='not_contacted';application_recovery='not_tested'}
  if($LiveDrive -and -not $NoDrive){try{
@@ -54,18 +56,21 @@ function Get-BackupStatusSnapshot {
   $drive.status=if($probe.Success){'reachable_not_content_verified'}else{'unreachable'}
  }catch{$drive.status='unavailable';$drive.reason=Get-BackupFailureCode $_}}
  $local=Get-PackageStatus (Join-Path $OutputRoot 'out');$hot=Get-PackageStatus $HotRoot
- $health=if(@($attempts|Where-Object{$_.status-in @('failed','unreadable')}).Count -or $local.status-ne 'current' -or $hot.status-ne 'current' -or $wechat.status-ne 'current'){'attention_required'}elseif(@($attempts|Where-Object{$_.status-eq 'complete_with_skipped_files'}).Count){'receipts_current_with_skipped_files'}else{'receipts_current'}
- return [pscustomobject][ordered]@{schema='devconfig.backup-status.v2';observed_utc=(Get-BackupUtc);write_mode=$(if($LiveDrive -and -not $NoDrive){'metadata_query_may_refresh_oauth'}else{'zero_write'});status=$health;local=$local;hot=$hot;wechat_hot=[pscustomobject]$wechat;drive=[pscustomobject]$drive;last_attempts=$attempts;scheduled_tasks=$tasks;application_recovery='not_tested';log_payloads='not_read'}
+ $warnings=[Collections.Generic.List[object]]::new();foreach($item in @($attempts)+@($local,$hot,[pscustomobject]$wechat)){foreach($warning in @($item.file_warnings|Where-Object{$_})){Add-BackupFileWarning $warnings $warning}}
+ $health=if(@($attempts|Where-Object{$_.status-in @('failed','unreadable')}).Count -or $local.status-ne 'current' -or $hot.status-ne 'current' -or $wechat.status-ne 'current'){'attention_required'}elseif($warnings.Count){'receipts_current_with_file_warnings'}elseif(@($attempts|Where-Object{$_.status-eq 'complete_with_skipped_files'}).Count){'receipts_current_with_skipped_files'}else{'receipts_current'}
+ return [pscustomobject][ordered]@{schema='devconfig.backup-status.v2';observed_utc=(Get-BackupUtc);write_mode=$(if($LiveDrive -and -not $NoDrive){'metadata_query_may_refresh_oauth'}else{'zero_write'});status=$health;local=$local;hot=$hot;wechat_hot=[pscustomobject]$wechat;drive=[pscustomobject]$drive;last_attempts=$attempts;file_warnings=$warnings.ToArray();scheduled_tasks=$tasks;application_recovery='not_tested';log_payloads='not_read'}
 }
 function Format-BackupStatusForHuman($Snapshot){
  $labels=@{current='当前有效';stale='已过期';unknown='尚未验证';legacy_or_unverified='旧版或未验证';complete='完成';failed='失败';running='进行中';not_requested='本次未请求';not_contacted='未联网检查';attention_required='需要处理';receipts_current='成功回执均在有效期内';complete_with_skipped_files='完成，但跳过了被占用的文件';receipts_current_with_skipped_files='成功回执均在有效期内，但最近一次跳过了被占用的文件';Ready='就绪';Disabled='已禁用';passed='通过';refused='未通过，未上传';pending='未检查';not_uploaded='未上传'}
  function Label([string]$Value){if($labels.ContainsKey($Value)){return $labels[$Value]};return $Value}
+ $labels.receipts_current_with_file_warnings='成功回执均在有效期内，但有文件警告'
  $lines=[Collections.Generic.List[string]]::new();$lines.Add('DevConfig / 微信备份状态');$lines.Add('检查时间：'+$Snapshot.observed_utc);$lines.Add('总体：'+(Label $Snapshot.status));$lines.Add('')
  foreach($entry in @(@('本地配置',$Snapshot.local),@('G 盘配置',$Snapshot.hot),@('G 盘微信',$Snapshot.wechat_hot))){
   $item=$entry[1];$lines.Add($entry[0]+'：'+(Label $item.status));if($item.completed_utc){$lines.Add('  最近成功：'+$item.completed_utc)}
   if($null-ne $item.bytes){$lines.Add(('  大小：{0:N2} GiB' -f ([double]$item.bytes/1GB)))};$lines.Add('  校验依据：'+$item.verification);if($item.reason){$lines.Add('  原因：'+$item.reason)}
  }
  $lines.Add('');$lines.Add('最近尝试（失败不会覆盖上一个成功版本）：');foreach($attempt in $Snapshot.last_attempts){$lines.Add(('  {0}：{1}  {2}' -f $attempt.schema,(Label $attempt.status),$attempt.failure));if($attempt.failure_path){$lines.Add('    出错文件：'+$attempt.failure_path)};if($attempt.upload_source){$u=$attempt.upload_source;$lines.Add(('    上传来源：G 盘热备 {0}；核验门：{1}{2}' -f $u.hot_completed_utc,(Label ([string]$u.gate)),$(if($u.refusal){'；原因：'+$u.refusal}else{''})))};foreach($skip in @($attempt.skipped_files|Where-Object{$_})){$lines.Add(('    已跳过：{0}（{1}）' -f $skip.relative_path,$skip.reason))}}
+ if(@($Snapshot.file_warnings).Count){$lines.Add('');$lines.Add('文件警告（其余文件已完成，下次照常重试）：');foreach($warning in $Snapshot.file_warnings){$lines.Add(('  {0}：{1}；Windows 错误 {2}；阶段 {3}' -f $warning.relative_path,$warning.reason,$warning.error_code,$warning.stage))}}
  $lines.Add('');$lines.Add('计划任务：');foreach($task in $Snapshot.scheduled_tasks){$lines.Add(('  {0}：{1}；上次返回 {2}；下次 {3}' -f $task.name,(Label $task.state),$task.last_exit,$task.next_run))}
  $lines.Add('');$lines.Add('云端：'+(Label $Snapshot.drive.status));$lines.Add('文件校验、复制成功与官方客户端恢复是不同结果；此页不证明应用已经恢复。')
  $lines.Add('界面每分钟刷新。关闭窗口不停止备份；启停任务请使用“管理计划任务”。')

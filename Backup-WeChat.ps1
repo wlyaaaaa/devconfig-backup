@@ -40,15 +40,16 @@ Assert-BackupPathsIndependent $LocalRoot $HotRoot
 # A custom Hot root may not read or write a receipt at the production G location.
 $script:HotReceiptFile=if($PSBoundParameters.ContainsKey('HotRoot') -and -not $PSBoundParameters.ContainsKey('HotReceiptPath')){$HotRoot+'.hot-receipt.json'}else{$HotReceiptPath}
 function Get-WeChatCloudFilter {
-    if($DbOnly -and -not $DriveFull){return @('--filter','+ **/db_storage/**','--filter','- *')}
-    $result=@();foreach($name in $exclDirs){$result+=@('--exclude',($name+'/**'))};return $result
+    $result=@();foreach($warning in @($script:WeChatFileWarnings)){$result+=@('--filter',('- /'+$warning.relative_path), '--filter',('- /'+$warning.relative_path.TrimEnd('/')+'/**'))}
+    if($DbOnly -and -not $DriveFull){return $result+@('--filter','+ **/db_storage/**','--filter','- *')}
+    foreach($name in $exclDirs){$result+=@('--exclude',($name+'/**'))};return $result
 }
 function Get-WeChatSummary {
     param($Manifest,[string]$Kind)
     $portable=[string]$Manifest.destination+'.backup-manifest.json'
     $manifestHash=Get-BackupStableFileHash $portable
     $manifestBytes=[long](Get-Item -LiteralPath $portable -ErrorAction Stop).Length
-    return [ordered]@{manifest_sha256=$manifestHash;manifest_bytes=$manifestBytes;schema=('wechat.'+$Kind+'-backup-receipt.v2');status='complete';completed_utc=(Get-BackupUtc);source=$Source;destination=$Manifest.destination;generation_id=$Manifest.run_id;collection_status='complete';verification_status='sha256_full_tree';retention_status='source_follow_verified';content_sha256=$Manifest.content_sha256;file_count=$Manifest.file_count;bytes=$Manifest.bytes;excluded_directory_count=$exclDirs.Count;payload_names_emitted=$false;payload_content_interpreted=$false;capture_consistency=$script:SourceCaptureMode;application_consistency='not_proven';application_recovery='not_tested'}
+    return [ordered]@{manifest_sha256=$manifestHash;manifest_bytes=$manifestBytes;schema=('wechat.'+$Kind+'-backup-receipt.v2');status='complete';completed_utc=(Get-BackupUtc);source=$Source;destination=$Manifest.destination;generation_id=$Manifest.run_id;collection_status='complete';verification_status='sha256_full_tree';verification_scope='selected_files_excluding_file_warnings';retention_status='source_follow_verified';content_sha256=$Manifest.content_sha256;file_count=$Manifest.file_count;bytes=$Manifest.bytes;excluded_directory_count=$exclDirs.Count;file_warnings=@($Manifest.file_warnings|Where-Object{$_});payload_names_emitted=$false;payload_content_interpreted=$false;capture_consistency=$script:SourceCaptureMode;application_consistency='not_proven';application_recovery='not_tested'}
 }
 function New-WeChatUploadSourceRecord {
     return [ordered]@{kind='g_hot_verified_generation';gate='pending';refusal=$null;hot_generation_id=$null;hot_completed_utc=$null;hot_age_hours=$null;max_hot_age_hours=$MaxHotAgeHours;hot_receipt_status=$null;hot_verification_status=$null;hot_capture_consistency=$null;hot_manifest_sha256=$null;pre_upload_check='not_run'}
@@ -88,7 +89,7 @@ function Get-WeChatHotUploadGeneration {
     # Cheap tamper check: the tree must still have exactly the verified directories, paths and sizes.
     # Times are not compared: unchanged files are hard-linked from the previous generation and
     # keep its time while the manifest records the source time (content is still hash-verified).
-    try{$current=Get-BackupTreeInventory $HotRoot}catch{throw ('wechat_hot_tree_unreadable:'+(Get-BackupFailureCode $_))}
+    try{$current=Get-BackupTreeInventory $HotRoot -IgnoreFileWarnings $manifest.file_warnings;$current=Get-BackupInventoryWithoutWarnings $current $manifest.file_warnings}catch{throw ('wechat_hot_tree_unreadable:'+(Get-BackupFailureCode $_))}
     if((Get-WeChatTreeShapeDigest $current.directories $current.files)-cne (Get-WeChatTreeShapeDigest $manifest.directories $manifest.files)){throw 'wechat_hot_tree_changed_since_verification'}
     $UploadSource.pre_upload_check='receipt_manifest_bound_tree_shape_match';$UploadSource.gate='passed'
     return $manifest
@@ -146,13 +147,14 @@ if($Plan){
             try{$null=Get-WeChatHotUploadGeneration $gate;$ready=$true}catch{$gate.gate='refused';$gate.refusal=Get-BackupFailureCode $_}
             $plans+=[pscustomobject]@{target=$kind;source=$HotRoot;upload_ready=$ready;upload_source=[pscustomobject]$gate;cloud='not_contacted'};continue
         }
-        $destination=if($kind-eq 'Hot'){$HotRoot}else{$LocalRoot};$planned=Invoke-VerifiedBackupTree -Source $Source -Destination $destination -ExcludeDirs $exclDirs -Plan;$plans+=[pscustomobject]@{target=$kind;destination=$destination;source_files=$planned.file_count;source_bytes=$planned.bytes;difference=$planned.difference;cloud='not_contacted'}
+        $destination=if($kind-eq 'Hot'){$HotRoot}else{$LocalRoot};$planned=Invoke-VerifiedBackupTree -Source $Source -Destination $destination -ExcludeDirs $exclDirs -Plan;$plans+=[pscustomobject]@{target=$kind;destination=$destination;source_files=$planned.file_count;source_bytes=$planned.bytes;difference=$planned.difference;file_warnings=@($planned.file_warnings);cloud='not_contacted'}
     }
     $result=[ordered]@{schema='wechat.backup-plan.v1';write_mode='zero_write';targets=$plans;application_consistency='not_proven';application_recovery='not_tested'}
     if($Json){$result|ConvertTo-Json -Depth 10}else{[pscustomobject]$result|Format-List};exit 0
 }
 $capturesSource=($Target-contains 'Hot' -or $Target-contains 'Local')
-$run=[ordered]@{schema='wechat.run.v2';run_id=[guid]::NewGuid().ToString('N');started_utc=(Get-BackupUtc);completed_utc=$null;status='running';targets=$Target;hot='not_requested';local='not_requested';drive='not_requested';failure=$null;capture_consistency=$(if($capturesSource){$script:SourceCaptureMode}else{'no_source_capture'});application_recovery='not_tested'}
+$run=[ordered]@{schema='wechat.run.v2';run_id=[guid]::NewGuid().ToString('N');started_utc=(Get-BackupUtc);completed_utc=$null;status='running';targets=$Target;hot='not_requested';local='not_requested';drive='not_requested';failure=$null;file_warnings=@();capture_consistency=$(if($capturesSource){$script:SourceCaptureMode}else{'no_source_capture'});application_recovery='not_tested'}
+$script:WeChatFileWarnings=[Collections.Generic.List[object]]::new()
 if($Target-contains 'Drive'){$run.upload_source=New-WeChatUploadSourceRecord}
 $runPath=Join-Path $StateRoot ('wechat-'+$(if($Target.Count-eq 1 -and $Target[0]-eq 'Drive'){'drive'}else{'local'})+'-last.json')
 $code=0;$lease=$null;$driveLease=$null;$snapshot=$null;$vssCapture=$null;$sourceForCapture=$Source
@@ -170,6 +172,7 @@ try{
              Write-BackupJsonAtomic $receiptPath (Get-WeChatSummary $record 'hot')
          }
          } finally {$hotLease.Dispose()}
+        foreach($warning in @($hot.file_warnings)){Add-BackupFileWarning $script:WeChatFileWarnings $warning};$run.file_warnings=$script:WeChatFileWarnings.ToArray()
         $run.hot='complete';Write-BackupJsonAtomic $runPath $run
         } catch { $run.hot='failed';$run.failure=Get-BackupFailureCode $_;$code=1;Write-BackupJsonAtomic $runPath $run }
     }
@@ -178,6 +181,7 @@ try{
         $run.local='running';Write-BackupJsonAtomic $runPath $run
         $snapshot=Invoke-VerifiedBackupTree -Source $sourceForCapture -SourceIdentity $Source -Destination $LocalRoot -ExcludeDirs $exclDirs -LockHeld
         $null=Get-VerifiedBackupTreeManifest $LocalRoot
+        foreach($warning in @($snapshot.file_warnings)){Add-BackupFileWarning $script:WeChatFileWarnings $warning};$run.file_warnings=$script:WeChatFileWarnings.ToArray()
         $run.local='complete';Write-BackupJsonAtomic $runPath $run
         $lease.Dispose();$lease=$null
     }
@@ -186,6 +190,7 @@ try{
         # Hold the G lock so the daily Hot run cannot swap the tree during upload.
         try{$driveLease=Open-BackupResourceLock $HotRoot}catch{$run.upload_source.gate='refused';$run.upload_source.refusal='wechat_hot_resource_busy';$run.drive='not_uploaded';throw 'wechat_hot_resource_busy'}
         try{$hotGeneration=Get-WeChatHotUploadGeneration $run.upload_source}catch{$run.upload_source.gate='refused';$run.upload_source.refusal=Get-BackupFailureCode $_;$run.drive='not_uploaded';throw}
+        foreach($warning in @($hotGeneration.file_warnings)){Add-BackupFileWarning $script:WeChatFileWarnings $warning};$run.file_warnings=$script:WeChatFileWarnings.ToArray()
         Write-BackupJsonAtomic $runPath $run
         $null=Invoke-WeChatDrivePublication $hotGeneration $run.upload_source
         $run.drive='complete'

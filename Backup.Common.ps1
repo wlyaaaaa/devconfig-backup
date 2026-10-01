@@ -83,6 +83,69 @@ function Open-BackupResourceLock([string]$Resource){
  try{return [IO.File]::Open(($path+'.backup.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}catch [IO.IOException]{throw 'backup_resource_busy'}
 }
 function Test-BackupNameExcluded([string]$Name,[string[]]$Patterns=@()){foreach($pattern in $Patterns){if($Name-like $pattern){return $true}};return $false}
+function Get-BackupEntryAttributes([string]$Path){return [IO.File]::GetAttributes($Path)}
+function Get-BackupFileWarning {
+ param($ErrorRecord,[string]$RelativePath,[string]$Stage,[switch]$AllowSourceDisappeared)
+ $e=if($ErrorRecord-is [Exception]){$ErrorRecord}else{$ErrorRecord.Exception};$missing=$false
+ while($e){
+  $code=$e.HResult-band 0xFFFF
+  if($e-is [ComponentModel.Win32Exception]){$code=$e.NativeErrorCode}
+  if($code-in @(225,226) -and ($e-is [ComponentModel.Win32Exception] -or $e.HResult-eq (-2147024896+$code))){return [pscustomobject]@{relative_path=$RelativePath.Replace('\','/');reason=$(if($code-eq 225){'antivirus_blocked'}else{'antivirus_removed'});error_code=$code;stage=$Stage}}
+  if($e-is [IO.FileNotFoundException] -or $e-is [IO.DirectoryNotFoundException] -or ($code-in @(2,3) -and ($e-is [ComponentModel.Win32Exception] -or $e.HResult-eq (-2147024896+$code)))){$missing=$true}
+  $e=$e.InnerException
+ }
+ if($AllowSourceDisappeared -and ($missing -or $ErrorRecord.CategoryInfo.Category-eq [Management.Automation.ErrorCategory]::ObjectNotFound)){
+  return [pscustomobject]@{relative_path=$RelativePath.Replace('\','/');reason='source_disappeared';error_code=2;stage=$Stage}
+ }
+ return $null
+}
+function Add-BackupFileWarning($Warnings,$Warning){
+ if($null-eq $Warning){return}
+ foreach($item in $Warnings){if($item.relative_path-ieq $Warning.relative_path -and $item.reason-ceq $Warning.reason -and $item.stage-ceq $Warning.stage){return}}
+ $Warnings.Add($Warning)
+}
+function Test-BackupWarningPath([string]$RelativePath,$Warnings){
+ foreach($warning in @($Warnings)){$path=[string]$warning.relative_path;if($path -and ($RelativePath-ieq $path -or $RelativePath.StartsWith($path.TrimEnd('/')+'/',[StringComparison]::OrdinalIgnoreCase))){return $true}};return $false
+}
+function Get-BackupInventoryWithoutWarnings($Inventory,$Warnings){
+ return [pscustomobject]@{directories=@($Inventory.directories|Where-Object{-not (Test-BackupWarningPath $_ $Warnings)});files=@($Inventory.files|Where-Object{-not (Test-BackupWarningPath $_.relative_path $Warnings)})}
+}
+function Test-BackupDefenderRemovedPath {
+ param([string]$Path,[DateTimeOffset]$Since)
+ # Read only, exact path and successful action since this run. Detection alone is insufficient.
+ try{
+  foreach($event in @(Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational';Id=1117;StartTime=$Since.UtcDateTime} -ErrorAction Stop)){
+   $xml=[xml]$event.ToXml();$fields=@{};foreach($data in $xml.Event.EventData.Data){$fields[[string]$data.Name]=[string]$data.'#text'}
+   if($fields['Error Code']-notin @('0','0x00000000','0x0')){continue}
+   if($fields['Action ID']-notin @('2','3')){continue} # Quarantine / Remove (MPTHREAT_ACTION).
+   # Defender may join resources with semicolons; never use substring/path-prefix matching.
+   foreach($resource in @(([string]$fields['Path'])-split ';')){
+    $candidate=$resource.Trim() -replace '^(?i)(file|containerfile):_',''
+    if($candidate.Equals($Path,[StringComparison]::OrdinalIgnoreCase)){return $true}
+   }
+  }
+ }catch{};return $false
+}
+function Get-BackupDestinationWarning($ErrorRecord,[string]$Path,[string]$RelativePath,[string]$Stage,[DateTimeOffset]$Since){
+ $warning=Get-BackupFileWarning $ErrorRecord $RelativePath $Stage
+ if($warning){return $warning}
+ if((Get-BackupFileWarning $ErrorRecord $RelativePath $Stage -AllowSourceDisappeared) -and (Test-BackupDefenderRemovedPath $Path $Since)){
+  return [pscustomobject]@{relative_path=$RelativePath;reason='antivirus_removed';error_code=226;stage=$Stage}
+ };return $null
+}
+function Get-BackupAntivirusRetryWarning($Warning,[string]$Source){
+ if($Warning.reason-notin @('antivirus_blocked','antivirus_removed') -or $Warning.error_code-notin @(225,226)){return $null}
+ try{$null=Get-BackupEntryAttributes $Source;return $null}catch{
+  $current=Get-BackupFileWarning $_ $Warning.relative_path 'source_retry' -AllowSourceDisappeared
+  if(-not $current){throw}
+  if($current.reason-ceq 'source_disappeared'){return [pscustomobject]@{relative_path=$Warning.relative_path;reason=$Warning.reason;error_code=$Warning.error_code;stage='source_retry'}}
+  return $current
+ }
+}
+function Test-BackupRelativeSelection([string]$Path,[string[]]$ExcludeDirs,[string[]]$ExcludeFiles){
+ $parts=@($Path-split '/');if(Test-BackupNameExcluded $parts[-1] $ExcludeFiles){return $false}
+ for($i=0;$i-lt $parts.Count-1;$i++){if(Test-BackupNameExcluded $parts[$i] $ExcludeDirs){return $false}};return $true
+}
 function Get-BackupStableFileHash([string]$Path){
  $before=[IO.FileInfo]::new($Path);$before.Refresh();$null=$before.Length
  $stream=$null;$algorithm=[Security.Cryptography.SHA256]::Create()
@@ -94,7 +157,7 @@ function Get-BackupStableFileHash([string]$Path){
  if($before.Length-ne $after.Length -or $before.LastWriteTimeUtc.Ticks-ne $after.LastWriteTimeUtc.Ticks){throw 'backup_source_changed_during_hash'};return $hash
 }
 function Get-BackupTreeInventory {
- param([string]$Root,[string[]]$ExcludeDirs=@(),[string[]]$ExcludeFiles=@(),[switch]$Hash,[switch]$SkipReparsePoints,[string]$RelativePrefix='',[string[]]$ExcludeRelativePaths=@())
+ param([string]$Root,[string[]]$ExcludeDirs=@(),[string[]]$ExcludeFiles=@(),[switch]$Hash,[switch]$SkipReparsePoints,[string]$RelativePrefix='',[string[]]$ExcludeRelativePaths=@(),$FileWarnings=$null,[switch]$AllowSourceDisappeared,$IgnoreFileWarnings=@(),$DestinationSince=$null)
  $full=Resolve-BackupPath $Root;$attributes=[IO.File]::GetAttributes($full)
  if(($attributes-band [IO.FileAttributes]::Directory)-eq 0){throw 'backup_source_not_directory'}
  $files=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -102,15 +165,19 @@ function Get-BackupTreeInventory {
  while($pending.Count){
   $directory=$pending.Pop()
   foreach($path in [IO.Directory]::EnumerateFileSystemEntries($directory)){
-   $name=[IO.Path]::GetFileName($path);$attr=[IO.File]::GetAttributes($path);$isDirectory=($attr-band [IO.FileAttributes]::Directory)-ne 0
+   $name=[IO.Path]::GetFileName($path);$relative=$path.Substring($full.Length+1).Replace('\','/');$logical=if($RelativePrefix){$RelativePrefix.TrimEnd('/')+'/'+$relative}else{$relative}
+   if(Test-BackupWarningPath $logical $IgnoreFileWarnings){$excluded++;continue}
+   try{$attr=Get-BackupEntryAttributes $path}catch{
+    if($null-eq $FileWarnings){throw};$warning=if($null-ne $DestinationSince){Get-BackupDestinationWarning $_ $path $logical 'scan' $DestinationSince}else{Get-BackupFileWarning $_ $logical 'scan' -AllowSourceDisappeared:$AllowSourceDisappeared};if(-not $warning){throw};Add-BackupFileWarning $FileWarnings $warning;continue
+   };$isDirectory=($attr-band [IO.FileAttributes]::Directory)-ne 0
    if(($isDirectory -and (Test-BackupNameExcluded $name $ExcludeDirs)) -or (-not $isDirectory -and (Test-BackupNameExcluded $name $ExcludeFiles))){$excluded++;continue}
    if(($attr-band [IO.FileAttributes]::ReparsePoint)-ne 0){if($SkipReparsePoints){$excluded++;continue};throw 'backup_unhandled_source_reparse'}
-   $relative=$path.Substring($full.Length+1).Replace('\','/')
    if($relative-match '[\r\n|]'){throw 'backup_unsupported_path_character'}
-   $logical=if($RelativePrefix){$RelativePrefix.TrimEnd('/')+'/'+$relative}else{$relative}
    if(Test-BackupNameExcluded $logical $ExcludeRelativePaths){$excluded++;continue}
    if($isDirectory){$directories.Add($relative);$pending.Push($path);continue}
-   $item=[IO.FileInfo]::new($path);$item.Refresh();$null=$item.Length;$digest=if($Hash){Get-BackupStableFileHash $path}else{$null}
+   try{$item=[IO.FileInfo]::new($path);$item.Refresh();$null=$item.Length;$digest=if($Hash){Get-BackupStableFileHash $path}else{$null}}catch{
+    if($null-eq $FileWarnings){throw};$stage=if($Hash){'hash'}else{'scan'};$warning=if($null-ne $DestinationSince){Get-BackupDestinationWarning $_ $path $logical $stage $DestinationSince}else{Get-BackupFileWarning $_ $logical $stage -AllowSourceDisappeared:$AllowSourceDisappeared};if(-not $warning){throw};Add-BackupFileWarning $FileWarnings $warning;continue
+   }
    if($files.ContainsKey($relative)){throw 'backup_case_collision'}
    $files.Add($relative,[pscustomobject]@{relative_path=$relative;full_path=$path;length=[long]$item.Length;mtime_ticks=[long]$item.LastWriteTimeUtc.Ticks;sha256=$digest})
   }
@@ -118,7 +185,7 @@ function Get-BackupTreeInventory {
  [string[]]$keys=@($files.Keys);[Array]::Sort($keys,[StringComparer]::OrdinalIgnoreCase)
  [string[]]$dirs=$directories.ToArray();[Array]::Sort($dirs,[StringComparer]::OrdinalIgnoreCase)
  $ordered=@($keys|ForEach-Object{$files[$_]});[long]$bytes=0;foreach($file in $ordered){$bytes+=$file.length}
- return [pscustomobject]@{root=$full;files=$ordered;directories=@($dirs);file_count=$ordered.Count;bytes=$bytes;excluded_count=$excluded;hashes_computed=[bool]$Hash}
+ return [pscustomobject]@{root=$full;files=$ordered;directories=@($dirs);file_count=$ordered.Count;bytes=$bytes;excluded_count=$excluded;hashes_computed=[bool]$Hash;file_warnings=@($FileWarnings|Where-Object{$_})}
 }
 function Get-BackupInventoryDigest($Inventory,[switch]$Metadata){
  $lines=[Collections.Generic.List[string]]::new();$lines.Add('backup-tree-v1')
@@ -137,17 +204,19 @@ function Get-BackupDifference($Current,$Previous){
   elseif($file.length-ne $old.length -or ($null-ne $old.PSObject.Properties['mtime_ticks'] -and $file.mtime_ticks-ne $old.mtime_ticks)){$changed++;$bytes+=$file.length}
   elseif($null-eq $old.PSObject.Properties['mtime_ticks']){$unknown++}
   $known.Remove($file.relative_path)
- };return [pscustomobject]@{added_files=$added;changed_files=$changed;deleted_files=$known.Count;estimated_copy_bytes=$bytes;unknown_timestamp_comparisons=$unknown;comparison='metadata_estimate_not_content_verification'}
+ };foreach($path in @($known.Keys)){if(Test-BackupWarningPath $path $Current.file_warnings){$known.Remove($path)}};return [pscustomobject]@{added_files=$added;changed_files=$changed;deleted_files=$known.Count;estimated_copy_bytes=$bytes;unknown_timestamp_comparisons=$unknown;comparison='metadata_estimate_not_content_verification'}
 }
 function Copy-BackupFileVerified([string]$Source,[string]$Destination,[string]$ExpectedHash){
  $parent=[IO.Path]::GetDirectoryName($Destination);[void][IO.Directory]::CreateDirectory($parent);$temp=Join-Path $parent ('.copy-'+[guid]::NewGuid().ToString('N')+'.tmp')
+ $stage='source_read'
  try{
   $info=Get-Item -LiteralPath $Source -Force -ErrorAction Stop;$reader=[IO.File]::Open($Source,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$writer=$null
-  try{$writer=[IO.File]::Open($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);$reader.CopyTo($writer,131072);$writer.Flush($true)}finally{if($writer){$writer.Dispose()};$reader.Dispose()}
+  try{$stage='destination_write';$writer=[IO.File]::Open($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);$reader.CopyTo($writer,131072);$writer.Flush($true)}finally{if($writer){$writer.Dispose()};$reader.Dispose()}
   [IO.File]::SetLastWriteTimeUtc($temp,$info.LastWriteTimeUtc)
-  if((Get-BackupStableFileHash $temp)-cne $ExpectedHash.ToLowerInvariant()){throw 'backup_copy_hash_mismatch'}
+  $stage='destination_verify';if((Get-BackupStableFileHash $temp)-cne $ExpectedHash.ToLowerInvariant()){throw 'backup_copy_hash_mismatch'}
+  $stage='destination_publish'
   if([IO.File]::Exists($Destination)){[IO.File]::Replace($temp,$Destination,[NullString]::Value)}else{[IO.File]::Move($temp,$Destination)}
- }finally{if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)}}
+ }catch{$_.Exception.Data['backup_file_stage']=$stage;$_.Exception.Data['backup_destination_path']=$temp;throw}finally{if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)}}
 }
 function Remove-BackupOwnedDirectory([string]$Path,[string]$Parent,[string]$NamePattern){
  # Never remove a bare root: require a named immediate child and an exact caller pattern.
@@ -167,7 +236,10 @@ function Get-VerifiedBackupTreeManifest([string]$Destination,[switch]$VerifyCont
  if([IO.File]::Exists($dest+'.backup-transaction.json')){throw 'backup_tree_transaction_pending'}
  $record=Read-BackupJson ($dest+'.backup-manifest.json') -Required
  if($record.schema-cne 'devconfig.tree-manifest.v1' -or $record.status-cne 'complete' -or $record.destination-ine $dest -or $record.content_sha256-cnotmatch '^[a-f0-9]{64}$' -or $record.verification-cne 'sha256_full_tree'){throw 'backup_tree_manifest_invalid'}
- if($VerifyContent -and (Get-BackupInventoryDigest (Get-BackupTreeInventory $dest -Hash))-cne $record.content_sha256){throw 'backup_tree_hash_mismatch'};return $record
+ if($VerifyContent){
+  $current=Get-BackupTreeInventory $dest -IgnoreFileWarnings $record.file_warnings -Hash
+  if((Get-BackupInventoryDigest (Get-BackupInventoryWithoutWarnings $current $record.file_warnings))-cne $record.content_sha256){throw 'backup_tree_hash_mismatch'}
+ };return $record
 }
 function Test-BackupTreeReceiptBound([string]$ReceiptPath,[string]$Destination,$Manifest){
  try{
@@ -221,17 +293,23 @@ function Repair-BackupTreeTransaction([string]$Destination){
 function Invoke-VerifiedBackupTree {
  param([string]$Source,[string]$Destination,[string[]]$ExcludeDirs=@(),[string[]]$ExcludeFiles=@(),[switch]$Plan,[switch]$LockHeld,[scriptblock]$PostCommit,[string]$PostCommitReceiptPath='', [string]$SourceIdentity='')
  $src=Resolve-BackupPath $Source;$dest=Resolve-BackupPath $Destination;$sourceIdentityPath=if($SourceIdentity){Resolve-BackupPath $SourceIdentity}else{$src};Assert-BackupPathsIndependent $src $dest;Assert-BackupPathsIndependent $sourceIdentityPath $dest;Assert-BackupPathChain $dest
+ $warnings=[Collections.Generic.List[object]]::new();$since=[DateTimeOffset]::UtcNow
  if($PostCommit -and [string]::IsNullOrWhiteSpace($PostCommitReceiptPath)){throw 'backup_post_commit_receipt_path_required'}
  if($Plan){
-  $inventory=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles
-  $old=if([IO.Directory]::Exists($dest)){Get-BackupTreeInventory $dest}else{$null}
-  return [pscustomobject]@{write_mode='zero_write';file_count=$inventory.file_count;bytes=$inventory.bytes;difference=(Get-BackupDifference $inventory $old)}
+  $inventory=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles -FileWarnings $warnings -AllowSourceDisappeared
+  $old=if([IO.Directory]::Exists($dest)){Get-BackupTreeInventory $dest -FileWarnings $warnings -IgnoreFileWarnings $warnings -DestinationSince $since}else{$null}
+  return [pscustomobject]@{write_mode='zero_write';file_count=$inventory.file_count;bytes=$inventory.bytes;difference=(Get-BackupDifference $inventory $old);file_warnings=$warnings.ToArray()}
  }
   $lease=$null;$incoming=$null;$committed=$false;$run=[guid]::NewGuid().ToString('N');$parent=[IO.Path]::GetDirectoryName($dest);$leaf=[IO.Path]::GetFileName($dest);$postReceiptPath=if($PostCommit){Resolve-BackupPath $PostCommitReceiptPath}else{$null};$previousManifestBackup=$null;$previousReceiptBackup=$null
  try{
   if(-not $LockHeld){$lease=Open-BackupResourceLock $dest};Repair-BackupTreeTransaction $dest
-  $inventory=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles -Hash
+  $inventory=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles -Hash -FileWarnings $warnings -AllowSourceDisappeared
    $digest=Get-BackupInventoryDigest $inventory;$manifestPath=$dest+'.backup-manifest.json';$old=Read-BackupJson $manifestPath;$hadManifest=[IO.File]::Exists($manifestPath);$oldPreviousPath=if($old -and $old.previous_path){[string]$old.previous_path}else{$null}
+   if($old -and $old.source-ieq $sourceIdentityPath){foreach($warning in @($old.file_warnings|Where-Object{$_ -and $_.reason-in @('antivirus_blocked','antivirus_removed')})){
+    if(Test-BackupWarningPath $warning.relative_path $warnings){continue}
+    if([IO.Path]::IsPathRooted($warning.relative_path) -or $warning.relative_path-match '(^|/)\.\.(/|$)|[\r\n|]'){throw 'backup_warning_path_invalid'}
+    if(Test-BackupRelativeSelection $warning.relative_path $ExcludeDirs $ExcludeFiles){Add-BackupFileWarning $warnings (Get-BackupAntivirusRetryWarning $warning (Join-Path $src $warning.relative_path))}
+   }}
    $hadReceipt=if($postReceiptPath){[IO.File]::Exists($postReceiptPath)}else{$false}
    if($PostCommit){
     if($hadManifest){$previousManifestBackup=$dest+'.backup-manifest.previous-'+$run+'.json';Copy-BackupFileVerified $manifestPath $previousManifestBackup (Get-BackupStableFileHash $manifestPath)}
@@ -241,27 +319,78 @@ function Invoke-VerifiedBackupTree {
   [void][IO.Directory]::CreateDirectory($incoming)
   foreach($directory in $inventory.directories){[void][IO.Directory]::CreateDirectory((Join-Path $incoming $directory))}
   foreach($file in $inventory.files){
+   if(Test-BackupWarningPath $file.relative_path $warnings){continue}
    $target=Join-Path $incoming $file.relative_path;$existing=Join-Path $dest $file.relative_path;$linked=$false
-   if([IO.File]::Exists($existing) -and (Get-BackupStableFileHash $existing)-ceq $file.sha256){
+   $stage='existing_target_hash'
+   try{
+   $existingHash=$null
+   if([IO.File]::Exists($existing)){
+    try{$existingHash=Get-BackupStableFileHash $existing}catch{
+     $warning=Get-BackupFileWarning $_ $file.relative_path $stage
+     if($warning){Add-BackupFileWarning $warnings $warning}
+     # A vanished reuse candidate is a cache miss: copy the still-known source normally.
+     elseif(-not (Get-BackupFileWarning $_ $file.relative_path $stage -AllowSourceDisappeared)){throw}
+    }
+   }
+   if($existingHash-ceq $file.sha256){
     try{New-Item -ItemType HardLink -Path $target -Target $existing -ErrorAction Stop|Out-Null;$linked=$true}catch{if([IO.File]::Exists($target)){throw}}
    }
-   if(-not $linked){Copy-BackupFileVerified $file.full_path $target $file.sha256}
+   $stage='copy';if(-not $linked){Copy-BackupFileVerified $file.full_path $target $file.sha256}
+   }catch{
+    $copyStage=[string]$_.Exception.Data['backup_file_stage'];if($copyStage){$stage=$copyStage}
+    $warning=Get-BackupFileWarning $_ $file.relative_path $stage -AllowSourceDisappeared:($stage-eq 'source_read' -or $stage-eq 'copy')
+    if(-not $warning -and $stage.StartsWith('destination_')){$warning=Get-BackupDestinationWarning $_ ([string]$_.Exception.Data['backup_destination_path']) $file.relative_path $stage $since}
+    if(-not $warning){throw};Add-BackupFileWarning $warnings $warning
+   }
   }
-  $actual=Get-BackupTreeInventory $incoming -Hash
-  if((Get-BackupInventoryDigest $actual)-cne $digest){throw 'backup_candidate_tree_hash_mismatch'}
-  $sourceAgain=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles
-  if((Get-BackupInventoryDigest $sourceAgain -Metadata)-cne (Get-BackupInventoryDigest $inventory -Metadata)){throw 'backup_source_changed_before_publication'}
+  # A warned path is never a deletion. Carry its old copy without opening its bytes.
+  foreach($warning in @($warnings.ToArray())){
+   $existing=Join-Path $dest $warning.relative_path;$target=Join-Path $incoming $warning.relative_path
+   if([IO.File]::Exists($existing) -and -not [IO.File]::Exists($target)){
+    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
+    try{New-Item -ItemType HardLink -Path $target -Target $existing -ErrorAction Stop|Out-Null}catch{if(-not (Get-BackupFileWarning $_ $warning.relative_path 'preserve_previous')){throw}}
+   }
+  }
+  $actual=Get-BackupTreeInventory $incoming -IgnoreFileWarnings $warnings -Hash -FileWarnings $warnings -DestinationSince $since
+  # Enumeration cannot report a file already quarantined before it began.
+  $actualPaths=@{};foreach($file in $actual.files){$actualPaths[$file.relative_path]=$true}
+  foreach($file in $inventory.files){
+   if($actualPaths.ContainsKey($file.relative_path) -or (Test-BackupWarningPath $file.relative_path $warnings)){continue}
+   $missing=[IO.FileNotFoundException]::new('backup_candidate_file_missing');$warning=Get-BackupDestinationWarning $missing (Join-Path $incoming $file.relative_path) $file.relative_path 'verify' $since
+   if(-not $warning){throw 'backup_candidate_file_missing'};Add-BackupFileWarning $warnings $warning
+  }
+  $sourceAgain=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles -FileWarnings $warnings -AllowSourceDisappeared
+  # A file seen earlier but missing on re-enumeration is a transient single-file warning.
+  $againPaths=@{};foreach($file in $sourceAgain.files){$againPaths[$file.relative_path]=$true}
+  foreach($file in $inventory.files){if(-not $againPaths.ContainsKey($file.relative_path) -and -not (Test-BackupWarningPath $file.relative_path $warnings)){Add-BackupFileWarning $warnings ([pscustomobject]@{relative_path=$file.relative_path;reason='source_disappeared';error_code=2;stage='source_recheck'})}}
+  $selected=Get-BackupInventoryWithoutWarnings $inventory $warnings;$actualSelected=Get-BackupInventoryWithoutWarnings $actual $warnings
+  $digest=Get-BackupInventoryDigest $selected
+  if((Get-BackupInventoryDigest $actualSelected)-cne $digest){throw 'backup_candidate_tree_hash_mismatch'}
+  if((Get-BackupInventoryDigest (Get-BackupInventoryWithoutWarnings $sourceAgain $warnings) -Metadata)-cne (Get-BackupInventoryDigest $selected -Metadata)){throw 'backup_source_changed_before_publication'}
   $hadTarget=[IO.Directory]::Exists($dest)
-  $record=[ordered]@{schema='devconfig.tree-manifest.v1';status='complete';run_id=$run;completed_utc=(Get-BackupUtc);source=$sourceIdentityPath;destination=$dest;content_sha256=$digest;verification='sha256_full_tree';file_count=$inventory.file_count;bytes=$inventory.bytes;directories=$inventory.directories;files=@($inventory.files|Select-Object relative_path,length,mtime_ticks,sha256);previous_path=$(if($hadTarget){$previous}else{$null})}
+  $retained=@();if($old){$retained+=@($old.retained_warning_generations|Where-Object{$_});if($oldPreviousPath){$retained+=$oldPreviousPath}}
+  $record=[ordered]@{schema='devconfig.tree-manifest.v1';status='complete';run_id=$run;completed_utc=(Get-BackupUtc);source=$sourceIdentityPath;destination=$dest;content_sha256=$digest;verification='sha256_full_tree';verification_scope='selected_files_excluding_file_warnings';file_warnings=$warnings.ToArray();file_count=@($selected.files).Count;bytes=[long](($selected.files|Measure-Object length -Sum).Sum);directories=$selected.directories;files=@($selected.files|Select-Object relative_path,length,mtime_ticks,sha256);previous_path=$(if($hadTarget){$previous}else{$null});retained_warning_generations=$(if($warnings.Count){@($retained|Select-Object -Unique)}else{@()})}
    Write-BackupJsonAtomic ($dest+'.backup-transaction.json') @{schema='devconfig.tree-transaction.v1';run_id=$run;destination=$dest;incoming=$incoming;previous=$previous;had_target=$hadTarget;had_manifest=$hadManifest;had_receipt=$hadReceipt;previous_manifest_path=$previousManifestBackup;previous_receipt_path=$previousReceiptBackup;post_commit_receipt_path=$postReceiptPath;old_previous_path=$oldPreviousPath}
    if($hadTarget){[IO.Directory]::Move($dest,$previous)}
    [IO.Directory]::Move($incoming,$dest)
+   # The rename can itself trigger scanning. Recheck the published paths before the receipt.
+   $published=Get-BackupTreeInventory $dest -IgnoreFileWarnings $warnings -FileWarnings $warnings -DestinationSince $since
+   $publishedPaths=@{};foreach($file in $published.files){$publishedPaths[$file.relative_path]=$true}
+   foreach($file in $selected.files){
+    if($publishedPaths.ContainsKey($file.relative_path) -or (Test-BackupWarningPath $file.relative_path $warnings)){continue}
+    $missing=[IO.FileNotFoundException]::new('backup_published_file_missing');$warning=Get-BackupDestinationWarning $missing (Join-Path $dest $file.relative_path) $file.relative_path 'published_verify' $since
+    if(-not $warning){throw 'backup_published_file_missing'};Add-BackupFileWarning $warnings $warning
+   }
+   if((Get-BackupInventoryDigest (Get-BackupInventoryWithoutWarnings $published $warnings) -Metadata)-cne (Get-BackupInventoryDigest (Get-BackupInventoryWithoutWarnings $actual $warnings) -Metadata)){throw 'backup_published_tree_changed'}
+   $selected=Get-BackupInventoryWithoutWarnings $inventory $warnings
+   $record.content_sha256=Get-BackupInventoryDigest $selected;$record.file_warnings=$warnings.ToArray();$record.file_count=@($selected.files).Count;$record.bytes=[long](($selected.files|Measure-Object length -Sum).Sum);$record.directories=$selected.directories;$record.files=@($selected.files|Select-Object relative_path,length,mtime_ticks,sha256)
+   if($warnings.Count){$record.retained_warning_generations=@($retained|Where-Object{$_}|Select-Object -Unique)}
    Write-BackupJsonAtomic ($dest+'.backup-manifest.json') $record
    if($PostCommit){& $PostCommit ([pscustomobject]$record)}
    $committed=$true;[IO.File]::Delete($dest+'.backup-transaction.json')
    if($previousManifestBackup -and [IO.File]::Exists($previousManifestBackup)){[IO.File]::Delete($previousManifestBackup)}
    if($previousReceiptBackup -and [IO.File]::Exists($previousReceiptBackup)){[IO.File]::Delete($previousReceiptBackup)}
-   if($oldPreviousPath){Remove-BackupOwnedDirectory $oldPreviousPath $parent ('^'+[regex]::Escape($leaf)+'\.previous-[a-f0-9]{32}$')}
+   if(-not $warnings.Count){foreach($retainedPath in @($retained|Where-Object{-not [string]::IsNullOrWhiteSpace([string]$_)}|Select-Object -Unique)){Remove-BackupOwnedDirectory $retainedPath $parent ('^'+[regex]::Escape($leaf)+'\.previous-[a-f0-9]{32}$')}}
    return [pscustomobject]$record
  }catch{
   if(-not $committed -and [IO.File]::Exists($dest+'.backup-transaction.json')){Repair-BackupTreeTransaction $dest};throw
@@ -328,8 +457,8 @@ function Publish-DevConfigPackage($Pack,[string]$Root,[ValidateRange(1,365)][int
  $latest=Join-Path $Root 'latest.zip';Copy-BackupFileVerified $target $latest $Pack.Sha
  foreach($suffix in @('.sha256','.receipt.json','.manifest.json')){Copy-BackupFileVerified ($target+$suffix) ($latest+$suffix) (Get-BackupStableFileHash ($target+$suffix))}
  $receipt=Read-BackupJson ($target+'.receipt.json') -Required
- Write-BackupJsonAtomic (Join-Path $Root 'current.json') @{schema='devconfig.package-current.v2';status='complete';collection_status='complete';verification_status='complete';completed_utc=(Get-BackupUtc);destination=[IO.Path]::GetFullPath($Root).TrimEnd('\');package_name=$Pack.Name;sha256=$Pack.Sha;package_bytes=$receipt.package_bytes;content_sha256=$receipt.content_sha256}
- Remove-OldDevConfigPackages $Root $Keep $Pack.Name
+ Write-BackupJsonAtomic (Join-Path $Root 'current.json') @{schema='devconfig.package-current.v2';status='complete';collection_status='complete';verification_status='complete';completed_utc=(Get-BackupUtc);destination=[IO.Path]::GetFullPath($Root).TrimEnd('\');package_name=$Pack.Name;sha256=$Pack.Sha;package_bytes=$receipt.package_bytes;content_sha256=$receipt.content_sha256;file_warnings=@($receipt.file_warnings|Where-Object{$_})}
+ if(-not @($receipt.file_warnings|Where-Object{$_}).Count){Remove-OldDevConfigPackages $Root $Keep $Pack.Name}
 }
 function Invoke-BackupRclone {
  [CmdletBinding()]param([Parameter(ValueFromRemainingArguments=$true)][object[]]$Arguments)

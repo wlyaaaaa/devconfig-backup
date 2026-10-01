@@ -43,6 +43,18 @@ pwsh -File Restore-WeChat.ps1 -BackupRoot 'X:\backup\xwechat_files' -Target 'E:\
 
 `COPY_COMPLETE_AWAITING_HUMAN_ACCEPTANCE` 只表示文件复制完成，用户仍需在官方客户端亲自确认目标账号、历史和媒体。在这之前保留备份源和回滚目录。`-DriveOnly` 使用明确远端、当前用户代理并校验复制结果；隔离本地后端测试不等于真实 Google Drive 灾难恢复已经验收。
 
+## 单文件警告与旧副本
+
+微信树和开发配置采集遇到 Win32 225/226（HRESULT `0x800700E1` / `0x800700E2`），或已枚举的源文件在扫描、哈希、复制、复核中消失，只跳过这一文件，其余继续完成。整体回执保持 `status=complete`，并在 `file_warnings` 中逐项记录相对路径、`reason`、`error_code`、`stage`。原因值是 `antivirus_blocked`、`antivirus_removed` 或 `source_disappeared`。下次自然运行重新尝试，不持久排除这些路径，也不修改防病毒设置。
+
+目标复制后消失，须只读匹配本轮同一精确路径的 Defender 1117 成功隔离/移除动作，才能记为 `antivirus_removed`；普通缺失、写盘失败、哈希不一致、来源根不可读和配置错误仍失败。配置文件的原有占用/ACL 跳过规则继续使用 `complete_with_skipped_files`。
+
+警告路径按字面精确匹配，不解释成通配符。微信发布保留该路径上的旧副本；无法沿当前路径携带时，旧树仍保存在明确登记的前代目录里。AV（防病毒）警告从既有成功清单带入下一轮：路径仍不存在时继续保护旧副本，路径重新可读后正常复制，成功后自然清除警告，不建立永久复制排除。普通 `source_disappeared` 只保护本轮，下一轮源根正常但未枚举到该路径时仍按跟源删除处理。本人明确决定删除受 AV 保护的旧副本时，可明确解除对应清单/回执里的警告；本库不新增处理界面。持续出现警告时不清理可恢复的前代，下一轮无文件警告时再恢复原有有界保留。配置包遇文件警告时也暂停旧包清理，因此 `Keep=1` 不会删掉仍包含该文件旧副本的成功包。
+
+树清单的 `verification_scope=selected_files_excluding_file_warnings` 明确表示校验范围。完整性复核和微信 Drive/补传监控采用相同警告范围；云端的旧副本也不因这些排除路径被删除。成功回执、清单、配置包指针和 `Backup-Status.ps1 -Json` 均携带同名字段；人类状态页显示路径、错误码和阶段，汇总状态是 `receipts_current_with_file_warnings`。这表示其余文件完成，警告文件没有新的完整性承诺，恢复时先查看清单与旧副本。
+
+Defender 动作编号 2/3 对应隔离/移除，依据 [Microsoft MPTHREAT_ACTION 文档](https://learn.microsoft.com/en-us/windows/win32/lwef/mpthreat-action)。验证使用 `tests/Assert-FileWarningResilience.ps1` 的合成目录和故障注入，不使用病毒样本或 EICAR 文件。
+
 ## 任务、网络和 H 冷备
 
 四个正式任务由 `Setup-ScheduledTasks.ps1` 的事务式注册流程管理：精确名称、原定义前像、逐项回读和失败回滚。隐藏启动器优先 PowerShell 7，缺失才回退 5.1，并传递实际业务退出码。本地/G 与 Drive 分离，网络不可用不阻断本地保护；实际时间、启用状态及下次执行以 Task Scheduler 为准。

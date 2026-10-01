@@ -1,6 +1,6 @@
 # Source inventory preserves the original selection; failures are never successful absence.
 function Get-DevConfigSourceInventory {
- param($Config,[string]$ProfileRoot,[switch]$IncludeHistory,[switch]$Hash)
+ param($Config,[string]$ProfileRoot,[switch]$IncludeHistory,[switch]$Hash,$KnownInventory=$null)
  $profile=Resolve-BackupPath $ProfileRoot
  $null=[IO.Directory]::GetFileSystemEntries($profile) # Unavailable profile is never an empty configuration.
  $excludeDirs=@($Config.ExcludeDirs);$excludeFiles=@($Config.ExcludeFiles)
@@ -8,6 +8,7 @@ function Get-DevConfigSourceInventory {
  $fileMap=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
  $dirSet=[Collections.Generic.SortedSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
  $sources=[Collections.Generic.List[object]]::new()
+ $warnings=[Collections.Generic.List[object]]::new()
  function Add-SelectedSource([string]$Source,[string]$Relative,[bool]$IsDirectory){
   if([IO.Path]::IsPathRooted($Relative) -or $Relative-match '(^|[/\\])\.\.([/\\]|$)|[\r\n|:]'){throw 'source_selection_destination_invalid'}
   $Relative=$Relative.Replace('\','/').Trim('/')
@@ -17,8 +18,17 @@ function Get-DevConfigSourceInventory {
   try{$attributes=[IO.File]::GetAttributes($Source)}
   catch [IO.FileNotFoundException]{$present=$false}
   catch [IO.DirectoryNotFoundException]{$present=$false}
+  catch{
+   $warning=Get-BackupFileWarning $_ $Relative 'scan'
+   if($IsDirectory -or -not $warning){throw};Add-BackupFileWarning $warnings $warning;$sources.Add([pscustomobject]@{id=$Relative;status='available_with_file_warning';required=$required});return
+  }
   if(-not $present){
    $volume=[IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Source));$null=[IO.Directory]::GetFileSystemEntries($volume)
+   if(-not $IsDirectory -and $KnownInventory -and (@($KnownInventory.files|Where-Object{$_.relative_path-ieq $Relative}).Count -or (Test-BackupWarningPath $Relative $KnownInventory.file_warnings))){
+    $priorAv=@($KnownInventory.file_warnings|Where-Object{$_.relative_path-ieq $Relative -and $_.reason-in @('antivirus_blocked','antivirus_removed')})
+    $warning=if($priorAv.Count){Get-BackupAntivirusRetryWarning $priorAv[0] $Source}else{[pscustomobject]@{relative_path=$Relative;reason='source_disappeared';error_code=2;stage='source_recheck'}}
+    Add-BackupFileWarning $warnings $warning;$sources.Add([pscustomobject]@{id=$Relative;status='available_with_file_warning';required=$required});return
+   }
    if($required){throw ('required_backup_source_missing: '+$Relative)}
    $sources.Add([pscustomobject]@{id=$Relative;status='optional_absent';required=$required});return
   }
@@ -26,13 +36,21 @@ function Get-DevConfigSourceInventory {
   $sources.Add([pscustomobject]@{id=$Relative;status='available';required=$required})
   if($IsDirectory){
    [void]$dirSet.Add($Relative)
-   $tree=Get-BackupTreeInventory $Source -ExcludeDirs $excludeDirs -ExcludeFiles $excludeFiles -Hash:$Hash -SkipReparsePoints -RelativePrefix $Relative -ExcludeRelativePaths @($Config.ExcludeRelativePaths)
+   $tree=Get-BackupTreeInventory $Source -ExcludeDirs $excludeDirs -ExcludeFiles $excludeFiles -Hash:$Hash -SkipReparsePoints -RelativePrefix $Relative -ExcludeRelativePaths @($Config.ExcludeRelativePaths) -FileWarnings $warnings -AllowSourceDisappeared
    foreach($directory in $tree.directories){[void]$dirSet.Add($Relative+'/'+$directory)}
    foreach($file in $tree.files){$path=$Relative+'/'+$file.relative_path;$file.relative_path=$path;if($fileMap.ContainsKey($path)){if($fileMap[$path].full_path-ine $file.full_path){throw 'backup_source_destination_collision'}}else{$fileMap.Add($path,$file)}}
+   foreach($warning in @($KnownInventory.file_warnings|Where-Object{$_ -and $_.reason-in @('antivirus_blocked','antivirus_removed')})){
+    $path=[string]$warning.relative_path;if(-not $path.StartsWith($Relative+'/',[StringComparison]::OrdinalIgnoreCase) -or (Test-BackupWarningPath $path $warnings)){continue}
+    if($path-match '(^|/)\.\.(/|$)|[\r\n|]'){throw 'backup_warning_path_invalid'}
+    $tail=$path.Substring($Relative.Length+1)
+    if((Test-BackupRelativeSelection $tail $excludeDirs $excludeFiles) -and -not (Test-BackupNameExcluded $path @($Config.ExcludeRelativePaths))){Add-BackupFileWarning $warnings (Get-BackupAntivirusRetryWarning $warning (Join-Path $Source $tail))}
+   }
   }else{
    if(Test-BackupNameExcluded ([IO.Path]::GetFileName($Source)) $excludeFiles){return}
-   $item=Get-Item -LiteralPath $Source -Force -ErrorAction Stop
-   $record=[pscustomobject]@{relative_path=$Relative;full_path=$Source;length=[long]$item.Length;mtime_ticks=[long]$item.LastWriteTimeUtc.Ticks;sha256=$(if($Hash){Get-BackupStableFileHash $Source}else{$null})}
+   try{
+    $item=Get-Item -LiteralPath $Source -Force -ErrorAction Stop
+    $record=[pscustomobject]@{relative_path=$Relative;full_path=$Source;length=[long]$item.Length;mtime_ticks=[long]$item.LastWriteTimeUtc.Ticks;sha256=$(if($Hash){Get-BackupStableFileHash $Source}else{$null})}
+   }catch{$warning=Get-BackupFileWarning $_ $Relative $(if($Hash){'hash'}else{'scan'}) -AllowSourceDisappeared;if(-not $warning){throw};Add-BackupFileWarning $warnings $warning;return}
    if($fileMap.ContainsKey($Relative)){if($fileMap[$Relative].full_path-ine $Source){throw 'backup_source_destination_collision'}}else{$fileMap.Add($Relative,$record)}
   }
  }
@@ -45,10 +63,10 @@ function Get-DevConfigSourceInventory {
  foreach($path in @($Config.SpecialFiles)){if($path){Add-SelectedSource (Join-Path $profile $path) ('special/'+$path) $false}}
  foreach($required in @($Config.RequiredSources)){if($required -and $required-notin @($sources|ForEach-Object{$_.id})){throw 'required_backup_source_not_declared'}}
  # Parent directories are part of the same deterministic logical tree.
- foreach($key in $fileMap.Keys){$parent=[IO.Path]::GetDirectoryName($key).Replace('\','/');while($parent){[void]$dirSet.Add($parent);$next=[IO.Path]::GetDirectoryName($parent);$parent=if($next){$next.Replace('\','/')}else{''}}}
+ foreach($key in @($fileMap.Keys)+@($warnings|ForEach-Object{$_.relative_path})){$parent=[IO.Path]::GetDirectoryName($key).Replace('\','/');while($parent){[void]$dirSet.Add($parent);$next=[IO.Path]::GetDirectoryName($parent);$parent=if($next){$next.Replace('\','/')}else{''}}}
  [string[]]$keys=@($fileMap.Keys);[Array]::Sort($keys,[StringComparer]::OrdinalIgnoreCase)
  $files=@($keys|ForEach-Object{$fileMap[$_]});[long]$bytes=0;foreach($file in $files){$bytes+=$file.length}
- return [pscustomobject]@{root=$profile;files=$files;directories=@($dirSet);sources=@($sources);file_count=$files.Count;bytes=$bytes;source_count=$sources.Count;optional_absent_count=@($sources|Where-Object{$_.status-eq 'optional_absent'}).Count;hashes_computed=[bool]$Hash}
+ return [pscustomobject]@{root=$profile;files=$files;directories=@($dirSet);sources=@($sources);file_count=$files.Count;bytes=$bytes;source_count=$sources.Count;optional_absent_count=@($sources|Where-Object{$_.status-eq 'optional_absent'}).Count;hashes_computed=[bool]$Hash;file_warnings=$warnings.ToArray()}
 }
 function Test-DevConfigRequiredPath([string]$RelativePath,$Inventory){
  foreach($source in @($Inventory.sources|Where-Object{$_.required})){$id=[string]$source.id;if($RelativePath-ieq $id -or $RelativePath.StartsWith($id+'/',[StringComparison]::OrdinalIgnoreCase)){return $true}};return $false
@@ -58,20 +76,26 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
  # skipped and reported; required sources and every other failure stay fatal.
  [void][IO.Directory]::CreateDirectory($Destination)
  foreach($directory in @($Inventory.directories)){[void][IO.Directory]::CreateDirectory((Join-Path $Destination $directory))}
- $kept=[Collections.Generic.List[object]]::new();$skipped=[Collections.Generic.List[object]]::new()
+ $kept=[Collections.Generic.List[object]]::new();$skipped=[Collections.Generic.List[object]]::new();$warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($Inventory.file_warnings)){Add-BackupFileWarning $warnings $warning};$since=[DateTimeOffset]::UtcNow
  foreach($file in @($Inventory.files)){
   $target=Join-Path $Destination $file.relative_path
   for($attempt=1;$attempt-le 3;$attempt++){
+   $stage='source_read'
    try{
     $before=Get-Item -LiteralPath $file.full_path -Force -ErrorAction Stop
-    $hash=Get-BackupStableFileHash $file.full_path
+    $stage='hash';$hash=Get-BackupStableFileHash $file.full_path
+    $stage='copy'
     Copy-BackupFileVerified $file.full_path $target $hash
-    $after=Get-Item -LiteralPath $file.full_path -Force -ErrorAction Stop
+    $stage='source_recheck';$after=Get-Item -LiteralPath $file.full_path -Force -ErrorAction Stop
     if($before.Length-ne $after.Length -or $before.LastWriteTimeUtc.Ticks-ne $after.LastWriteTimeUtc.Ticks){throw 'backup_source_changed_during_capture'}
     $file.sha256=$hash;$file.length=[long]$after.Length;$file.mtime_ticks=[long]$after.LastWriteTimeUtc.Ticks
     $kept.Add($file);break
    }catch{
     $_.Exception.Data['backup_source_path']=$file.full_path;$_.Exception.Data['backup_source_relative_path']=$file.relative_path
+    $copyStage=[string]$_.Exception.Data['backup_file_stage'];if($copyStage){$stage=$copyStage}
+    $warning=Get-BackupFileWarning $_ $file.relative_path $stage -AllowSourceDisappeared:(-not $stage.StartsWith('destination_'))
+    if(-not $warning -and $stage.StartsWith('destination_')){$warning=Get-BackupDestinationWarning $_ ([string]$_.Exception.Data['backup_destination_path']) $file.relative_path $stage $since}
+    if($warning){Add-BackupFileWarning $warnings $warning;break}
     $reason=Get-BackupUnreadableReason $_.Exception
     $retryable=$_.Exception.Message-match 'backup_source_changed|backup_copy_hash_mismatch' -or ($reason-ne 'access_denied' -and ($_.Exception-is [IO.IOException] -or $_.Exception.InnerException-is [IO.IOException]))
     if($attempt-lt 3 -and $retryable){Start-Sleep -Milliseconds 150;continue}
@@ -87,6 +111,7 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
  }
  $Inventory.files=$kept.ToArray();$Inventory.file_count=$kept.Count
  $Inventory|Add-Member -NotePropertyName skipped_files -NotePropertyValue $skipped.ToArray() -Force
+ $Inventory|Add-Member -NotePropertyName file_warnings -NotePropertyValue $warnings.ToArray() -Force
  $Inventory.bytes=[long](($Inventory.files|Measure-Object length -Sum).Sum)
 }
 function Test-DevConfigSelectionAfterCapture($Captured,$Current){
@@ -94,17 +119,21 @@ function Test-DevConfigSelectionAfterCapture($Captured,$Current){
  # already captured are counted, while changed selection (missing/new paths) fails.
  # Files reported as skipped during capture are compared only by their absence here.
  $skippedPaths=@{};foreach($entry in @($Captured.skipped_files)){if($entry){$skippedPaths[[string]$entry.relative_path]=$true}}
- $currentFiles=@($Current.files|Where-Object{-not $skippedPaths.ContainsKey([string]$_.relative_path)})
- $left=@(@($Captured.directories|ForEach-Object{'d|'+$_})+@($Captured.files|ForEach-Object{'f|'+$_.relative_path}))
- $right=@(@($Current.directories|ForEach-Object{'d|'+$_})+@($currentFiles|ForEach-Object{'f|'+$_.relative_path}))
+ $warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($Captured.file_warnings)+@($Current.file_warnings)){Add-BackupFileWarning $warnings $warning}
+ $currentPaths=@{};foreach($file in $Current.files){$currentPaths[$file.relative_path]=$true}
+ foreach($file in $Captured.files){if(-not $currentPaths.ContainsKey($file.relative_path) -and -not (Test-BackupWarningPath $file.relative_path $warnings)){Add-BackupFileWarning $warnings ([pscustomobject]@{relative_path=$file.relative_path;reason='source_disappeared';error_code=2;stage='source_recheck'})}}
+ $Captured.file_warnings=$warnings.ToArray();$leftInventory=Get-BackupInventoryWithoutWarnings $Captured $warnings;$rightInventory=Get-BackupInventoryWithoutWarnings $Current $warnings
+ $currentFiles=@($rightInventory.files|Where-Object{-not $skippedPaths.ContainsKey([string]$_.relative_path)})
+ $left=@(@($leftInventory.directories|ForEach-Object{'d|'+$_})+@($leftInventory.files|ForEach-Object{'f|'+$_.relative_path}))
+ $right=@(@($rightInventory.directories|ForEach-Object{'d|'+$_})+@($currentFiles|ForEach-Object{'f|'+$_.relative_path}))
  if(($left-join "`n")-cne ($right-join "`n")){throw 'backup_source_selection_changed_during_collection'}
  $byPath=@{};foreach($file in $Captured.files){$byPath[$file.relative_path]=$file}
  $changes=0;foreach($file in $currentFiles){$old=$byPath[$file.relative_path];if($old.length-ne $file.length -or $old.mtime_ticks-ne $file.mtime_ticks){$changes++}}
  return $changes
 }
 
-function Invoke-DevConfigSystemExport($Config,[string]$Stage){
- $system=Join-Path $Stage '_system';$man=Join-Path $Stage '_manifests';$missing=[Collections.Generic.List[string]]::new()
+function Invoke-DevConfigSystemExport($Config,[string]$Stage,$FileWarnings=$null,$KnownWarnings=@()){
+ $system=Join-Path $Stage '_system';$man=Join-Path $Stage '_manifests';$missing=[Collections.Generic.List[string]]::new();$since=[DateTimeOffset]::UtcNow
  [void][IO.Directory]::CreateDirectory($system);[void][IO.Directory]::CreateDirectory($man)
  foreach($entry in @($Config.RegistryExports)){
   $path=([string]$entry.Key).Replace('HKCU\','Registry::HKEY_CURRENT_USER\').Replace('HKLM\','Registry::HKEY_LOCAL_MACHINE\')
@@ -120,7 +149,14 @@ function Invoke-DevConfigSystemExport($Config,[string]$Stage){
   $xml=Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop
   [IO.File]::WriteAllText((Join-Path $tasks $name),$xml,[Text.Encoding]::Unicode)
  }
- $hosts=Join-Path $env:WINDIR 'System32\drivers\etc\hosts';Copy-BackupFileVerified $hosts (Join-Path $system 'hosts') (Get-BackupStableFileHash $hosts)
+ $hosts=Join-Path $env:WINDIR 'System32\drivers\etc\hosts';$hostSeen=$false
+ try{$null=Get-Item -LiteralPath $hosts -Force -ErrorAction Stop;$hostSeen=$true;Copy-BackupFileVerified $hosts (Join-Path $system 'hosts') (Get-BackupStableFileHash $hosts)}catch{
+  if($null-eq $FileWarnings){throw};$stageCode=[string]$_.Exception.Data['backup_file_stage'];if(-not $stageCode){$stageCode='system_export_source'}
+  $warning=Get-BackupFileWarning $_ '_system/hosts' $stageCode -AllowSourceDisappeared:($hostSeen -and -not $stageCode.StartsWith('destination_'))
+  if(-not $warning -and -not $stageCode.StartsWith('destination_')){$priorAv=@($KnownWarnings|Where-Object{$_.relative_path-ceq '_system/hosts'});if($priorAv.Count){$warning=Get-BackupAntivirusRetryWarning $priorAv[0] $hosts}}
+  if(-not $warning -and $stageCode.StartsWith('destination_')){$warning=Get-BackupDestinationWarning $_ ([string]$_.Exception.Data['backup_destination_path']) '_system/hosts' $stageCode $since}
+  if(-not $warning){throw};Add-BackupFileWarning $FileWarnings $warning
+ }
  $wifi=Join-Path $system 'wifi';[void][IO.Directory]::CreateDirectory($wifi)
  & netsh.exe wlan export profile key=clear "folder=$wifi" *> $null
  if($LASTEXITCODE-ne 0){throw 'wifi_profile_export_failed'}
