@@ -59,6 +59,8 @@ pwsh -File Restore-WeChat.ps1 -BackupRoot 'X:\backup\xwechat_files' -Target 'E:\
 
 Defender 动作编号 2/3 对应隔离/移除，依据 [Microsoft MPTHREAT_ACTION 文档](https://learn.microsoft.com/en-us/windows/win32/lwef/mpthreat-action)。验证使用 `tests/Assert-FileWarningResilience.ps1` 的合成目录和故障注入，不使用病毒样本或 EICAR 文件。
 
+微信 Hot/Drive 成功回执的 `payload_names_emitted` 在 `file_warnings` 非空时为 `true`，因为其中输出了文件相对路径；无文件警告时为 `false`。`payload_content_interpreted` 始终保持 `false`。
+
 微信 Drive 与补传监控通过共用 `Get-BackupRcloneWarningFilters` 按字面转义警告路径，保留 `[]`、`{}` 等文件名字符的真实含义。过滤规则统一采用 `--filter` 并固定到来源根，依据 [rclone 官方过滤语法](https://rclone.org/filtering/#pattern-syntax)，健康文件不会因警告路径被当成通配符而漏掉复制或核对。
 
 ## 任务、网络和 H 冷备

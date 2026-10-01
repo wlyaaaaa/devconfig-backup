@@ -197,11 +197,13 @@ try{
  Put (Join-Path $src 'blocked.bin') 'old';Put (Join-Path $src 'good.bin') 'old-good'
  $args=@('-Source',$src,'-HotRoot',$dest,'-HotReceiptPath',$receipt,'-StateRoot',$state,'-Target','Hot','-Json')
  $normal=Run-Script (Join-Path $repo 'Backup-WeChat.ps1') $args;Check ($normal.Exit-eq 0) 'Normal WeChat entrypoint'
+ $normalReceipt=Read-BackupJson $receipt;Check (-not $normalReceipt.payload_names_emitted -and -not $normalReceipt.payload_content_interpreted) 'A receipt without file warnings emits no payload names and interprets no content'
  Put (Join-Path $src 'blocked.bin') 'new';Put (Join-Path $src 'good.bin') 'new-good'
  $warned=Run-Script (New-FaultEntrypoint 'Backup-WeChat.ps1' 226) $args
  $run=Read-BackupJson (Join-Path $state 'wechat-local-last.json') -Required;$manifest=Get-VerifiedBackupTreeManifest $dest -VerifyContent
  Check ($warned.Exit-eq 0 -and $run.status-ceq 'complete' -and $run.hot-ceq 'complete' -and $run.file_warnings[0].error_code-eq 226) ('WeChat entrypoint remains complete with warning: '+$warned.Text)
  Check ((Test-BackupTreeReceiptBound $receipt $dest $manifest) -and @((Read-BackupJson $receipt).file_warnings).Count-eq 1) 'Warned WeChat receipt remains bound to its verified manifest'
+ $warnedReceipt=Read-BackupJson $receipt;Check ($warnedReceipt.payload_names_emitted -and -not $warnedReceipt.payload_content_interpreted) 'Warning relative paths count as emitted names while payload content remains uninterpreted'
  $plan=Run-Script (Join-Path $repo 'Backup-WeChat.ps1') @('-Source',$src,'-HotRoot',$dest,'-HotReceiptPath',$receipt,'-StateRoot',$state,'-Target','Drive','-AllowLiveSourceHot','-Plan','-Json')
  Check ($plan.Exit-eq 0 -and ($plan.Text|ConvertFrom-Json).targets[0].upload_ready) 'Warned G generation passes existing read-only Drive gate'
  $status=Run-Script (Join-Path $repo 'Backup-Status.ps1') @('-OutputRoot',$output,'-HotRoot',$hot,'-WeChatHotRoot',$dest,'-HotReceiptPath',$receipt,'-Json')
