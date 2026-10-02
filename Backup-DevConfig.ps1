@@ -42,6 +42,14 @@ function Push-Hot($Pack){
   try{Publish-DevConfigPackage $Pack $HotRoot $KeepHot;return}finally{$hotLease.Dispose()}
  }
 }
+function Throw-DriveMetadataFailure([string]$Stage,[string]$ObjectKind,[string]$Suffix,[int]$NativeExit,[string]$Detail){
+ # Keep only fixed diagnostic categories; never remote names, accounts or output.
+ $safeDetails=@('copy_failed','local_file_missing','remote_object_query_failed','remote_object_hash_unavailable','remote_object_missing_or_mismatch')
+ if($Detail-notin $safeDetails){$Detail='verification_result_unavailable'}
+ $failureException=[InvalidOperationException]::new('drive_portable_metadata_verification_failed')
+ $failureException.Data['backup_drive_diagnostic']=[pscustomobject][ordered]@{stage=$Stage;object_kind=$ObjectKind;suffix=$Suffix;native_exit=$NativeExit;reason=$Detail}
+ throw $failureException
+}
 function Push-Drive($Pack){
  $rclone=Get-BackupExecutable rclone -FallbackPath 'E:\Scoop\shims\rclone.exe';$env:PATH=[IO.Path]::GetDirectoryName($rclone)+';'+$env:PATH
  $network=Initialize-BackupNetwork
@@ -67,7 +75,10 @@ function Push-Drive($Pack){
   foreach($suffix in @('.receipt.json','.manifest.json','.sha256')){
    $local=$Pack.Zip+$suffix;$target=$dest+'/'+$name+$suffix
    Invoke-BackupRclone copyto $local $target @flags *> $null
-   if($LASTEXITCODE-ne 0 -or -not (Test-RcloneRemoteFileMatchesLocal -LocalPath $local -RemotePath $target).Matches){throw 'drive_portable_metadata_verification_failed'}
+   $copyExit=$LASTEXITCODE;$objectKind=if($name-ceq $Pack.Name){'dated'}else{'latest'}
+   if($copyExit-ne 0){Throw-DriveMetadataFailure 'drive_portable_metadata_copy' $objectKind $suffix $copyExit 'copy_failed'}
+   $verified=Test-RcloneRemoteFileMatchesLocal -LocalPath $local -RemotePath $target
+   if(-not $verified.Matches){Throw-DriveMetadataFailure 'drive_portable_metadata_verify' $objectKind $suffix $verified.ExitCode $verified.Reason}
   }
  }
  $pointer=[ordered]@{schema='devconfig.package-current.v2';status='complete';collection_status='complete';verification_status='complete';destination=$dest;completed_utc=(Get-BackupUtc);package_name=$Pack.Name;sha256=$Pack.Sha;package_bytes=$Pack.Receipt.package_bytes;content_sha256=$Pack.Receipt.content_sha256;file_warnings=@($Pack.Receipt.file_warnings|Where-Object{$_})}
@@ -173,7 +184,14 @@ try{
  # Serialize collection, publication and retention through the same output lease.
  Write-BackupJsonAtomic $runPath $run
  if($Tier-contains 'Hot'){$run.hot='running';Write-BackupJsonAtomic $runPath $run;try{Push-Hot $pack;$run.hot='complete'}catch{$run.hot='failed';$run.failure=Get-BackupFailureCode $_;$script:overallExitCode=1}}
- if($Tier-contains 'Drive'){$run.drive='running';Write-BackupJsonAtomic $runPath $run;try{Push-Drive $pack;$run.drive='complete'}catch{$run.drive='failed';$run.failure=Get-BackupFailureCode $_;$script:overallExitCode=1}}
+ if($Tier-contains 'Drive'){
+  $run.drive='running';Write-BackupJsonAtomic $runPath $run
+  try{Push-Drive $pack;$run.drive='complete'}catch{
+   $run.drive='failed';$run.failure=Get-BackupFailureCode $_;$script:overallExitCode=1
+   $diagnostic=$_.Exception.Data['backup_drive_diagnostic']
+   if($diagnostic){$run.drive_diagnostic=$diagnostic;$run.failure_stage=$diagnostic.stage}
+  }
+ }
  # Skipped unreadable files keep the task successful but are never reported as plain complete.
  $run.status=if($script:overallExitCode-ne 0){'failed'}elseif($run.skipped_file_count-gt 0){'complete_with_skipped_files'}else{'complete'}
 }catch{
