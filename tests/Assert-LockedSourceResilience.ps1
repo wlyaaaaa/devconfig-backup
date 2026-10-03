@@ -57,6 +57,21 @@ try{
  Check ((Get-BackupFailureSourcePath $plain @(,@('profile',$profile)))-ceq 'profile/settings/ok.txt') 'A full source path is reported relative to its root, never as an absolute path'
  Check ($null-eq (Get-BackupUnreadableReason ([IO.FileNotFoundException]::new('gone')))) 'A vanished file is not a skippable lock'
 
+ # Required roots stay strict, but an exact runtime mutex is outside the selection.
+ Put (Join-Path $profile '.codex/config.toml') 'real configuration'
+ Put (Join-Path $profile '.codex/dependency.lock') 'recoverable dependency versions'
+ Put (Join-Path $profile '.codex/.sqlite-maintenance.lock') ''
+ $maintenance=[IO.File]::Open((Join-Path $profile '.codex/.sqlite-maintenance.lock'),[IO.FileMode]::Open,[IO.FileAccess]::ReadWrite,[IO.FileShare]::ReadWrite);$handles.Add($maintenance);$maintenance.Lock(0,1)
+ $policy=Import-PowerShellDataFile (Join-Path $repo 'sources.psd1')
+ $requiredRoot=@{HomeDirs=@('.codex');RequiredSources=@('home/.codex');ExcludeRelativePaths=$policy.ExcludeRelativePaths}
+ $inventory=Get-DevConfigSourceInventory $requiredRoot $profile
+ Copy-DevConfigSourceInventory $inventory (Join-Path $fixture 'stage-runtime-mutex')
+ Check ($inventory.file_count-eq 2 -and @($inventory.skipped_files).Count-eq 0) 'A locked maintenance mutex does not fail or downgrade the required Codex root'
+ $dependency=Hold (Join-Path $profile '.codex/dependency.lock');$handles.Add($dependency);$failure=$null
+ try{Copy-DevConfigSourceInventory (Get-DevConfigSourceInventory $requiredRoot $profile) (Join-Path $fixture 'stage-real-lock')}catch{$failure=$_}
+ Check ($null-ne $failure -and (Get-BackupFailureCode $failure)-ceq 'required_backup_source_unreadable' -and (Get-BackupFailureSourcePath $failure)-ceq 'home/.codex/dependency.lock') 'Other locked files in the required root still fail with their exact path'
+ $dependency.Dispose();[void]$handles.Remove($dependency)
+
  # End to end: task stays successful but distinguishable; required lock fails with a named path.
  $output=Join-Path $fixture 'output';$hot=Join-Path $fixture 'hot';$sources=Join-Path $fixture 'sources.psd1'
  Put $sources "@{HomeFiles=@('.gitconfig');HomeDirs=@('settings');RequiredSources=@('home/.gitconfig');ExcludeDirs=@();ExcludeFiles=@();HistoryDirs=@();HistoryFiles=@()}"

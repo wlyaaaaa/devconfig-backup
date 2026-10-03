@@ -1,4 +1,5 @@
 # Source inventory preserves the original selection; failures are never successful absence.
+$script:DevConfigSQLiteHelper=Join-Path $PSScriptRoot 'DevConfig.Sqlite.py'
 function Get-DevConfigSourceInventory {
  param($Config,[string]$ProfileRoot,[switch]$IncludeHistory,[switch]$Hash,$KnownInventory=$null)
  $profile=Resolve-BackupPath $ProfileRoot
@@ -66,7 +67,39 @@ function Get-DevConfigSourceInventory {
  foreach($key in @($fileMap.Keys)+@($warnings|ForEach-Object{$_.relative_path})){$parent=[IO.Path]::GetDirectoryName($key).Replace('\','/');while($parent){[void]$dirSet.Add($parent);$next=[IO.Path]::GetDirectoryName($parent);$parent=if($next){$next.Replace('\','/')}else{''}}}
  [string[]]$keys=@($fileMap.Keys);[Array]::Sort($keys,[StringComparer]::OrdinalIgnoreCase)
  $files=@($keys|ForEach-Object{$fileMap[$_]});[long]$bytes=0;foreach($file in $files){$bytes+=$file.length}
- return [pscustomobject]@{root=$profile;files=$files;directories=@($dirSet);sources=@($sources);file_count=$files.Count;bytes=$bytes;source_count=$sources.Count;optional_absent_count=@($sources|Where-Object{$_.status-eq 'optional_absent'}).Count;hashes_computed=[bool]$Hash;file_warnings=$warnings.ToArray()}
+ $sqlitePaths=@($files|Where-Object{$_.relative_path-like '*.sqlite' -and (Test-BackupNameExcluded $_.relative_path @($Config.SQLiteBackupRelativePaths))}|ForEach-Object{$_.relative_path})
+ return [pscustomobject]@{root=$profile;files=$files;directories=@($dirSet);sources=@($sources);file_count=$files.Count;bytes=$bytes;source_count=$sources.Count;optional_absent_count=@($sources|Where-Object{$_.status-eq 'optional_absent'}).Count;hashes_computed=[bool]$Hash;file_warnings=$warnings.ToArray();sqlite_paths=$sqlitePaths}
+}
+function Get-DevConfigSQLiteSourceSignature($Inventory,[string]$Path){
+ $rows=@($Inventory.files|Where-Object{$_.relative_path-ieq $Path -or $_.relative_path-ieq ($Path+'-wal') -or $_.relative_path-ieq ($Path+'-shm') -or $_.relative_path-ieq ($Path+'-journal')}|ForEach-Object{$_.relative_path+'|'+$_.length+'|'+$_.mtime_ticks})
+ return Get-BackupTextHash ($rows-join "`n")
+}
+function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[string]$ScratchRoot){
+ $python=Get-BackupExecutable python
+ $snapshot=Join-Path $ScratchRoot ('sqlite-'+[guid]::NewGuid().ToString('N')+'.tmp')
+ $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$python
+ $start.Arguments='-I -B '+((@($script:DevConfigSQLiteHelper,$Source,$snapshot)|ForEach-Object{'"'+$_+'"'})-join ' ')
+ $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
+ $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+ try{
+  [void]$process.Start()
+  if(-not $process.WaitForExit(20000)){
+   $process.Kill();$process.WaitForExit();$timeout=[TimeoutException]::new('backup_sqlite_capture_failed');$timeout.Data['backup_sqlite_reason']='timeout';throw $timeout
+  }
+  $reply=$process.StandardOutput.ReadToEnd();$null=$process.StandardError.ReadToEnd();$code=$process.ExitCode
+ }finally{$process.Dispose()}
+ if($code-ne 0){
+  $failure=[InvalidOperationException]::new('backup_sqlite_capture_failed')
+  try{$detail=$reply|ConvertFrom-Json;$failure.Data['backup_sqlite_error_code']=[int]$detail.sqlite_error_code;$failure.Data['backup_sqlite_reason']=[string]$detail.reason}catch{}
+  throw $failure
+ }
+ $result=$reply|ConvertFrom-Json
+ if($result.status-cne 'complete' -or $result.method-cne 'sqlite_online_backup' -or $result.integrity_check-cne 'ok'){throw 'backup_sqlite_capture_failed'}
+ $hash=Get-BackupStableFileHash $snapshot;Copy-BackupFileVerified $snapshot $Destination $hash
+ return $hash
+}
+function Test-DevConfigSQLiteSidecar([string]$Path,$Snapshots){
+ foreach($snapshot in @($Snapshots)){foreach($suffix in @('-wal','-shm','-journal')){if($Path-ieq ($snapshot.relative_path+$suffix)){return $true}}};return $false
 }
 function Test-DevConfigRequiredPath([string]$RelativePath,$Inventory){
  foreach($source in @($Inventory.sources|Where-Object{$_.required})){$id=[string]$source.id;if($RelativePath-ieq $id -or $RelativePath.StartsWith($id+'/',[StringComparison]::OrdinalIgnoreCase)){return $true}};return $false
@@ -77,12 +110,26 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
  [void][IO.Directory]::CreateDirectory($Destination)
  foreach($directory in @($Inventory.directories)){[void][IO.Directory]::CreateDirectory((Join-Path $Destination $directory))}
  $kept=[Collections.Generic.List[object]]::new();$skipped=[Collections.Generic.List[object]]::new();$warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($Inventory.file_warnings)){Add-BackupFileWarning $warnings $warning};$since=[DateTimeOffset]::UtcNow
+ $snapshots=[Collections.Generic.List[object]]::new()
  foreach($file in @($Inventory.files)){
+  # The base sorts before its sidecars. Exclude them only after its online backup succeeded.
+  if(Test-DevConfigSQLiteSidecar $file.relative_path $snapshots){continue}
+  $sqlite=$file.relative_path-in @($Inventory.sqlite_paths)
+  $signature=if($sqlite){Get-DevConfigSQLiteSourceSignature $Inventory $file.relative_path}else{$null}
   $target=Join-Path $Destination $file.relative_path
   for($attempt=1;$attempt-le 3;$attempt++){
    $stage='source_read'
    try{
     $before=Get-Item -LiteralPath $file.full_path -Force -ErrorAction Stop
+    if($sqlite){
+     $stage='sqlite_backup';$hash=Copy-DevConfigSQLiteDatabase $file.full_path $target ([IO.Path]::GetDirectoryName($Destination))
+     [IO.File]::SetLastWriteTimeUtc($target,$before.LastWriteTimeUtc)
+     $captured=Get-Item -LiteralPath $target -Force -ErrorAction Stop
+     $file.sha256=$hash;$file.length=[long]$captured.Length;$file.mtime_ticks=[long]$captured.LastWriteTimeUtc.Ticks
+     $file|Add-Member -NotePropertyName sqlite_source_signature -NotePropertyValue $signature -Force
+     $snapshots.Add([pscustomobject]@{relative_path=$file.relative_path;method='sqlite_online_backup';integrity_check='ok'})
+     $kept.Add($file);break
+    }
     $stage='hash';$hash=Get-BackupStableFileHash $file.full_path
     $stage='copy'
     Copy-BackupFileVerified $file.full_path $target $hash
@@ -98,7 +145,9 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
     if($warning){Add-BackupFileWarning $warnings $warning;break}
     $reason=Get-BackupUnreadableReason $_.Exception
     $retryable=$_.Exception.Message-match 'backup_source_changed|backup_copy_hash_mismatch' -or ($reason-ne 'access_denied' -and ($_.Exception-is [IO.IOException] -or $_.Exception.InnerException-is [IO.IOException]))
+    if($sqlite -and ($_.Exception.Data['backup_sqlite_error_code']-in @(5,6) -or $_.Exception.Data['backup_sqlite_reason']-eq 'timeout')){$retryable=$true}
     if($attempt-lt 3 -and $retryable){Start-Sleep -Milliseconds 150;continue}
+    if($sqlite){throw} # Never fall back to raw copies or skipped database payloads.
     if(-not $reason){throw}
     if(Test-DevConfigRequiredPath $file.relative_path $Inventory){
      $required=[Management.Automation.RuntimeException]::new('required_backup_source_unreadable',$_.Exception)
@@ -111,7 +160,8 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
  }
  $Inventory.files=$kept.ToArray();$Inventory.file_count=$kept.Count
  $Inventory|Add-Member -NotePropertyName skipped_files -NotePropertyValue $skipped.ToArray() -Force
- $Inventory|Add-Member -NotePropertyName file_warnings -NotePropertyValue $warnings.ToArray() -Force
+ $Inventory|Add-Member -NotePropertyName file_warnings -NotePropertyValue @($warnings|Where-Object{-not (Test-DevConfigSQLiteSidecar $_.relative_path $snapshots)}) -Force
+ $Inventory|Add-Member -NotePropertyName sqlite_snapshots -NotePropertyValue $snapshots.ToArray() -Force
  $Inventory.bytes=[long](($Inventory.files|Measure-Object length -Sum).Sum)
 }
 function Test-DevConfigSelectionAfterCapture($Captured,$Current){
@@ -119,11 +169,11 @@ function Test-DevConfigSelectionAfterCapture($Captured,$Current){
  # already captured are counted, while changed selection (missing/new paths) fails.
  # Files reported as skipped during capture are compared only by their absence here.
  $skippedPaths=@{};foreach($entry in @($Captured.skipped_files)){if($entry){$skippedPaths[[string]$entry.relative_path]=$true}}
- $warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($Captured.file_warnings)+@($Current.file_warnings)){Add-BackupFileWarning $warnings $warning}
+ $warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($Captured.file_warnings)+@($Current.file_warnings)){if(-not (Test-DevConfigSQLiteSidecar $warning.relative_path $Captured.sqlite_snapshots)){Add-BackupFileWarning $warnings $warning}}
  $currentPaths=@{};foreach($file in $Current.files){$currentPaths[$file.relative_path]=$true}
  foreach($file in $Captured.files){if(-not $currentPaths.ContainsKey($file.relative_path) -and -not (Test-BackupWarningPath $file.relative_path $warnings)){Add-BackupFileWarning $warnings ([pscustomobject]@{relative_path=$file.relative_path;reason='source_disappeared';error_code=2;stage='source_recheck'})}}
  $Captured.file_warnings=$warnings.ToArray();$leftInventory=Get-BackupInventoryWithoutWarnings $Captured $warnings;$rightInventory=Get-BackupInventoryWithoutWarnings $Current $warnings
- $currentFiles=@($rightInventory.files|Where-Object{-not $skippedPaths.ContainsKey([string]$_.relative_path)})
+ $currentFiles=@($rightInventory.files|Where-Object{-not $skippedPaths.ContainsKey([string]$_.relative_path) -and -not (Test-DevConfigSQLiteSidecar $_.relative_path $Captured.sqlite_snapshots)})
  $left=@(@($leftInventory.directories|ForEach-Object{'d|'+$_})+@($leftInventory.files|ForEach-Object{'f|'+$_.relative_path}))
  $right=@(@($rightInventory.directories|ForEach-Object{'d|'+$_})+@($currentFiles|ForEach-Object{'f|'+$_.relative_path}))
  if(($left-join "`n")-cne ($right-join "`n")){
@@ -133,7 +183,7 @@ function Test-DevConfigSelectionAfterCapture($Captured,$Current){
   $failure.Data['backup_stage']='selection_recheck';$failure.Data['backup_selection_added_count']=@($right|Where-Object{-not $leftSet.Contains($_)}).Count;$failure.Data['backup_selection_removed_count']=@($left|Where-Object{-not $rightSet.Contains($_)}).Count;throw $failure
  }
  $byPath=@{};foreach($file in $Captured.files){$byPath[$file.relative_path]=$file}
- $changes=0;foreach($file in $currentFiles){$old=$byPath[$file.relative_path];if($old.length-ne $file.length -or $old.mtime_ticks-ne $file.mtime_ticks){$changes++}}
+ $changes=0;foreach($file in $currentFiles){$old=$byPath[$file.relative_path];if($old.PSObject.Properties['sqlite_source_signature']){if($old.sqlite_source_signature-cne (Get-DevConfigSQLiteSourceSignature $Current $file.relative_path)){$changes++}}elseif($old.length-ne $file.length -or $old.mtime_ticks-ne $file.mtime_ticks){$changes++}}
  return $changes
 }
 

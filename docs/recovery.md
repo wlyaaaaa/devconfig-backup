@@ -47,6 +47,12 @@ pwsh -File Restore-WeChat.ps1 -BackupRoot 'X:\backup\xwechat_files' -Target 'E:\
 
 配置采集对来源选择集合变化进行整轮重新采集：每轮重新扫描、复制到独立候选目录、导出元数据、重扫复核，默认最多 3 轮。`-CaptureAttempts` 可在 1—10 之间调整；耗尽时保持失败，旧成功指针、G 包和保留策略不变。回执的 `capture_attempt_count`、`capture_max_attempts`、`capture_retry_history` 与 `failure_stage` 给出阶段和增删条目计数，不记录内容。单文件消失若在重采后稳定缺失，仍保留本轮 `source_disappeared` 警告以保护旧包；同路径文件捕获后再修改继续用 `changed_after_capture_count` 说明逐文件快照，不新增全轮失败条件，也不声称同一时刻快照。
 
+Codex 的 `.sqlite-maintenance.lock` 是运行互斥标记，仅按完整相对路径排除；通用缓存、临时目录和文件仍按 `sources.psd1` 的选择策略排除，其他 `*.lock` 继续保留。必需根不存在或真配置不可读仍失败。
+
+`SQLiteBackupRelativePaths` 登记的 SQLite 库需要 PATH 中可用的 Python 3 标准库 `sqlite3`。采集用 `DevConfig.Sqlite.py` 在只读连接中建立读事务，再调用 [SQLite 在线备份 API](https://www.sqlite.org/backup.html)，包含已提交的 WAL 内容，排除尚未提交的事务；不会对活动库执行 checkpoint、VACUUM 或修改数据库内容。独立候选切换为无需侧文件的 DELETE 日志模式并执行 `integrity_check`，随后仍核对文件哈希、包清单与压缩包。API 与完整性检查使用 15 秒期限，宿主在 20 秒内未退出时结束自己启动的采集进程，忙/超时最多重试三次；持续占用、拒读、损坏、缺少 Python 或写盘错误失败并保留旧成功版本，不用原始复制兜底。
+
+只有成功在线备份的库才从包中排除其同名 `-wal`、`-shm`、`-journal`，独立的侧文件形状数据不受影响。运行回执、包回执和清单的 `sqlite_snapshots` 列出库路径、方法和完整性结果，不含数据库正文。SQLite 副本自身是事务一致的；不同库、普通文件和系统导出仍分别采集，`capture_consistency=per_file_verified_not_point_in_time`、`application_consistency=not_proven` 保持原义。源库及其侧文件在扫描和复核间的元数据变化计入 `changed_after_capture_count`，不会要求持续写入的活动库哈希前后相等。验证入口为 `tests/Assert-DevConfigSqliteCapture.ps1` 与 `tests/Assert-LockedSourceResilience.ps1`。
+
 `sources.psd1` 仅精确排除 Claude 的 `file-history`、`debug`、`paste-cache`、`image-cache`、`session-env`、`shell-snapshots`、`usage-data` 子树。官方 [Claude 目录说明](https://code.claude.com/docs/en/claude-directory#application-data) 将它们列为会话检查点、缓存或运行数据；它们不用于恢复配置。settings、skills、agents、commands、plans 与必要来源继续保留，不全局排除 `*.lock`。
 
 微信树和开发配置采集遇到 Win32 225/226（HRESULT `0x800700E1` / `0x800700E2`），或已枚举的源文件在扫描、哈希、复制、复核中消失，只跳过这一文件，其余继续完成。整体回执保持 `status=complete`，并在 `file_warnings` 中逐项记录相对路径、`reason`、`error_code`、`stage`。原因值是 `antivirus_blocked`、`antivirus_removed` 或 `source_disappeared`。下次自然运行重新尝试，不持久排除这些路径，也不修改防病毒设置。

@@ -117,6 +117,7 @@ function New-DevConfigCandidate([string]$Container){
   $script:run.capture_attempt_count=[int]$_.Exception.Data['backup_capture_attempt_count'];$script:run.capture_retry_history=@($_.Exception.Data['backup_capture_retry_history']|Where-Object{$_});throw
  }
  $stage=$capture.stage;$inventory=$capture.inventory;$captureChanges=$capture.changed_after_capture_count
+ $sqliteSnapshots=@($inventory.sqlite_snapshots);$script:run.sqlite_snapshots=$sqliteSnapshots
  $script:run.capture_attempt_count=$capture.attempt_count;$script:run.capture_retry_history=$capture.retry_history
  $skipped=@($inventory.skipped_files|Select-Object relative_path,reason);$script:run.skipped_file_count=$skipped.Count;$script:run.skipped_files=$skipped
  $warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($inventory.file_warnings)+@($preparation.file_warnings)){Add-BackupFileWarning $warnings $warning}
@@ -135,7 +136,7 @@ function New-DevConfigCandidate([string]$Container){
  $script:run.collection=$(if($skipped.Count){'complete_with_skipped_files'}else{'complete'});$script:run.package='running';Write-BackupJsonAtomic $runPath $script:run
  $previous=$null;try{$previous=Get-VerifiedDevConfigPackage $OutDir}catch{}
  if($previous -and $previous.Receipt.content_sha256-ceq $contentHash){$script:run.package='reused';return $previous}
- $manifest=[ordered]@{schema='devconfig.payload-manifest.v1';capture_consistency='per_file_verified_not_point_in_time';changed_after_capture_count=$captureChanges;content_sha256=$contentHash;payload_tree_sha256=$treeHash;policy_sha256=$policyHash;file_count=$payload.file_count;bytes=$payload.bytes;directories=$payload.directories;files=@($payload.files|Select-Object relative_path,length,mtime_ticks,sha256);sources=$inventory.sources;skipped_file_count=$skipped.Count;skipped_files=$skipped;file_warnings=$warnings.ToArray();application_consistency='not_proven'}
+ $manifest=[ordered]@{schema='devconfig.payload-manifest.v1';capture_consistency='per_file_verified_not_point_in_time';changed_after_capture_count=$captureChanges;content_sha256=$contentHash;payload_tree_sha256=$treeHash;policy_sha256=$policyHash;file_count=$payload.file_count;bytes=$payload.bytes;directories=$payload.directories;files=@($payload.files|Select-Object relative_path,length,mtime_ticks,sha256);sources=$inventory.sources;skipped_file_count=$skipped.Count;skipped_files=$skipped;file_warnings=$warnings.ToArray();sqlite_snapshots=$sqliteSnapshots;application_consistency='not_proven'}
  Write-BackupJsonAtomic (Join-Path $stage 'backup-manifest.json') $manifest
  $name='devconfig-'+(Get-Date -Format yyyyMMdd-HHmmss)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)+'.zip';$zip=Join-Path $Container $name
  $zipExe=Get-BackupExecutable 7z -FallbackPath $SevenZipPath
@@ -150,7 +151,7 @@ function New-DevConfigCandidate([string]$Container){
  & $zipExe t -bso0 -bsp0 -- $zip *> $null;if($LASTEXITCODE-ne 0){throw 'backup_archive_test_failed'}
  Assert-BackupArchiveManifest $zip $manifest
  $hash=Get-BackupStableFileHash $zip
- $receipt=[ordered]@{schema='devconfig.package-receipt.v2';zip_entry_encoding='utf-8';capture_consistency='per_file_verified_not_point_in_time';status='complete';collection_status='complete';archive_verification='7z_test_pass';completed_utc=(Get-BackupUtc);package_name=$name;sha256=$hash;package_bytes=(Get-Item $zip).Length;content_sha256=$contentHash;payload_tree_sha256=$treeHash;file_count=$payload.file_count;skipped_file_count=$skipped.Count;collection_warnings=@(if($skipped.Count){'skipped_unreadable_files'});file_warnings=$warnings.ToArray();application_recovery='not_tested'}
+ $receipt=[ordered]@{schema='devconfig.package-receipt.v2';zip_entry_encoding='utf-8';capture_consistency='per_file_verified_not_point_in_time';status='complete';collection_status='complete';archive_verification='7z_test_pass';completed_utc=(Get-BackupUtc);package_name=$name;sha256=$hash;package_bytes=(Get-Item $zip).Length;content_sha256=$contentHash;payload_tree_sha256=$treeHash;file_count=$payload.file_count;skipped_file_count=$skipped.Count;collection_warnings=@(if($skipped.Count){'skipped_unreadable_files'});file_warnings=$warnings.ToArray();sqlite_snapshots=$sqliteSnapshots;application_recovery='not_tested'}
  Write-BackupJsonAtomic ($zip+'.manifest.json') $manifest;Write-BackupJsonAtomic ($zip+'.receipt.json') $receipt
  [IO.File]::WriteAllText(($zip+'.sha256'),($hash+'  '+$name+"`n"),[Text.Encoding]::ASCII)
  return [pscustomobject]@{Zip=$zip;Sha=$hash;Name=$name;Receipt=[pscustomobject]$receipt;MB=[math]::Round($receipt.package_bytes/1MB,2)}

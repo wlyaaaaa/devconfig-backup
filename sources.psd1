@@ -73,6 +73,10 @@
         'home/.config/opencode'
     )
 
+    # These live databases need SQLite's transaction-aware backup, not raw
+    # independent copies of the database and its WAL/SHM/journal files.
+    SQLiteBackupRelativePaths = @('home/.codex/*.sqlite')
+
     # AppData\Roaming 下目录
     AppDataRoamingDirs = @(
         'Code\User',
@@ -156,6 +160,8 @@
     # Exact live process coordination files, not application configuration.
     # Do not exclude *.lock generally: dependency lockfiles remain recoverable.
     ExcludeRelativePaths = @(
+        # Empty SQLite maintenance mutex; it is recreated by the running owner.
+        'home/.codex/.sqlite-maintenance.lock',
         # Claude 的文件检查点、缓存、会话环境与调试日志不是恢复配置；
         # 精确排除这些子树，保留 settings、skills、agents、commands 等真实配置。
         'home/.claude/file-history',
