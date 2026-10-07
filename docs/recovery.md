@@ -15,6 +15,8 @@ pwsh -File Restore-DevConfig.ps1 -Archive 'G:\80_Backup\DevConfig\latest.zip' -D
 
 这一步只提取到独立目录，不自动导入注册表、重建旧任务、覆盖正在使用的软件配置或恢复登录状态。随后按 PCConfig 当前指南，将 `home`、`appdata-roaming`、`appdata-local`、`extra` 映射到实际机器路径。新用户名、Documents 重定向和盘符变化须使用实际映射，不能直接复制旧账号路径。
 
+FlyingBird 配置位于包内 `appdata-roaming/FlyingBird/FlyingBird`，包括偏好 `shared_preferences.json`、配置 `config.yaml`、`profiles` 和事务一致的 `database.sqlite`。恢复软件配置前由用户先退出客户端，保留目标原件，再按 PCConfig 的实际用户路径映射复制；配置复制不等于登录或联网验收。
+
 全新电脑先安装当前官方 PowerShell、Git、7-Zip 等运行时；恢复 GitHub 登录后，从核实过的 `wlyaaaaa/PCConfig` 当前默认分支取得恢复指南，不假定旧 E 盘目录还存在。软件重装清单位于包内 `_manifests`，只对实际安装且成功导出的工具承诺有记录。不要通配导入旧任务 XML。
 
 若包内有 `_manifests/rclone-remote-binding.json`，只恢复这个非秘密别名选择；先通过凭据所属入口完成授权，不复制未知账户的完整 OAuth 配置：

@@ -75,10 +75,14 @@
 
     # These live databases need SQLite's transaction-aware backup, not raw
     # independent copies of the database and its WAL/SHM/journal files.
-    SQLiteBackupRelativePaths = @('home/.codex/*.sqlite')
+    SQLiteBackupRelativePaths = @(
+        'home/.codex/*.sqlite',
+        'appdata-roaming/FlyingBird/FlyingBird/database.sqlite'
+    )
 
     # AppData\Roaming 下目录
     AppDataRoamingDirs = @(
+        'FlyingBird\FlyingBird\profiles',
         'Code\User',
         'Cursor\User',
         'JetBrains',
@@ -93,6 +97,9 @@
 
     # AppData\Roaming 下精确文件（保留相对路径）
     AppDataRoamingFiles = @(
+        'FlyingBird\FlyingBird\shared_preferences.json',
+        'FlyingBird\FlyingBird\config.yaml',
+        'FlyingBird\FlyingBird\database.sqlite',
         'Docker\settings-store.json',
         'Docker\features-overrides.json',
         'Docker\locked-directories',
