@@ -204,12 +204,17 @@ function Test-RcloneRemoteFileMatchesLocal {
     }
     # check compares directory trees; lsjson --stat addresses one exact object,
     # including a dated remote name whose local source is latest.zip.
-    try {
-        $metadata = @(Invoke-BackupRclone lsjson $RemotePath --stat --hash --hash-type MD5 `
-            --contimeout 15s --timeout 30s --retries 2 --low-level-retries 4 2>$null)
-        $exitCode = $LASTEXITCODE
-    } catch {
-        return [pscustomobject]@{ Matches = $false; Reason = 'remote_object_query_failed'; ExitCode = -1 }
+    # A completed upload can be followed by a failed stat request. Retry only
+    # that read; a successful response must still pass the size/hash checks.
+    $exitCode = -1
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            $metadata = @(Invoke-BackupRclone lsjson $RemotePath --stat --hash --hash-type MD5 `
+                --contimeout 15s --timeout 30s --retries 2 --low-level-retries 4 2>$null)
+            $exitCode = $LASTEXITCODE
+        } catch { $exitCode = -1 }
+        if ($exitCode -eq 0) { break }
+        if ($attempt -lt 3) { Start-Sleep -Seconds 2 }
     }
     if ($exitCode -ne 0) {
         return [pscustomobject]@{ Matches = $false; Reason = 'remote_object_query_failed'; ExitCode = $exitCode }

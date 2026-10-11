@@ -47,6 +47,8 @@ $realRclone = Get-Command rclone -CommandType Application -ErrorAction SilentlyC
 $global:CloudIntegrityRemotes = @('selected:', 'other:')
 $global:CloudIntegrityInventoryFailure = $false
 $global:CloudIntegrityMissingRemotePaths = @()
+$global:CloudIntegrityQueryFailures = 0
+$global:CloudIntegrityQueryCount = 0
 $global:CloudIntegrityRcloneCalls = New-Object System.Collections.ArrayList
 function global:rclone {
     param([Parameter(ValueFromRemainingArguments = $true)][object[]] $RcloneArguments)
@@ -63,6 +65,12 @@ function global:rclone {
         return
     }
     if ($verb -eq 'lsjson') {
+        $global:CloudIntegrityQueryCount++
+        if ($global:CloudIntegrityQueryFailures -gt 0) {
+            $global:CloudIntegrityQueryFailures--
+            $global:LASTEXITCODE = 1
+            return
+        }
         $remotePath = [string]$RcloneArguments[1]
         $global:LASTEXITCODE = if ($global:CloudIntegrityMissingRemotePaths -contains $remotePath) { 1 } else { 0 }
         if ($global:LASTEXITCODE -eq 0) {
@@ -97,6 +105,13 @@ try {
     $latestLocal = Join-Path $fixtureRoot 'latest.zip'
     [IO.File]::WriteAllText($datedLocal, 'synthetic dated package')
     [IO.File]::WriteAllText($latestLocal, 'synthetic latest package')
+    $global:CloudIntegrityQueryFailures = 1; $global:CloudIntegrityQueryCount = 0
+    $recovered = Test-RcloneRemoteFileMatchesLocal -LocalPath $datedLocal -RemotePath 'selected:Backups/Host/dated.zip'
+    Assert-Condition ($recovered.Matches -and $recovered.ExitCode -eq 0 -and $global:CloudIntegrityQueryCount -eq 2) 'One failed stat must recover through a new successful checksum query.'
+    $global:CloudIntegrityQueryFailures = 9; $global:CloudIntegrityQueryCount = 0
+    $failed = Test-RcloneRemoteFileMatchesLocal -LocalPath $datedLocal -RemotePath 'selected:Backups/Host/dated.zip'
+    Assert-Condition (-not $failed.Matches -and $failed.Reason -eq 'remote_object_query_failed' -and $failed.ExitCode -eq 1 -and $global:CloudIntegrityQueryCount -eq 3) 'Persistent stat failure must stop after three attempts and remain failed.'
+    $global:CloudIntegrityQueryFailures = 0
     $snapshotState = Join-Path $fixtureRoot 'snapshot-state'
     New-Item -ItemType Directory -Path $snapshotState | Out-Null
     $datedHash = (Get-FileHash -LiteralPath $datedLocal -Algorithm SHA256).Hash
@@ -177,7 +192,7 @@ Test-RcloneRemoteFileMatchesLocal -LocalPath $Source -RemotePath $Target | Conve
 }
 finally {
     Remove-Item -LiteralPath Function:\global:rclone -Force -ErrorAction SilentlyContinue
-    Remove-Variable -Name CloudIntegrityRemotes, CloudIntegrityInventoryFailure, CloudIntegrityMissingRemotePaths, CloudIntegrityRcloneCalls -Scope Global -ErrorAction SilentlyContinue
+    Remove-Variable -Name CloudIntegrityRemotes, CloudIntegrityInventoryFailure, CloudIntegrityMissingRemotePaths, CloudIntegrityRcloneCalls, CloudIntegrityQueryFailures, CloudIntegrityQueryCount -Scope Global -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $fixtureRoot) {
         $fixtureFull = Assert-PathWithinFixtureNamespace -Path $fixtureRoot -NamespaceRoot $fixtureBase
         if ((Split-Path -Leaf $fixtureFull) -notmatch '^cloud-backup-integrity-[0-9a-f]{32}$') { throw "Unexpected cloud fixture root: $fixtureFull" }
