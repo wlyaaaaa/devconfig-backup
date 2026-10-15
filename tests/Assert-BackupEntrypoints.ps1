@@ -34,6 +34,16 @@ try{
  $sleep=Join-Path $script:FixtureRoot 'sleep.ps1';[IO.File]::WriteAllText($sleep,'Start-Sleep -Seconds 10')
  $result=Invoke-RcloneWithTimeout -Arguments @('-NoProfile','-File',$sleep) -TimeoutSec 1
  Check ($result.TimedOut -and $result.ExitCode-eq 124) 'Monitor times out its own child without killing unrelated processes'
+ $pipeChildPid=Join-Path $script:FixtureRoot 'pipe-child.pid';$pipeParent=Join-Path $script:FixtureRoot 'pipe-parent.ps1'
+ $pipeCommand=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('Start-Sleep -Seconds 4'))
+ $pipeScript="`$psi=New-Object Diagnostics.ProcessStartInfo;`$psi.FileName='"+$runtime.Replace("'","''")+"';`$psi.Arguments='-NoProfile -EncodedCommand "+$pipeCommand+"';`$psi.UseShellExecute=`$false;`$psi.CreateNoWindow=`$true;`$child=[Diagnostics.Process]::Start(`$psi);[IO.File]::WriteAllText('"+$pipeChildPid.Replace("'","''")+"',[string]`$child.Id);exit 0"
+ [IO.File]::WriteAllText($pipeParent,$pipeScript,[Text.UTF8Encoding]::new($true));$elapsed=[Diagnostics.Stopwatch]::StartNew()
+ try{
+  $result=Invoke-RcloneWithTimeout -Arguments @('-NoProfile','-File',$pipeParent) -TimeoutSec 1;$elapsed.Stop()
+  Check ($result.TimedOut -and $result.ExitCode-eq 124 -and $result.Stdout-eq '' -and $result.Stderr-eq '' -and $elapsed.Elapsed.TotalSeconds-lt 3) ('Monitor bounds inherited output pipes after parent exit: '+$elapsed.Elapsed.TotalSeconds.ToString('F3')+' seconds')
+ }finally{
+  if([IO.File]::Exists($pipeChildPid)){try{$child=[Diagnostics.Process]::GetProcessById([int][IO.File]::ReadAllText($pipeChildPid))}catch [ArgumentException]{$child=$null};if($child){try{if(-not $child.WaitForExit(10000)){throw 'synthetic child did not finish naturally'}}finally{$child.Dispose()}}}
+ }
  $ui=[IO.File]::ReadAllText((Join-Path $repo 'Backup-Status.ps1')).Replace('$PSScriptRoot',("'"+$repo.Replace("'","''")+"'"))
  $paint="`$form.CreateControl();`$form.PerformLayout();& `$update;if(`$box.Text-notmatch 'DevConfig'){throw 'panel_refresh_failed'};`$image=New-Object Drawing.Bitmap(`$form.Width,`$form.Height);try{`$form.DrawToBitmap(`$image,(New-Object Drawing.Rectangle(0,0,`$form.Width,`$form.Height)))}finally{`$image.Dispose()};Write-Output 'PANEL_PAINT_PASS'"
  $ui=$ui.Replace('[void]$form.ShowDialog()',$paint)
@@ -41,7 +51,7 @@ try{
  $output=(& $runtime -NoProfile -ExecutionPolicy Bypass -File $uiPath -Gui -NoDrive -OutputRoot $script:FixtureRoot -HotRoot (Join-Path $script:FixtureRoot 'hot') -HotReceiptPath (Join-Path $script:FixtureRoot 'absent.json') 2>&1|Out-String)
  Check ($LASTEXITCODE-eq 0 -and $output-match 'PANEL_PAINT_PASS') ('Actual panel builds, refreshes and paints without a desktop capture: '+$output)
  Check ([IO.File]::Exists((Join-Path $repo 'Backup.Common.ps1'))) 'Source repository still exists after entrypoint work'
- Write-Output 'RESULT: 7 guarded entrypoint and panel checks passed.'
+ Write-Output 'RESULT: 8 guarded entrypoint and panel checks passed.'
 }finally{
  Remove-BackupOwnedDirectory $script:FixtureRoot $script:FixtureParent '^backup-entrypoints-[a-f0-9]{32}$'
 }

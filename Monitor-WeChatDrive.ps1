@@ -24,8 +24,10 @@ function Invoke-RcloneWithTimeout {
  $psi.StandardOutputEncoding=[Text.UTF8Encoding]::new($false);$psi.StandardErrorEncoding=[Text.UTF8Encoding]::new($false)
  $p=New-Object Diagnostics.Process;$p.StartInfo=$psi
  try{
-  [void]$p.Start();$outTask=$p.StandardOutput.ReadToEndAsync();$errTask=$p.StandardError.ReadToEndAsync()
-  if(-not $p.WaitForExit($TimeoutSec*1000)){try{$p.Kill();$null=$p.WaitForExit(5000)}catch{};return [pscustomobject]@{ExitCode=124;Stdout='';Stderr='';TimedOut=$true}}
+  [void]$p.Start();$watch=[Diagnostics.Stopwatch]::StartNew();$outTask=$p.StandardOutput.ReadToEndAsync();$errTask=$p.StandardError.ReadToEndAsync()
+  $remaining=[int][Math]::Max(0,($TimeoutSec*1000)-$watch.ElapsedMilliseconds);$finished=$p.WaitForExit($remaining)
+  if($finished){$remaining=[int][Math]::Max(0,($TimeoutSec*1000)-$watch.ElapsedMilliseconds);$finished=[Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($outTask,$errTask),$remaining)}
+  if(-not $finished){if(-not $p.HasExited){try{$p.Kill();$null=$p.WaitForExit(5000)}catch{}};return [pscustomobject]@{ExitCode=124;Stdout='';Stderr='';TimedOut=$true}}
   return [pscustomobject]@{ExitCode=$p.ExitCode;Stdout=$outTask.GetAwaiter().GetResult();Stderr=$errTask.GetAwaiter().GetResult();TimedOut=$false}
  }finally{$p.Dispose()}
 }
