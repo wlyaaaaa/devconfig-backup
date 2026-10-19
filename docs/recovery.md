@@ -65,6 +65,8 @@ Codex 的 `.sqlite-maintenance.lock` 是运行互斥标记，仅按完整相对�
 
 树清单的 `verification_scope=selected_files_excluding_file_warnings` 明确表示校验范围。完整性复核和微信 Drive/补传监控采用相同警告范围；云端的旧副本也不因这些排除路径被删除。成功回执、清单、配置包指针和 `Backup-Status.ps1 -Json` 均携带同名字段；人类状态页显示路径、错误码和阶段，汇总状态是 `receipts_current_with_file_warnings`。这表示其余文件完成，警告文件没有新的完整性承诺，恢复时先查看清单与旧副本。
 
+JSON 清单和回执使用 UTF-8 流式写入与 SHA-256 流式读回校验，避免大清单形成多份完整内存副本；仍在持久刷新临时文件后原子替换，写入或发布失败时保留原文件并清理本轮临时文件。
+
 Defender 动作编号 2/3 对应隔离/移除，依据 [Microsoft MPTHREAT_ACTION 文档](https://learn.microsoft.com/en-us/windows/win32/lwef/mpthreat-action)。验证使用 `tests/Assert-FileWarningResilience.ps1` 的合成目录和故障注入，不使用病毒样本或 EICAR 文件。
 
 微信 Hot/Drive 成功回执的 `payload_names_emitted` 在 `file_warnings` 非空时为 `true`，因为其中输出了文件相对路径；无文件警告时为 `false`。`payload_content_interpreted` 始终保持 `false`。

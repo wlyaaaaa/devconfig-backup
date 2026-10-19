@@ -68,14 +68,20 @@ function Read-BackupJson([string]$Path,[switch]$Required){
  catch [IO.DirectoryNotFoundException]{if($Required){throw 'backup_json_missing'};return $null}
 }
 function Write-BackupJsonAtomic([string]$Path,$Value){
+ if(-not ('BackupJsonWriter'-as [type])){Add-Type -Path (Join-Path $PSScriptRoot 'Backup.Json.cs') -ReferencedAssemblies ([Management.Automation.PSObject].Assembly.Location)}
  $full=[IO.Path]::GetFullPath($Path);Assert-BackupPathChain $full;$parent=[IO.Path]::GetDirectoryName($full)
  [void][IO.Directory]::CreateDirectory($parent);$temp=Join-Path $parent ('.json-'+[guid]::NewGuid().ToString('N')+'.tmp')
  try{
-  $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($Value|ConvertTo-Json -Depth 30 -Compress))
+  $algorithm=[Security.Cryptography.SHA256]::Create();$hashStream=$null;$writer=$null
   $stream=[IO.File]::Open($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
-  try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+  try{
+   $hashStream=[Security.Cryptography.CryptoStream]::new($stream,$algorithm,[Security.Cryptography.CryptoStreamMode]::Write,$true)
+   $writer=[IO.StreamWriter]::new($hashStream,[Text.UTF8Encoding]::new($false),65536,$true)
+   [BackupJsonWriter]::Write($writer,$Value);$writer.Flush();$hashStream.FlushFinalBlock();$stream.Flush($true)
+   $expectedHash=([BitConverter]::ToString($algorithm.Hash)).Replace('-','').ToLowerInvariant()
+  }finally{if($writer){$writer.Dispose()};if($hashStream){$hashStream.Dispose()};$stream.Dispose();$algorithm.Dispose()}
   if([IO.File]::Exists($full)){[IO.File]::Replace($temp,$full,[NullString]::Value)}else{[IO.File]::Move($temp,$full)}
-  if((Get-BackupTextHash ([IO.File]::ReadAllText($full)))-cne (Get-BackupTextHash ([Text.Encoding]::UTF8.GetString($bytes)))){throw 'backup_json_readback_failed'}
+  if((Get-BackupStableFileHash $full)-cne $expectedHash){throw 'backup_json_readback_failed'}
  }finally{if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)}}
 }
 function Open-BackupResourceLock([string]$Resource){
