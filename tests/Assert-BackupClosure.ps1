@@ -64,6 +64,7 @@ try{
  Check (-not [IO.File]::Exists((Join-Path $wd 'account\media.bin')) -and [IO.File]::Exists((Join-Path $record2.previous_path 'account\media.bin'))) 'Deletion converges while preserving one bounded predecessor'
  $orphanReceipt=Join-Path $script:FixtureRoot 'control-plane\receipt.json';$orphanIncoming=$wd+'.incoming-'+('a'*32);$orphanPrevious=$wd+'.previous-'+('b'*32);$retained=$wd+'.previous-'+('c'*32)
  $journalIncoming=$wd+'.incoming-'+('d'*32);$journalPrevious=$wd+'.previous-'+('d'*32);$journalOld=$wd+'.previous-'+('e'*32);$manual=$wd+'.previous-manual'
+ $preserved=Join-Path $script:FixtureRoot 'retained-orphans-20261020';Put (Join-Path $preserved 'preserved.bin') 'synthetic preserved backup';Put (Join-Path $preserved 'manifest.json') '{"schema":"synthetic-retention","files":["preserved.bin"]}';$preservedDigest=Get-BackupInventoryDigest (Get-BackupTreeInventory $preserved -Hash)
  foreach($path in @($orphanIncoming,$orphanPrevious,$retained,$journalIncoming,$journalPrevious,$journalOld,$manual)){Put (Join-Path $path 'fixture.bin') 'synthetic generation'}
  $orphanManifest=$wd+'.backup-manifest.previous-'+('a'*32)+'.json';$orphanSidecar=$orphanReceipt+'.previous-'+('a'*32)+'.json'
  $journalManifest=$wd+'.backup-manifest.previous-'+('d'*32)+'.json';$journalReceipt=$orphanReceipt+'.previous-'+('d'*32)+'.json'
@@ -72,6 +73,7 @@ try{
  $record2.retained_warning_generations=@($retained);Write-BackupJsonAtomic ($wd+'.backup-manifest.json') $record2
  Write-BackupJsonAtomic ($wd+'.backup-transaction.json') @{incoming=$journalIncoming;previous=$journalPrevious;old_previous_path=$journalOld;previous_manifest_path=$journalManifest;previous_receipt_path=$journalReceipt;post_commit_receipt_path=$orphanReceipt}
  Remove-BackupTreeOrphans $wd $orphanReceipt
+ Check ([IO.Directory]::Exists($preserved) -and (Get-BackupInventoryDigest (Get-BackupTreeInventory $preserved -Hash))-ceq $preservedDigest) 'Exact orphan cleanup leaves the separately preserved files and manifest unchanged'
  Check (-not [IO.Directory]::Exists($orphanIncoming) -and -not [IO.Directory]::Exists($orphanPrevious) -and -not [IO.File]::Exists($orphanManifest) -and -not [IO.File]::Exists($orphanSidecar)) 'Exact orphan generations and read-only manifest/receipt sidecars are retired'
  Check ([IO.Directory]::Exists($record2.previous_path) -and [IO.Directory]::Exists($retained) -and [IO.Directory]::Exists($manual)) 'Orphan cleanup preserves manifest predecessors, warning generations and unrelated names'
  Check ([IO.Directory]::Exists($journalIncoming) -and [IO.Directory]::Exists($journalPrevious) -and [IO.Directory]::Exists($journalOld) -and [IO.File]::Exists($journalManifest) -and [IO.File]::Exists($journalReceipt)) 'Active transaction references survive orphan cleanup'

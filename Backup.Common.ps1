@@ -282,6 +282,7 @@ function Remove-BackupTreeOrphans([string]$Destination,[string]$ReceiptPath=''){
   if(-not [string]::IsNullOrWhiteSpace($path)){[void]$keep.Add((Resolve-BackupPath $path))}
  }
  $parent=[IO.Path]::GetDirectoryName($dest);$leaf=[regex]::Escape([IO.Path]::GetFileName($dest))
+ # Match only exact generated names; other retained directories are outside this cleanup scope.
  $scopes=@(@{parent=$parent;pattern=('^'+$leaf+'\.(incoming|previous)-[a-f0-9]{32}$');directory=$true},@{parent=$parent;pattern=('^'+$leaf+'\.backup-manifest\.previous-[a-f0-9]{32}\.json$');directory=$false})
  $receiptPaths=@($ReceiptPath);if($journal -and $journal.PSObject.Properties['post_commit_receipt_path']){$receiptPaths+=@($journal.post_commit_receipt_path)}
  foreach($path in @($receiptPaths|Where-Object{-not [string]::IsNullOrWhiteSpace([string]$_)}|Select-Object -Unique)){
