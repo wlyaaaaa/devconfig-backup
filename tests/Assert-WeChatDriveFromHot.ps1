@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param()
-# The weekly WeChat Drive upload must consume only the verified G hot generation:
+# The daily WeChat Drive check must consume only the verified G hot generation:
 # fresh and verified -> upload; stale, unverified, missing, changed or busy -> refuse
 # before any cloud mutation, with the reason in the run receipt. Isolated local rclone backend only.
 $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
@@ -50,6 +50,17 @@ try{
  Check ($run.local-ceq 'not_requested' -and $run.capture_consistency-ceq 'no_source_capture' -and $run.upload_source.gate-ceq 'passed' -and [string]$run.upload_source.hot_generation_id-ceq [string]$manifest.run_id -and $run.upload_source.hot_verification_status-ceq 'sha256_full_tree' -and $run.upload_source.hot_capture_consistency-ceq 'vss_crash_consistent' -and $null-ne $run.upload_source.hot_completed_utc) 'Run receipt names the uploaded G generation, its time and verification'
  Check ([string]$success.upload_source.hot_generation_id-ceq [string]$manifest.run_id -and $success.source-ieq $wh -and $success.content_sha256-ceq $manifest.content_sha256 -and $success.verification_status-ceq 'rclone_checksum_check') 'Drive success receipt is bound to the uploaded G generation'
  foreach($path in @($runPath,$successPath)){$text=[IO.File]::ReadAllText($path);Check ($text-notmatch 'fixture-local' -and $text-notmatch '@') ('Receipt carries no remote account name: '+[IO.Path]::GetFileName($path))}
+ Write-BackupJsonAtomic ($wh+'.backup-transaction.json') @{destination=$wh;run_id=$manifest.run_id;incoming=($wh+'.incoming-'+$manifest.run_id);previous=($wh+'.previous-'+$manifest.run_id);had_target=$true}
+ $successBytes=[IO.File]::ReadAllBytes($successPath);Put (Join-Path $wc 'skip-probe.bin') 'must not contact cloud'
+ $r=Run $driveArgs;$run=Read-BackupJson $runPath -Required
+ Check ($r.Exit-eq 0 -and $run.drive-ceq 'skipped_current' -and [IO.File]::Exists((Join-Path $wc 'skip-probe.bin')) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes($successPath))-ceq [Convert]::ToBase64String($successBytes)) 'Same manifest within seven days skips cloud operations without refreshing success'
+ Check (-not [IO.File]::Exists($wh+'.backup-transaction.json')) 'Drive repairs a completed pending transaction while holding the G lock before its upload gate'
+ Set-ReceiptField $successPath 'destination_binding_sha256' ('0'*64);Put (Join-Path $wc 'skip-probe.bin') 'binding changed'
+ $r=Run $driveArgs;Check ($r.Exit-eq 0 -and (Read-BackupJson $runPath).drive-ceq 'complete' -and -not [IO.File]::Exists((Join-Path $wc 'skip-probe.bin'))) 'A different remote binding cannot reuse a current-manifest success'
+ Set-ReceiptField $successPath 'completed_utc' ([DateTimeOffset]::UtcNow.AddDays(-8).ToString('o'));Put (Join-Path $wc 'skip-probe.bin') 'success expired'
+ $r=Run $driveArgs;Check ($r.Exit-eq 0 -and (Read-BackupJson $runPath).drive-ceq 'complete' -and -not [IO.File]::Exists((Join-Path $wc 'skip-probe.bin'))) 'Same manifest older than seven days is reverified and uploaded'
+ Set-ReceiptField $successPath 'manifest_sha256' ('0'*64);Put (Join-Path $wc 'skip-probe.bin') 'generation changed'
+ $r=Run $driveArgs;Check ($r.Exit-eq 0 -and (Read-BackupJson $runPath).drive-ceq 'complete' -and -not [IO.File]::Exists((Join-Path $wc 'skip-probe.bin'))) 'A different manifest uploads even when the last success is recent'
  Put (Join-Path $wc 'must-survive.bin') 'cloud extra kept after a refused run'
  # Hot reuses unchanged files by hard link, so a G file can keep an older time than its manifest entry.
  $linked=Join-Path $wh 'account\media.bin';$linkedTime=[IO.File]::GetLastWriteTimeUtc($linked);[IO.File]::SetLastWriteTimeUtc($linked,$linkedTime.AddDays(-7))
@@ -58,6 +69,7 @@ try{
 
  $receiptBytes=[IO.File]::ReadAllBytes($wr)
  $cases=@(
+  @{Name='invalid pending transaction';Code='backup_tree_journal_invalid';Mutate={Write-BackupJsonAtomic ($wh+'.backup-transaction.json') @{destination=$wh;run_id='invalid';incoming='invalid';previous='invalid'}};Undo={[IO.File]::Delete($wh+'.backup-transaction.json')}},
   @{Name='stale';Code='wechat_hot_receipt_stale';Mutate={Set-ReceiptField $wr 'completed_utc' ([DateTimeOffset]::UtcNow.AddDays(-3).ToString('o'))}},
   @{Name='failed verification';Code='wechat_hot_receipt_not_verified';Mutate={Set-ReceiptField $wr 'status' 'failed'}},
   @{Name='missing receipt';Code='wechat_hot_receipt_missing';Mutate={[IO.File]::Delete($wr)}},
@@ -82,6 +94,7 @@ try{
  Set-ReceiptField $wr 'capture_consistency' 'vss_crash_consistent'
  $r=Run ($driveArgs+@('-DbOnly'))
  Check ($r.Exit-eq 0 -and [IO.File]::Exists((Join-Path $wc 'account\media.bin'))) ('Database-only mode does not delete excluded remote media: '+$r.Text)
+ $r=Run $driveArgs;Check ($r.Exit-eq 0 -and (Read-BackupJson $runPath).drive-ceq 'complete' -and -not [IO.File]::Exists((Join-Path $wc 'account\media.bin'))) 'Database-only success does not skip a full-native upload of the same generation'
  Write-Output ("RESULT: {0} WeChat Drive-from-G checks passed; runtime={1}" -f $script:checks,$PSVersionTable.PSVersion)
 }finally{
  $env:RCLONE_CONFIG=$oldConfig

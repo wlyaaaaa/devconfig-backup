@@ -5,9 +5,9 @@
   - DevConfigBackup-Local        : 每天 23:05 + 登录后20分钟 -> -Tier Local,Hot（本地包+G盘热备）
   - DevConfigBackup-Drive-Daily  : 每天 00:00               -> -Tier Drive（Google Drive）
   - WeChatBackup-Hot-Daily       : 每天 20:30               -> -Target Hot（G盘热备）
-  - WeChatBackup-Drive-Weekly    : 每周日 22:00             -> -Target Drive（Google Drive）
+  - WeChatBackup-Drive-Weekly    : 每天 22:00 检查          -> -Target Drive（保留原任务名）
   上述是当前机器的本地时刻；换机后以 PCConfig 登记的北京时间日程为准。
-  说明: 本地/G 热备与 Drive 拆成独立任务，离线不会阻断本地保护，Drive 失败会返回非零并自动重试。
+  说明: 本地/G 热备与 Drive 拆成独立任务，离线不会阻断本地保护，失败后下次定时自然重跑。
   H盘是默认锁定的人工冷备，不注册自动写入任务；Drive 依靠 rclone copy 自动跳过已存在文件。
   DevConfig/Drive/WeChat Drive 保持当前用户 Limited；WeChat Hot 使用同一用户、Interactive、Highest，以便创建 Windows VSS 快照。实际注册/提权仍由 PCConfig 负责。
   可用 -TaskName 只收敛一个已登记任务；省略时保持四项任务的默认安装语义。
@@ -21,9 +21,7 @@ param(
     [string] $DailyAt  = '23:05',
     [string] $DriveAt  = '00:00',
     [string] $WeChatHotAt = '20:30',
-    [ValidateSet('Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday')]
-    [string] $WeChatDriveWeeklyDay = 'Sunday',
-    [string] $WeChatDriveWeeklyAt = '22:00',
+    [Alias('WeChatDriveWeeklyAt')][string] $WeChatDriveAt = '22:00',
     [ValidateSet('DevConfigBackup-Local','DevConfigBackup-Drive-Daily','WeChatBackup-Hot-Daily','WeChatBackup-Drive-Weekly')]
     [string[]] $TaskName = @()
 )
@@ -48,13 +46,14 @@ function New-Action([string]$Wrapper, [string]$ScriptArgs) {
         -Argument "`"$Wrapper`" $ScriptArgs" `
         -WorkingDirectory $PSScriptRoot
 }
-# 本地/G：关机错过后补跑；业务失败返回非零后再重试 3 次，不依赖网络。
+# 本地/G：关机错过后补跑；业务失败后下次定时自然重跑，不依赖网络。
 $sLocalHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 10)
 
-# Drive：仅网络可用时启动；代理或远端失败由脚本返回非零，再由任务重试。
+# Drive：仅网络可用时启动；代理或远端失败后下次定时自然重跑。
+# 保留现有 RestartCount 设置，不把它视为业务失败的补跑承诺。
 $sDrive = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
@@ -81,7 +80,7 @@ $taskDefinitions = @(
         Action = New-Action $devWrapper 'Local,Hot'
         Principal = $principal
         Settings = $sLocalHot
-        Description = '配置备份：本地包+G盘热备（每天/登录·零流量·失败重试3次）'
+        Description = '配置备份：本地包+G盘热备（每天/登录·零流量·失败后下次定时自然重跑）'
     },
     [pscustomobject]@{
         Name = 'DevConfigBackup-Drive-Daily'
@@ -89,7 +88,7 @@ $taskDefinitions = @(
         Action = New-Action $devWrapper 'Drive'
         Principal = $principal
         Settings = $sDrive
-        Description = '配置备份：Drive增量（每天·有网才跑·失败重试3次）'
+        Description = '配置备份：Drive增量（每天·有网才跑·失败后下次定时自然重跑）'
     },
     [pscustomobject]@{
         Name = 'WeChatBackup-Hot-Daily'
@@ -97,15 +96,15 @@ $taskDefinitions = @(
         Action = New-Action $wxWrapper 'Hot'
         Principal = $weChatHotPrincipal
         Settings = $sWeChatHot
-        Description = '微信聊天记录：每日增量到G盘热备（失败重试3次）'
+        Description = '微信聊天记录：每日增量到G盘热备（失败后下次定时自然重跑）'
     },
     [pscustomobject]@{
         Name = 'WeChatBackup-Drive-Weekly'
-        Triggers = @((New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeChatDriveWeeklyDay -At $WeChatDriveWeeklyAt))
+        Triggers = @((New-ScheduledTaskTrigger -Daily -At $WeChatDriveAt))
         Action = New-Action $wxWrapper 'Drive'
         Principal = $principal
         Settings = $sWeChatDrive
-        Description = '微信聊天记录：每周增量到Drive（有网才跑·失败重试3次）'
+        Description = '微信聊天记录：每日检查Drive，当前版本成功不足7天则跳过；失败后下次定时自然重跑'
     }
 )
 
@@ -169,7 +168,10 @@ if ($allowSubset) {
             }
             # A selected existing task keeps its live timing/settings preimage;
             # the new Action and Principal still go through the normal transaction.
-            $definition.Triggers = @($lookup.Task.Triggers)
+            if($definition.Name -eq 'WeChatBackup-Drive-Weekly'){
+                $at=([DateTimeOffset]::Parse([string]$lookup.Task.Triggers[0].StartBoundary)).ToLocalTime().ToString('HH:mm:ss')
+                $definition.Triggers = @((New-ScheduledTaskTrigger -Daily -At $at))
+            }else{$definition.Triggers = @($lookup.Task.Triggers)}
             $definition.Settings = $lookup.Task.Settings
         }
     }

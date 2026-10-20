@@ -6,7 +6,7 @@
   not a percentage or byte threshold. All follow-up parameters are preserved.
 #>
 [CmdletBinding()]
-param([string]$HotRoot='G:\80_Backup\WeChat\xwechat_files',[string]$HotReceiptPath='G:\80_Backup\ControlPlane\wechat-hot-last.json',[string]$GDriveRemote='gdrive:',[string]$GDriveFolder='Backups/WeChat/xwechat_files',[string]$MonitorTaskName='WeChatDrive-Monitor-Hourly',[double]$CompletePercent=99.5,[ValidateRange(1,3600)][int]$RcloneTimeoutSec=900,[string]$BwLimit='4M',[string]$MaxTransfer='8G',[switch]$Plan)
+param([string]$HotRoot='G:\80_Backup\WeChat\xwechat_files',[string]$HotReceiptPath='G:\80_Backup\ControlPlane\wechat-hot-last.json',[string]$GDriveRemote='gdrive:',[string]$GDriveFolder='Backups/WeChat/xwechat_files',[string]$MonitorTaskName='WeChatDrive-Monitor-Hourly',[ValidateRange(1,3600)][int]$RcloneTimeoutSec=900,[string]$BwLimit='4M',[string]$MaxTransfer='8G',[switch]$Plan)
 $ErrorActionPreference='Stop';$Root=$PSScriptRoot
 . (Join-Path $Root 'Backup.Common.ps1')
 . (Join-Path $Root 'Initialize-BackupNetwork.ps1')

@@ -8,6 +8,8 @@
   after its receipt proves a complete, VSS-captured, SHA-256-verified tree that
   is recent enough and still matches its manifest; the G lock is held for the
   whole upload. A refused or failed generation cannot reach the cloud.
+  Execution repairs pending Hot transactions under that lock before verification;
+  -Plan keeps verification read-only and never repairs the tree.
   File integrity does not establish application-consistent capture or acceptance
   by the official client. H cold recovery remains owned by PCConfig.
 #>
@@ -26,6 +28,7 @@ param(
 if(-not $StateRoot){$StateRoot=Join-Path $PSScriptRoot 'state'}
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Backup.Common.ps1')
+. (Join-Path $PSScriptRoot 'Run-History.Common.ps1')
 . (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
 $script:GDriveRemoteWasExplicit=$PSBoundParameters.ContainsKey('GDriveRemote')
 $script:SourceCaptureMode=if($UseVss){'vss_crash_consistent'}else{'live_source'}
@@ -69,7 +72,8 @@ function Get-WeChatTreeShapeDigest($Directories,$Files){
     return Get-BackupTextHash ($lines-join "`n")
 }
 function Get-WeChatHotUploadGeneration {
-    # Read-only gate. Returns the verified G manifest or throws a stable refusal code.
+    # Read-only gate after the caller repairs Hot transactions under the G lock.
+    # Returns the verified G manifest or throws a stable refusal code.
     param([Parameter(Mandatory)]$UploadSource)
     if(-not [IO.Directory]::Exists([IO.Path]::GetDirectoryName($HotRoot))){throw 'wechat_hot_root_unavailable'}
     try{$receipt=Read-BackupJson $script:HotReceiptFile -Required}catch{if($_.Exception.Message-ceq 'backup_json_missing'){throw 'wechat_hot_receipt_missing'};throw 'wechat_hot_receipt_unreadable'}
@@ -95,8 +99,7 @@ function Get-WeChatHotUploadGeneration {
     $UploadSource.pre_upload_check='receipt_manifest_bound_tree_shape_match';$UploadSource.gate='passed'
     return $manifest
 }
-function Invoke-WeChatDrivePublication {
-    param($Snapshot,$UploadSource)
+function Get-WeChatDriveDestination {
     $rclone=Get-BackupExecutable rclone -FallbackPath 'E:\Scoop\shims\rclone.exe'
     $env:PATH=[IO.Path]::GetDirectoryName($rclone)+';'+$env:PATH
     $null=Initialize-BackupNetwork
@@ -104,7 +107,12 @@ function Invoke-WeChatDrivePublication {
     if(-not $resolved.Success){throw ('drive_remote_unavailable:'+ $resolved.Reason)}
     if([string]::IsNullOrWhiteSpace($GDriveFolder) -or $GDriveFolder-match '(^|[/\\])\.\.([/\\]|$)|^[/\\]'){throw 'drive_folder_invalid'}
     $dest=$resolved.Remote+$GDriveFolder.TrimEnd('/','\')
-    $preflight=Invoke-RcloneDrivePreflight -Remote $resolved.Remote
+    return $dest
+}
+function Invoke-WeChatDrivePublication {
+    param($Snapshot,$UploadSource,[string]$Destination)
+    $dest=$Destination
+    $preflight=Invoke-RcloneDrivePreflight -Remote $dest.Substring(0,$dest.IndexOf(':')+1)
     if(-not $preflight.Success){throw ('drive_preflight_failed:'+ $preflight.Category)}
     $filter=@(Get-WeChatCloudFilter)
     $common=@('--checksum','--checkers','8','--transfers','4','--bwlimit',$BwLimit,'--tpslimit','8','--retries','3','--low-level-retries','10','--contimeout','20s','--timeout','120s')
@@ -124,6 +132,7 @@ function Invoke-WeChatDrivePublication {
     # The resolved remote name can be an account address; receipts keep only the folder.
     $receipt=Get-WeChatSummary $Snapshot 'drive';$receipt.Remove('destination');$receipt.source=$HotRoot
     $receipt.destination_remote='configured_rclone_binding';$receipt.destination_folder=$GDriveFolder.TrimEnd('/','\')
+    $receipt.destination_binding_sha256=Get-BackupTextHash $dest
     $receipt.capture_consistency=$UploadSource.hot_capture_consistency;$receipt.upload_source=$UploadSource
     $receipt.verification_status='rclone_checksum_check';$receipt.scope=if($DbOnly -and -not $DriveFull){'database_only'}else{'full_native_data'}
     if($receipt.scope-eq 'database_only'){
@@ -138,6 +147,15 @@ function Invoke-WeChatDrivePublication {
     }
     Write-BackupJsonAtomic (Join-Path $StateRoot 'wechat-drive-success.json') $receipt
     return $receipt
+}
+function Test-WeChatDriveCurrent {
+    param($UploadSource,[string]$Destination)
+    try{$success=Read-BackupJson (Join-Path $StateRoot 'wechat-drive-success.json')}catch{return $false}
+    if(-not $success){return $false}
+    $scope=if($DbOnly -and -not $DriveFull){'database_only'}else{'full_native_data'}
+    if($success.status-cne 'complete' -or $success.verification_status-cne 'rclone_checksum_check' -or $success.scope-cne $scope -or [string]$success.source-ine $HotRoot -or [string]$success.destination_folder-cne $GDriveFolder.TrimEnd('/','\') -or [string]$success.manifest_sha256-cne $UploadSource.hot_manifest_sha256 -or [string]$success.destination_binding_sha256-cne (Get-BackupTextHash $Destination)){return $false}
+    try{$age=([DateTimeOffset]::UtcNow-(ConvertTo-WeChatReceiptTime $success.completed_utc)).TotalDays}catch{return $false}
+    return ($age-ge 0 -and $age-lt 7)
 }
 if($Plan){
     if($UseVss){throw 'backup_vss_plan_requires_execution'}
@@ -161,6 +179,7 @@ $runPath=Join-Path $StateRoot ('wechat-'+$(if($Target.Count-eq 1 -and $Target[0]
 $code=0;$lease=$null;$driveLease=$null;$snapshot=$null;$vssCapture=$null;$sourceForCapture=$Source
 try{
     Write-BackupJsonAtomic $runPath $run
+    Write-BackupRunHistory $StateRoot $run started
     if($UseVss -and $capturesSource){$vssCapture=New-BackupVssSnapshot -Source $Source -StateRoot $StateRoot -RunId $run.run_id;$sourceForCapture=$vssCapture.SnapshotSource}
     if($Target-contains 'Hot'){
         try {
@@ -190,11 +209,17 @@ try{
         $run.drive='running';Write-BackupJsonAtomic $runPath $run
         # Hold the G lock so the daily Hot run cannot swap the tree during upload.
         try{$driveLease=Open-BackupResourceLock $HotRoot}catch{$run.upload_source.gate='refused';$run.upload_source.refusal='wechat_hot_resource_busy';$run.drive='not_uploaded';throw 'wechat_hot_resource_busy'}
-        try{$hotGeneration=Get-WeChatHotUploadGeneration $run.upload_source}catch{$run.upload_source.gate='refused';$run.upload_source.refusal=Get-BackupFailureCode $_;$run.drive='not_uploaded';throw}
+        try{
+            Repair-BackupTreeTransaction $HotRoot $script:HotReceiptFile
+            $hotGeneration=Get-WeChatHotUploadGeneration $run.upload_source
+        }catch{$run.upload_source.gate='refused';$run.upload_source.refusal=Get-BackupFailureCode $_;$run.drive='not_uploaded';throw}
         foreach($warning in @($hotGeneration.file_warnings)){Add-BackupFileWarning $script:WeChatFileWarnings $warning};$run.file_warnings=$script:WeChatFileWarnings.ToArray()
         Write-BackupJsonAtomic $runPath $run
-        $null=Invoke-WeChatDrivePublication $hotGeneration $run.upload_source
-        $run.drive='complete'
+        $driveDestination=Get-WeChatDriveDestination
+        if(Test-WeChatDriveCurrent $run.upload_source $driveDestination){$run.drive='skipped_current'}else{
+            $null=Invoke-WeChatDrivePublication $hotGeneration $run.upload_source $driveDestination
+            $run.drive='complete'
+        }
     }
     $run.status=if($code-eq 0){'complete'}else{'failed'}
 }catch{
@@ -206,6 +231,7 @@ try{
     if($vssCapture){try{Remove-BackupVssSnapshot $vssCapture}catch{$code=1;$run.status='failed';$run.failure='backup_vss_cleanup_failed'}}
     $run.completed_utc=Get-BackupUtc
     try{Write-BackupJsonAtomic $runPath $run}catch{$code=1;$run.status='failed';$run.failure='run_status_publication_failed'}
+    try{Write-BackupRunHistory $StateRoot $run final}catch{$code=1;$run.status='failed';$run.failure='run_history_publication_failed'}
 }
 if($Json){$run|ConvertTo-Json -Depth 8}else{[pscustomobject]$run|Format-List}
 exit $code

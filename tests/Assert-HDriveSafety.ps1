@@ -29,7 +29,7 @@ foreach($contract in @(
  Check ($settingsCommands.Count-eq 1 -and @($commands|Where-Object{$_.GetCommandName()-notin @('New-ScheduledTaskSettingsSet','New-TimeSpan')}).Count-eq 0) ('Settings are created without task registration: '+$name)
  $settings=& ([scriptblock]::Create($settingsCommands[0].Extent.Text))
  Check ($settings.RunOnlyIfNetworkAvailable-eq [bool]$contract[1]) ('Network availability matches local or Drive purpose: '+$name)
- Check ($settings.RestartCount-eq 3 -and $settings.RestartInterval-ceq $contract[2]) ('Three retries use the configured interval: '+$name)
+ Check ($settings.RestartCount-eq 3 -and $settings.RestartInterval-ceq $contract[2]) ('Existing scheduler restart settings are preserved without promising business retries: '+$name)
  Check ($settings.MultipleInstances-eq 2 -and $settings.StartWhenAvailable -and $settings.ExecutionTimeLimit-ceq $contract[3]) ('IgnoreNew concurrency, missed-run recovery and execution limit remain: '+$name)
  Check (-not $settings.DisallowStartIfOnBatteries -and -not $settings.StopIfGoingOnBatteries) ('Battery power does not block or stop backup: '+$name)
 }

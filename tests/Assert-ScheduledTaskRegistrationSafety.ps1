@@ -306,7 +306,7 @@ try {
     Assert-Condition ($mockLocal.Triggers.Count -eq 2 -and $mockLocal.Triggers[1].Delay -eq 'PT20M') 'Local task triggers changed.'
     Assert-Condition ($mockDrive.Settings.RunOnlyIfNetworkAvailable -and $mockDrive.Settings.RestartCount -eq 3) 'Drive task settings changed.'
     Assert-Condition ($mockWeChatHot.Settings.RestartCount -eq 3 -and -not $mockWeChatHot.Settings.RunOnlyIfNetworkAvailable) 'WeChat hot task settings changed.'
-    Assert-Condition ($mockWeChatDrive.Triggers[0].Type -eq 'weekly' -and $mockWeChatDrive.Triggers[0].DaysOfWeek -eq 'Sunday' -and $mockWeChatDrive.Settings.RestartCount -eq 3 -and $mockWeChatDrive.Settings.ExecutionTimeLimit -eq [TimeSpan]::FromHours(4)) 'WeChat Drive schedule or retry settings changed.'
+    Assert-Condition ($mockWeChatDrive.Triggers[0].Type -eq 'daily' -and $mockWeChatDrive.Settings.ExecutionTimeLimit -eq [TimeSpan]::FromHours(4)) 'WeChat Drive must check daily and retain its execution limit.'
     foreach ($task in @($mockLocal, $mockDrive, $mockWeChatHot, $mockWeChatDrive)) {
         $expectedRunLevel = if ($task.TaskName -eq 'WeChatBackup-Hot-Daily') { 'Highest' } else { 'Limited' }
         Assert-Condition ($task.Principal.UserId -eq $env:USERNAME -and $task.Principal.LogonType -eq 'Interactive' -and $task.Principal.RunLevel -eq $expectedRunLevel) 'Task principal changed.'
@@ -324,6 +324,13 @@ try {
     Assert-Condition ($global:DevConfigBackupTaskRegistrationMock.Count -eq 1 -and $global:DevConfigBackupTaskRegistrationMock.ContainsKey('WeChatBackup-Hot-Daily')) 'Setup -TaskName must register only the selected existing task.'
     $hotOnlyProduction = $global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Hot-Daily']
     Assert-Condition ($hotOnlyProduction.Actions[0].Arguments -match 'Backup-WeChat-Hidden\.vbs" Hot$' -and $hotOnlyProduction.Principal.RunLevel -eq 'Highest' -and $hotOnlyProduction.Settings.ExecutionTimeLimit -eq [TimeSpan]::FromHours(3) -and $hotOnlyProduction.Triggers[0].At -eq 'legacy-date') 'Setup -TaskName must retain live timing/settings while changing only the required Hot principal.'
+    $legacyDrive = New-TestTask -Definition $definitions[3] -Xml 'xml:legacy-drive'
+    $legacyDrive.Actions[0] = [pscustomobject]@{ Execute=(Join-Path $env:WINDIR 'System32\wscript.exe'); Arguments=('"'+(Join-Path $RepoRoot 'Backup-WeChat-Hidden.vbs')+'" Drive'); WorkingDirectory=$RepoRoot }
+    $legacyDrive.Triggers = @([pscustomobject]@{Type='weekly';StartBoundary='2026-10-18T22:00:00';DaysOfWeek='Sunday'})
+    $global:DevConfigBackupTaskRegistrationMock = @{'WeChatBackup-Drive-Weekly'=$legacyDrive}
+    & $setupPath -TaskName WeChatBackup-Drive-Weekly
+    $migratedDrive=$global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Drive-Weekly']
+    Assert-Condition ($migratedDrive.Triggers[0].Type -eq 'daily' -and $migratedDrive.Triggers[0].At -eq '22:00:00' -and $migratedDrive.Settings.ExecutionTimeLimit -eq $legacyDrive.Settings.ExecutionTimeLimit) 'Existing weekly task must become daily at its original local time.'
     $unknownSetupRejected = $false
     try { & $setupPath -TaskName Unknown-Task } catch { $unknownSetupRejected = $true }
     Assert-Condition ($unknownSetupRejected -and $global:DevConfigBackupTaskRegistrationMock.Count -eq 1) 'Setup must reject unsupported task names without touching registered tasks.'

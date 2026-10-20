@@ -22,6 +22,7 @@ if(-not $SourcesFile){$SourcesFile=Join-Path $PSScriptRoot 'sources.psd1'}
 if(-not $OutputRoot){$OutputRoot=$PSScriptRoot}
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Backup.Common.ps1')
+. (Join-Path $PSScriptRoot 'Run-History.Common.ps1')
 . (Join-Path $PSScriptRoot 'DevConfig.Sources.ps1')
 . (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
 $script:GDriveRemoteWasExplicit=$PSBoundParameters.ContainsKey('GDriveRemote')
@@ -168,6 +169,7 @@ $script:run=[ordered]@{schema='devconfig.run.v2';run_id=[guid]::NewGuid().ToStri
 $runPath=Join-Path $StateDir ('devconfig-'+$(if($Tier.Count-eq 1 -and $Tier[0]-eq 'Drive'){'drive'}else{'local'})+'-last.json')
 try{
  Write-BackupJsonAtomic $runPath $run
+ Write-BackupRunHistory $StateDir $run started
  $outLease=Open-BackupResourceLock $OutDir
  if($Tier-contains 'Local' -or $Tier-contains 'Hot'){
   if($ProfileRoot-match '(?i)[\\/]systemprofile$'){throw 'backup_interactive_user_profile_required'}
@@ -205,6 +207,7 @@ try{
  if($pin){$pin.Dispose()};if($outLease){$outLease.Dispose()}
  if($container -and [IO.Directory]::Exists($container)){try{Remove-BackupOwnedDirectory $container $StageParent '^run-[a-f0-9]{32}$'}catch{$script:overallExitCode=1;$run.status='failed';$run.failure='backup_staging_cleanup_failed'}}
  $run.completed_utc=Get-BackupUtc;try{Write-BackupJsonAtomic $runPath $run}catch{$script:overallExitCode=1;$run.status='failed';$run.failure='backup_status_publication_failed'}
+ try{Write-BackupRunHistory $StateDir $run final}catch{$script:overallExitCode=1;$run.status='failed';$run.failure='run_history_publication_failed'}
 }
 if($Json){$run|ConvertTo-Json -Depth 8}else{[pscustomobject]$run|Format-List}
 exit $script:overallExitCode
