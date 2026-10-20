@@ -62,6 +62,25 @@ try{
  $record=Invoke-VerifiedBackupTree $ws $wd;Check ((Get-VerifiedBackupTreeManifest $wd -VerifyContent).content_sha256-ceq $record.content_sha256) 'Native generation matches its full SHA-256 manifest'
  [IO.File]::Delete((Join-Path $ws 'account\media.bin'));Put (Join-Path $ws 'account\db_storage\fixture.bin') 'new2';$record2=Invoke-VerifiedBackupTree $ws $wd
  Check (-not [IO.File]::Exists((Join-Path $wd 'account\media.bin')) -and [IO.File]::Exists((Join-Path $record2.previous_path 'account\media.bin'))) 'Deletion converges while preserving one bounded predecessor'
+ $orphanReceipt=Join-Path $script:FixtureRoot 'control-plane\receipt.json';$orphanIncoming=$wd+'.incoming-'+('a'*32);$orphanPrevious=$wd+'.previous-'+('b'*32);$retained=$wd+'.previous-'+('c'*32)
+ $journalIncoming=$wd+'.incoming-'+('d'*32);$journalPrevious=$wd+'.previous-'+('d'*32);$journalOld=$wd+'.previous-'+('e'*32);$manual=$wd+'.previous-manual'
+ foreach($path in @($orphanIncoming,$orphanPrevious,$retained,$journalIncoming,$journalPrevious,$journalOld,$manual)){Put (Join-Path $path 'fixture.bin') 'synthetic generation'}
+ $orphanManifest=$wd+'.backup-manifest.previous-'+('a'*32)+'.json';$orphanSidecar=$orphanReceipt+'.previous-'+('a'*32)+'.json'
+ $journalManifest=$wd+'.backup-manifest.previous-'+('d'*32)+'.json';$journalReceipt=$orphanReceipt+'.previous-'+('d'*32)+'.json'
+ foreach($path in @($orphanManifest,$orphanSidecar,$journalManifest,$journalReceipt)){Put $path '{}';[IO.File]::SetAttributes($path,[IO.FileAttributes]::ReadOnly)}
+ [IO.File]::SetAttributes((Join-Path $orphanPrevious 'fixture.bin'),[IO.FileAttributes]::ReadOnly);[IO.File]::SetAttributes($orphanPrevious,[IO.FileAttributes]::ReadOnly)
+ $record2.retained_warning_generations=@($retained);Write-BackupJsonAtomic ($wd+'.backup-manifest.json') $record2
+ Write-BackupJsonAtomic ($wd+'.backup-transaction.json') @{incoming=$journalIncoming;previous=$journalPrevious;old_previous_path=$journalOld;previous_manifest_path=$journalManifest;previous_receipt_path=$journalReceipt;post_commit_receipt_path=$orphanReceipt}
+ Remove-BackupTreeOrphans $wd $orphanReceipt
+ Check (-not [IO.Directory]::Exists($orphanIncoming) -and -not [IO.Directory]::Exists($orphanPrevious) -and -not [IO.File]::Exists($orphanManifest) -and -not [IO.File]::Exists($orphanSidecar)) 'Exact orphan generations and read-only manifest/receipt sidecars are retired'
+ Check ([IO.Directory]::Exists($record2.previous_path) -and [IO.Directory]::Exists($retained) -and [IO.Directory]::Exists($manual)) 'Orphan cleanup preserves manifest predecessors, warning generations and unrelated names'
+ Check ([IO.Directory]::Exists($journalIncoming) -and [IO.Directory]::Exists($journalPrevious) -and [IO.Directory]::Exists($journalOld) -and [IO.File]::Exists($journalManifest) -and [IO.File]::Exists($journalReceipt)) 'Active transaction references survive orphan cleanup'
+ [IO.File]::Delete($wd+'.backup-transaction.json');Repair-BackupTreeTransaction $wd $orphanReceipt
+ Check (-not [IO.Directory]::Exists($journalIncoming) -and -not [IO.File]::Exists($journalReceipt) -and [IO.Directory]::Exists($retained)) 'Repair without a journal still retires old unreferenced generations'
+ $record2.retained_warning_generations=[pscustomobject]@{};Write-BackupJsonAtomic ($wd+'.backup-manifest.json') $record2
+ Set-StrictMode -Version Latest;try{Repair-BackupTreeTransaction $wd $orphanReceipt}finally{Set-StrictMode -Off}
+ Check (-not [IO.Directory]::Exists($retained) -and [IO.Directory]::Exists($record2.previous_path)) 'Legacy empty-object retention remains readable under StrictMode without a transaction journal'
+ $record2.retained_warning_generations=@();Write-BackupJsonAtomic ($wd+'.backup-manifest.json') $record2
  $script:OriginalAtomic=(Get-Command Write-BackupJsonAtomic).ScriptBlock;$script:RejectCommit=$true
  function Write-BackupJsonAtomic {param([string]$Path,$Value);if($script:RejectCommit -and $Path.EndsWith('.backup-manifest.json')){$script:RejectCommit=$false;throw 'synthetic_commit_failure'};& $script:OriginalAtomic $Path $Value}
  Put (Join-Path $ws 'account\db_storage\fixture.bin') 'new3';$refused=$false;try{$null=Invoke-VerifiedBackupTree $ws $wd}catch{$refused=$true}
