@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
@@ -53,20 +53,18 @@ try {
     try { Remove-BackupVssSnapshotExact '{not-a-vss-id}' } catch { $invalidId = $_.Exception.Message -eq 'backup_vss_shadow_id_invalid' }
     Check $invalidId 'VSS cleanup rejects malformed IDs before querying the volume'
 
-    if (-not (Test-BackupAdministrator)) {
-        $runtime = (Get-Process -Id $PID).Path
-        $arguments = @(
-            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $repo 'Backup-WeChat.ps1'),
-            '-Source', $source, '-HotRoot', (Join-Path $fixtureRoot 'hot'),
-            '-HotReceiptPath', $receipt, '-StateRoot', $state, '-Target', 'Hot', '-UseVss', '-Json'
-        )
-        $output = @(& $runtime @arguments 2>&1 | ForEach-Object { $_.ToString() })
-        $exitCode = $LASTEXITCODE
-        Check ($exitCode -ne 0 -and ($output -join [Environment]::NewLine) -match 'backup_vss_administrator_required') 'VSS Hot execution fails closed without elevation'
-        Check (-not [IO.Directory]::Exists((Join-Path $fixtureRoot 'hot')) -and -not [IO.File]::Exists($receipt)) 'Failed VSS preflight creates no Hot target or receipt'
-    } else {
-        Write-Host 'SKIP: current test host is elevated; production VSS consumption remains a separate acceptance.'
-    }
+    # Extract and execute just the entry guard; never create a real VSS snapshot.
+    $tree=[Management.Automation.Language.Parser]::ParseInput($backupText,[ref]$null,[ref]$null)
+    $guard=$tree.EndBlock.Statements | Where-Object {$_.Extent.Text -like 'if($UseVss -and -not $Plan*'}
+    $UseVss=$true;$Plan=$false;$PSCommandPath=Join-Path $repo 'Backup-WeChat.ps1'
+    $PSBoundParameters=@{UseVss=$true;Source=$source};$script:relaunched=$false
+    function Test-BackupAdministrator {return $false}
+    function Invoke-ProjectElevated($Command){$script:relaunched=$Command -match 'FromBase64String';$global:LASTEXITCODE=23}
+    # Replacing exit only in the isolated fixture allows checking the child result.
+    & ([scriptblock]::Create($guard.Extent.Text.Replace('exit $LASTEXITCODE','return $LASTEXITCODE'))) | Out-Null
+    Check $script:relaunched 'VSS entry automatically relaunches before snapshot or receipt work'
+    Check ($LASTEXITCODE -eq 23) 'VSS entry preserves elevated child exit code'
+    Check (-not [IO.Directory]::Exists((Join-Path $fixtureRoot 'hot')) -and -not [IO.File]::Exists($receipt)) 'Elevation dispatch creates no Hot target or receipt'
 
     Write-Output ("RESULT: {0} WeChat VSS checks passed; runtime={1}" -f $checks, $PSVersionTable.PSVersion)
 } finally {

@@ -28,6 +28,7 @@ param(
 if(-not $StateRoot){$StateRoot=Join-Path $PSScriptRoot 'state'}
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Backup.Common.ps1')
+if($UseVss -and -not $Plan -and -not (Test-BackupAdministrator)){Invoke-ProjectElevated (New-ProjectInvocation $PSCommandPath $PSBoundParameters);exit $LASTEXITCODE}
 . (Join-Path $PSScriptRoot 'Run-History.Common.ps1')
 . (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
 $script:GDriveRemoteWasExplicit=$PSBoundParameters.ContainsKey('GDriveRemote')

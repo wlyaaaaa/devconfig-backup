@@ -1,3 +1,4 @@
+﻿. (Join-Path $PSScriptRoot 'Elevation.ps1')
 # Shared primitives: including this file performs no disk or network mutation.
 function Get-BackupUtc { [DateTimeOffset]::UtcNow.ToString('o') }
 function Get-BackupTextHash([string]$Text) {
@@ -11,7 +12,7 @@ function Resolve-BackupPath([string]$Path){
  if($full-eq [IO.Path]::GetPathRoot($full).TrimEnd('\','/')){throw 'backup_drive_root_forbidden'};return $full
 }
 function Test-BackupAdministrator {
- $identity=[Security.Principal.WindowsIdentity]::GetCurrent();try{$principal=[Security.Principal.WindowsPrincipal]::new($identity);return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)}finally{$identity.Dispose()}
+ return Test-ProjectAdministrator
 }
 function Get-BackupVssVolumeIdentity([string]$VolumeRoot){
  $root=[IO.Path]::GetFullPath($VolumeRoot);if($root -notmatch '^[A-Za-z]:\\$'){throw 'backup_vss_volume_root_invalid'}
