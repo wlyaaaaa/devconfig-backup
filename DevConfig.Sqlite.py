@@ -8,29 +8,38 @@ import sqlite3
 import time
 
 
-def capture(source: Path, target: Path, timeout: float = 15.0) -> None:
+def capture(source: Path, target: Path, timeout: float = 15.0, diagnostic=None) -> None:
+    diagnostic = {} if diagnostic is None else diagnostic
+    diagnostic.update(stage="source_open", deadline_expired=False)
     deadline = time.monotonic() + timeout
 
     def bounded(*_):
         if time.monotonic() >= deadline:
+            diagnostic["deadline_expired"] = True
             raise TimeoutError("sqlite_capture_timeout")
         return 0
 
     # mode=ro includes committed WAL pages; immutable=1 would miss live WAL.
     with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True,
                                 timeout=0.25, isolation_level=None)) as reader:
+        diagnostic["stage"] = "source_read"
         reader.execute("PRAGMA query_only=ON")
         reader.execute("BEGIN")
         # Establish one read snapshot before the incremental backup starts.
         reader.execute("SELECT count(*) FROM sqlite_schema").fetchone()
+        diagnostic["stage"] = "target_create"
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("xb"):
             pass
+        diagnostic["stage"] = "target_open"
         with closing(sqlite3.connect(target, timeout=0.25)) as writer:
+            diagnostic["stage"] = "online_backup"
             reader.backup(writer, pages=256, progress=bounded, sleep=0.05)
             writer.set_progress_handler(bounded, 1000)
+            diagnostic["stage"] = "standalone_mode"
             if writer.execute("PRAGMA journal_mode=DELETE").fetchone()[0] != "delete":
                 raise sqlite3.DatabaseError("sqlite_standalone_mode_failed")
+            diagnostic["stage"] = "integrity_check"
             if writer.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
                 raise sqlite3.DatabaseError("sqlite_integrity_failed")
             bounded()
@@ -42,12 +51,18 @@ def main() -> int:
     parser.add_argument("target", type=Path)
     parser.add_argument("--timeout", type=float, default=15.0)
     args = parser.parse_args()
+    diagnostic = {}
+    started = time.monotonic()
     try:
-        capture(args.source, args.target, args.timeout)
+        capture(args.source, args.target, args.timeout, diagnostic)
     except (OSError, sqlite3.Error, TimeoutError) as exc:
         code = getattr(exc, "sqlite_errorcode", None)
-        reason = "timeout" if isinstance(exc, TimeoutError) else "sqlite_error" if isinstance(exc, sqlite3.Error) else "io_error"
-        print(json.dumps({"status": "failed", "reason": reason, "sqlite_error_code": code}))
+        # sqlite3 converts exceptions in a progress handler into SQLITE_INTERRUPT.
+        reason = "timeout" if isinstance(exc, TimeoutError) or diagnostic.get("deadline_expired") else "sqlite_error" if isinstance(exc, sqlite3.Error) else "io_error"
+        print(json.dumps({"status": "failed", "stage": diagnostic["stage"], "reason": reason,
+                          "sqlite_error_code": code, "sqlite_error_name": getattr(exc, "sqlite_errorname", None),
+                          "os_error_code": getattr(exc, "winerror", None) or getattr(exc, "errno", None),
+                          "elapsed_ms": round((time.monotonic() - started) * 1000)}))
         return 1
     print(json.dumps({"status": "complete", "method": "sqlite_online_backup", "integrity_check": "ok"}))
     return 0

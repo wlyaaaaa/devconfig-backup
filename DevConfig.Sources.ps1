@@ -81,20 +81,37 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
  $start.Arguments='-I -B '+((@($script:DevConfigSQLiteHelper,$Source,$snapshot)|ForEach-Object{'"'+$_+'"'})-join ' ')
  $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
  $process=[Diagnostics.Process]::new();$process.StartInfo=$start
+ $clock=[Diagnostics.Stopwatch]::StartNew();$code=$null;$valid=$false
+ $diagnostic=[ordered]@{stage='process_start';reason='native_error';native_exit=$null;sqlite_error_code=$null;sqlite_error_name=$null;os_error_code=$null;elapsed_ms=0}
  try{
   [void]$process.Start()
+  $diagnostic.stage='process_wait'
   if(-not $process.WaitForExit(20000)){
-   $process.Kill();$process.WaitForExit();$timeout=[TimeoutException]::new('backup_sqlite_capture_failed');$timeout.Data['backup_sqlite_reason']='timeout';throw $timeout
+   $process.Kill();$process.WaitForExit();$diagnostic.reason='timeout'
+  }else{
+   $diagnostic.stage='helper_reply'
   }
   $reply=$process.StandardOutput.ReadToEnd();$null=$process.StandardError.ReadToEnd();$code=$process.ExitCode
- }finally{$process.Dispose()}
- if($code-ne 0){
+  if($diagnostic.reason-ne 'timeout'){
+   try{
+    $detail=$reply|ConvertFrom-Json
+    $valid=$code-eq 0 -and $detail.status-ceq 'complete' -and $detail.method-ceq 'sqlite_online_backup' -and $detail.integrity_check-ceq 'ok'
+    if($detail.status-ceq 'failed'){
+     if($detail.stage-in @('source_open','source_read','target_create','target_open','online_backup','standalone_mode','integrity_check')){$diagnostic.stage=[string]$detail.stage}
+     if($detail.reason-in @('timeout','sqlite_error','io_error')){$diagnostic.reason=[string]$detail.reason}
+     foreach($key in @('sqlite_error_code','os_error_code','elapsed_ms')){if($null-ne $detail.$key){$diagnostic[$key]=[long]$detail.$key}}
+     if($detail.sqlite_error_name-cmatch '^SQLITE_[A-Z0-9_]+$'){$diagnostic.sqlite_error_name=[string]$detail.sqlite_error_name}
+    }
+   }catch{}
+  }
+ }catch{if($_.Exception.NativeErrorCode){$diagnostic.os_error_code=[int]$_.Exception.NativeErrorCode}}finally{$process.Dispose();$clock.Stop()}
+ $diagnostic.native_exit=$code
+ if($diagnostic.elapsed_ms-eq 0){$diagnostic.elapsed_ms=$clock.ElapsedMilliseconds}
+ if($code-ne 0 -or -not $valid){
   $failure=[InvalidOperationException]::new('backup_sqlite_capture_failed')
-  try{$detail=$reply|ConvertFrom-Json;$failure.Data['backup_sqlite_error_code']=[int]$detail.sqlite_error_code;$failure.Data['backup_sqlite_reason']=[string]$detail.reason}catch{}
+  $failure.Data['backup_sqlite_diagnostic']=$diagnostic;$failure.Data['backup_sqlite_error_code']=$diagnostic.sqlite_error_code;$failure.Data['backup_sqlite_reason']=$diagnostic.reason
   throw $failure
  }
- $result=$reply|ConvertFrom-Json
- if($result.status-cne 'complete' -or $result.method-cne 'sqlite_online_backup' -or $result.integrity_check-cne 'ok'){throw 'backup_sqlite_capture_failed'}
  $hash=Get-BackupStableFileHash $snapshot;Copy-BackupFileVerified $snapshot $Destination $hash
  return $hash
 }

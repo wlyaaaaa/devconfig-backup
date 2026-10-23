@@ -10,8 +10,8 @@ function Get-BackupRunTaskKind($Run){
 }
 function Write-BackupRunHistory([string]$StateRoot,$Run,[ValidateSet('started','final')][string]$Event){
  $record=[ordered]@{schema='backup.run-history.v1';event=$Event;task_kind=(Get-BackupRunTaskKind $Run);run_id=$Run.run_id;started_utc=$Run.started_utc;process_id=$PID;process_started_utc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')}
- # An explicit field list keeps source names, diagnostic output and nested file arrays out.
- foreach($key in @('status','completed_utc','tiers','targets','collection','package','hot','local','drive','retention','failure','failure_type','failure_stage','failure_io_reason','skipped_file_count','capture_attempt_count','capture_max_attempts','capture_consistency','application_recovery','pack_native_exit')){if($Run.Contains($key)){$record[$key]=$Run[$key]}}
+ # Keep only summary fields and fixed SQLite diagnostics, without raw output or file arrays.
+ foreach($key in @('status','completed_utc','tiers','targets','collection','package','hot','local','drive','retention','failure','failure_type','failure_stage','failure_io_reason','sqlite_diagnostic','skipped_file_count','capture_attempt_count','capture_max_attempts','capture_consistency','application_recovery','pack_native_exit')){if($Run.Contains($key)){$record[$key]=$Run[$key]}}
  $record.file_warning_count=@($Run.file_warnings|Where-Object{$_}).Count
  $path=Join-Path $StateRoot 'run-history.jsonl';$lease=$null;$temp=$path+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
  try{

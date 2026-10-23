@@ -201,6 +201,7 @@ try{
  $script:overallExitCode=1;$run.status='failed';$run.failure=Get-BackupFailureCode $_;$run.failure_type=$_.Exception.GetType().Name
  $run.failure_stage=[string]$_.Exception.Data['backup_stage']
  $run.failure_site=@($_.ScriptStackTrace-split "`n")[0]
+ $sqliteDiagnostic=$_.Exception.Data['backup_sqlite_diagnostic'];if($sqliteDiagnostic){$run.sqlite_diagnostic=$sqliteDiagnostic}
  try{$run.failure_path=Get-BackupFailureSourcePath $_ @(@('profile',$ProfileRoot),@('output',$OutputRoot));$run.failure_io_reason=Get-BackupUnreadableReason $_.Exception}catch{$run.failure_path=$null}
  foreach($phase in @('collection','package','hot','drive','retention')){if($run[$phase]-eq 'running'){$run[$phase]='failed'}}
 }finally{

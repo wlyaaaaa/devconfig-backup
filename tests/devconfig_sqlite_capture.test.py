@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -115,8 +116,8 @@ def run_tests(repo, fixture, powershell):
     sources.write_text("@{HomeDirs=@('.codex');RequiredSources=@('home/.codex');SQLiteBackupRelativePaths=@('home/.codex/*.sqlite');ExcludeRelativePaths=@('home/.codex/.sqlite-maintenance.lock')}", encoding="utf-8")
     output = fixture / "output"
 
-    def backup():
-        result = subprocess.run([str(powershell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(repo / "Backup-DevConfig.ps1"), "-Tier", "Local", "-ProfileRoot", str(profile), "-SourcesFile", str(sources), "-OutputRoot", str(output), "-SkipSystemExport", "-Json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    def backup(script_repo=repo):
+        result = subprocess.run([str(powershell), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script_repo / "Backup-DevConfig.ps1"), "-Tier", "Local", "-ProfileRoot", str(profile), "-SourcesFile", str(sources), "-OutputRoot", str(output), "-SkipSystemExport", "-Json"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
         receipt = json.loads((output / "state" / "devconfig-local-last.json").read_text(encoding="utf-8-sig"))
         return result, receipt
 
@@ -185,6 +186,43 @@ def run_tests(repo, fixture, powershell):
     source.write_bytes(b"not a SQLite database")
     result, receipt = backup()
     check(result.returncode != 0 and receipt["failure"] == "backup_sqlite_capture_failed" and current.read_bytes() == before, "Corrupt database cannot be published as a successful raw copy")
+    diagnostic = receipt["sqlite_diagnostic"]
+    check(diagnostic["stage"] == "source_read" and diagnostic["reason"] == "sqlite_error" and diagnostic["sqlite_error_code"] == sqlite3.SQLITE_NOTADB and diagnostic["sqlite_error_name"] == "SQLITE_NOTADB" and diagnostic["os_error_code"] is None, "Actual corrupt-database diagnostics reach the formal failed receipt")
+
+    # Exercise the real SQLite progress handler with a deterministic expired clock.
+    # Only fixture scripts are instrumented; normal helper deadlines stay unchanged.
+    deadline_repo = fixture / "deadline-repo"
+    deadline_repo.mkdir()
+    for script in repo.glob("*.ps1"):
+        shutil.copy2(script, deadline_repo / script.name)
+    shutil.copy2(repo / "Backup.Json.cs", deadline_repo / "Backup.Json.cs")
+    instrument = '''
+_connect = sqlite3.connect
+_monotonic = time.monotonic
+class DeadlineConnection(sqlite3.Connection):
+    def set_progress_handler(self, callback, instructions):
+        def expired():
+            time.monotonic = lambda: _monotonic() + 30
+            return callback()
+        return super().set_progress_handler(expired, instructions)
+def deadline_connect(*args, **kwargs):
+    if not str(args[0]).startswith("file:"):
+        kwargs["factory"] = DeadlineConnection
+    return _connect(*args, **kwargs)
+sqlite3.connect = deadline_connect
+'''
+    helper = (repo / "DevConfig.Sqlite.py").read_text(encoding="utf-8")
+    (deadline_repo / "DevConfig.Sqlite.py").write_text(helper.replace('if __name__ == "__main__":', instrument + '\nif __name__ == "__main__":'), encoding="utf-8")
+    source.write_bytes(first.read_bytes())
+    prior_run = receipt["run_id"]
+    result, receipt = backup(deadline_repo)
+    check(receipt["run_id"] != prior_run, "Instrumented fixture produced a fresh formal run receipt: " + result.stderr)
+    diagnostic = receipt["sqlite_diagnostic"]
+    check(result.returncode != 0 and receipt["status"] == "failed" and current.read_bytes() == before, "Deadline interrupt remains a failed task and preserves the successful package")
+    check(diagnostic["stage"] == "integrity_check" and diagnostic["reason"] == "timeout" and diagnostic["sqlite_error_code"] == sqlite3.SQLITE_INTERRUPT and diagnostic["sqlite_error_name"] == "SQLITE_INTERRUPT", "Real progress-handler interruption is classified as timeout through the formal failed receipt: " + json.dumps(diagnostic))
+    check(diagnostic["native_exit"] == 1 and diagnostic["os_error_code"] is None and diagnostic["elapsed_ms"] >= 15000, "Deadline receipt preserves the helper exit, elapsed time and absent OS error")
+    history = [json.loads(line) for line in (output / "state" / "run-history.jsonl").read_text(encoding="utf-8-sig").splitlines()]
+    check(history[-1]["run_id"] == receipt["run_id"] and history[-1]["sqlite_diagnostic"] == diagnostic, "Final failure history preserves the complete safe SQLite diagnostic")
     failure = None
     try:
         capture.capture(first, fixture / "timeout.sqlite", timeout=0)
