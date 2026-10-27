@@ -51,6 +51,13 @@ function Throw-DriveMetadataFailure([string]$Stage,[string]$ObjectKind,[string]$
  $failureException.Data['backup_drive_diagnostic']=[pscustomobject][ordered]@{stage=$Stage;object_kind=$ObjectKind;suffix=$Suffix;native_exit=$NativeExit;reason=$Detail}
  throw $failureException
 }
+function Throw-DrivePackageFailure([ValidateSet('dated','latest')][string]$ObjectKind,[ValidateSet('Upload','ServerCopy')][string]$TransferMode,[int]$NativeExit,[string[]]$Output){
+ # Preserve the native result and fixed operation categories, never provider output.
+ $failureCode=if($ObjectKind-ceq 'dated'){'drive_dated_upload_failed'}else{'drive_latest_upload_failed'}
+ $failureException=[InvalidOperationException]::new($failureCode)
+ $failureException.Data['backup_drive_diagnostic']=[pscustomobject][ordered]@{stage='drive_package_copy';object_kind=$ObjectKind;suffix='.zip';native_exit=$NativeExit;reason='copy_failed';transfer_mode=$TransferMode;category=(Get-RcloneFailureCategory -Output $Output)}
+ throw $failureException
+}
 function Push-Drive($Pack){
  $rclone=Get-BackupExecutable rclone -FallbackPath 'E:\Scoop\shims\rclone.exe';$env:PATH=[IO.Path]::GetDirectoryName($rclone)+';'+$env:PATH
  $network=Initialize-BackupNetwork
@@ -65,11 +72,11 @@ function Push-Drive($Pack){
  $skip=$false
  if(-not $Force){$skip=(Test-DriveUploadSkipEligibility -State $state -Sha256 $Pack.Sha -Remote $remote -Folder $GDriveFolder -DatedName $Pack.Name -DatedLocalPath $Pack.Zip -LatestLocalPath $Pack.Zip).Eligible}
  if(-not $skip){
-  Invoke-BackupRclone copyto $Pack.Zip ($dest+'/'+$Pack.Name) @flags *> $null
-  if($LASTEXITCODE-ne 0){throw 'drive_dated_upload_failed'}
+  $copyOutput=@(Invoke-BackupRclone copyto $Pack.Zip ($dest+'/'+$Pack.Name) @flags 2>&1 | ForEach-Object{$_.ToString()});$copyExit=$LASTEXITCODE
+  if($copyExit-ne 0){Throw-DrivePackageFailure 'dated' 'Upload' $copyExit $copyOutput}
   $latestSource=if($CloudLatestMode-eq 'ServerCopy'){$dest+'/'+$Pack.Name}else{$Pack.Zip}
-  Invoke-BackupRclone copyto $latestSource ($dest+'/latest.zip') @flags *> $null
-  if($LASTEXITCODE-ne 0){throw 'drive_latest_upload_failed'}
+  $copyOutput=@(Invoke-BackupRclone copyto $latestSource ($dest+'/latest.zip') @flags 2>&1 | ForEach-Object{$_.ToString()});$copyExit=$LASTEXITCODE
+  if($copyExit-ne 0){Throw-DrivePackageFailure 'latest' $CloudLatestMode $copyExit $copyOutput}
  }
  foreach($name in @($Pack.Name,'latest.zip')){
   if(-not (Test-RcloneRemoteFileMatchesLocal -LocalPath $Pack.Zip -RemotePath ($dest+'/'+$name)).Matches){throw 'drive_package_verification_failed'}

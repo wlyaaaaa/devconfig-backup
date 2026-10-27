@@ -8,10 +8,26 @@ function Get-BackupRunTaskKind($Run){
  $targets=if($family-eq 'wechat'){@($Run.targets)}else{@($Run.tiers)}
  return $family+'-'+$(if($targets.Count-eq 1 -and $targets[0]-eq 'Drive'){'drive'}else{'local'})
 }
+function Get-BackupHistoryDriveDiagnostic($Diagnostic){
+ if(-not $Diagnostic){return $null}
+ $allowed=[ordered]@{
+  stage=@('drive_package_copy','drive_portable_metadata_copy','drive_portable_metadata_verify')
+  object_kind=@('dated','latest')
+  suffix=@('.zip','.receipt.json','.manifest.json','.sha256')
+  reason=@('copy_failed','local_file_missing','remote_object_query_failed','remote_object_hash_unavailable','remote_object_missing_or_mismatch','verification_result_unavailable')
+ }
+ $safe=[ordered]@{}
+ foreach($key in $allowed.Keys){if([string]$Diagnostic.$key-notin $allowed[$key]){return $null};$safe[$key]=[string]$Diagnostic.$key}
+ $nativeExit=0;if(-not [int]::TryParse([string]$Diagnostic.native_exit,[ref]$nativeExit)){return $null};$safe.native_exit=$nativeExit
+ if($Diagnostic.transfer_mode-in @('Upload','ServerCopy')){$safe.transfer_mode=[string]$Diagnostic.transfer_mode}
+ if($Diagnostic.category-in @('proxy_connect','timeout','oauth_auth','rate_limit','api_config','permission','network','config','remote_api','unknown')){$safe.category=[string]$Diagnostic.category}
+ return [pscustomobject]$safe
+}
 function Write-BackupRunHistory([string]$StateRoot,$Run,[ValidateSet('started','final')][string]$Event){
  $record=[ordered]@{schema='backup.run-history.v1';event=$Event;task_kind=(Get-BackupRunTaskKind $Run);run_id=$Run.run_id;started_utc=$Run.started_utc;process_id=$PID;process_started_utc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')}
- # Keep only summary fields and fixed SQLite diagnostics, without raw output or file arrays.
+ # Keep only summary fields and fixed diagnostics, without raw output or file arrays.
  foreach($key in @('status','completed_utc','tiers','targets','collection','package','hot','local','drive','retention','failure','failure_type','failure_stage','failure_io_reason','sqlite_diagnostic','skipped_file_count','capture_attempt_count','capture_max_attempts','capture_consistency','application_recovery','pack_native_exit')){if($Run.Contains($key)){$record[$key]=$Run[$key]}}
+ if($Run.Contains('drive_diagnostic')){$diagnostic=Get-BackupHistoryDriveDiagnostic $Run.drive_diagnostic;if($diagnostic){$record.drive_diagnostic=$diagnostic}}
  $record.file_warning_count=@($Run.file_warnings|Where-Object{$_}).Count
  $path=Join-Path $StateRoot 'run-history.jsonl';$lease=$null;$temp=$path+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
  try{

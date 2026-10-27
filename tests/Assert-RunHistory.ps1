@@ -50,6 +50,17 @@ try{
  $script:HistoryEvents=@((New-HistoryEvent 100 $instance ($time.AddSeconds(-1))),(New-HistoryEvent 100 $later ($time.AddSeconds(-2))),(New-HistoryEvent 201 $instance ($time.AddMinutes(1)) '125'));Check ($null-eq (Get-BackupRunScheduledExit 'devconfig-local' $time)) 'Ambiguous starts cannot claim an exit code'
  $script:HistoryEvents=@((New-HistoryEvent 100 $instance ($time.AddSeconds(-1)) '0' '\OtherTask'),(New-HistoryEvent 201 $instance ($time.AddMinutes(1)) '125' '\OtherTask'));Check ($null-eq (Get-BackupRunScheduledExit 'devconfig-local' $time)) 'A different task cannot supply an exit code'
  $script:HistoryEventsDenied=$true;Check ($null-eq (Get-BackupRunScheduledExit 'devconfig-local' $time)) 'Unreadable Operational logs leave the exit unknown'
+ $driveState=Join-Path $fixture 'drive-state';$driveHistory=Join-Path $driveState 'run-history.jsonl'
+ $driveRun=[ordered]@{schema='devconfig.run.v2';run_id=[guid]::NewGuid().ToString('N');started_utc=(Get-BackupUtc);completed_utc=(Get-BackupUtc);tiers=@('Drive');status='failed';drive='failed';failure='drive_latest_upload_failed';failure_stage='drive_package_copy';drive_diagnostic=[pscustomobject]@{stage='drive_package_copy';object_kind='latest';suffix='.zip';native_exit=7;reason='copy_failed';transfer_mode='ServerCopy';category='oauth_auth';raw_output='PRIVATE_CONTENT';remote='PRIVATE_FILENAME';unexpected=@{token='PRIVATE_CONTENT'}}}
+ $driveFailedId=$driveRun.run_id;Write-BackupRunHistory $driveState $driveRun final
+ $driveRun.run_id=[guid]::NewGuid().ToString('N');$driveRun.status='complete';$driveRun.drive='complete';$driveRun.failure=$null;$driveRun.Remove('failure_stage');$driveRun.Remove('drive_diagnostic');Write-BackupRunHistory $driveState $driveRun final
+ Write-BackupJsonAtomic (Join-Path $driveState 'devconfig-drive-last.json') $driveRun
+ $driveRecords=@(Read-BackupRunHistoryLines $driveHistory|ForEach-Object{$_|ConvertFrom-Json});$historicalFailure=@($driveRecords|Where-Object run_id -eq $driveFailedId)[0]
+ Check ($driveRecords.Count-eq 2 -and $historicalFailure.failure-eq 'drive_latest_upload_failed' -and $historicalFailure.failure_stage-eq 'drive_package_copy' -and $historicalFailure.drive_diagnostic.native_exit-eq 7 -and $historicalFailure.drive_diagnostic.category-eq 'oauth_auth' -and $historicalFailure.drive_diagnostic.transfer_mode-eq 'ServerCopy' -and $historicalFailure.drive_diagnostic.object_kind-eq 'latest') 'Later natural success and last-receipt replacement preserve fixed ZIP provider diagnostics in history'
+ Check ([IO.File]::ReadAllText($driveHistory)-notmatch 'PRIVATE_CONTENT|PRIVATE_FILENAME|raw_output|unexpected|token') 'Drive history writes only fixed diagnostic fields and excludes raw provider output, paths and secrets'
+ $driveRun.drive_diagnostic=[pscustomobject]@{stage='PRIVATE_CONTENT';object_kind='latest';suffix='.zip';native_exit=7;reason='copy_failed';category='PRIVATE_CONTENT'};Write-BackupRunHistory $driveState $driveRun final
+ $invalidDrive=@(Read-BackupRunHistoryLines $driveHistory|ForEach-Object{$_|ConvertFrom-Json})[-1]
+ Check ($null-eq $invalidDrive.PSObject.Properties['drive_diagnostic'] -and [IO.File]::ReadAllText($driveHistory)-notmatch 'PRIVATE_CONTENT') 'Non-enumerated Drive diagnostics cannot enter history'
 }finally{
  foreach($child in $children){try{if(-not $child.HasExited){$child.Kill();$null=$child.WaitForExit(10000)}}finally{$child.Dispose()}}
  Remove-BackupOwnedDirectory $fixture $parent '^backup-history-[a-f0-9]{32}$'

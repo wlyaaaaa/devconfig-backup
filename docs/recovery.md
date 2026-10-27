@@ -83,6 +83,8 @@ Defender 动作编号 2/3 对应隔离/移除，依据 [Microsoft MPTHREAT_ACTIO
 
 每次运行在 `state/run-history.jsonl` 记录开始和最终摘要，保留最近约 200 行，不记录文件名或内容。`Backup-Status.ps1` 将保留各类任务最近失败；有开始但无最终记录且进程已结束的运行显示为“进程中途结束”，能匹配到对应任务运行时附退出码。最新任务信息被后来运行覆盖时，回读同名任务的结构化事件，以唯一启动及实例 GUID 关联退出码；查询限 6 小时、128 条，日志缺失或关联不明时为 null。历史仅覆盖启用记录以后的运行，不能重建过去已覆盖的原因。
 
+ZIP 上传失败的运行回执保留原 `drive_dated_upload_failed` / `drive_latest_upload_failed`，并在 `drive_diagnostic` 写入固定阶段、dated/latest 类别、`.zip`、rclone 原始退出码、Upload/ServerCopy 模式及现有分类器提取的固定 provider 类别；同一固定诊断进入运行历史，后续成功不会覆盖。不保存 provider 原文、账号或路径；未识别错误归为 `unknown`。这不能追溯此前已丢弃的 provider 细因，也不将后续自然成功解释成已根治历史失败。
+
 `Install-WeChatDriveMonitor.ps1` 默认保留已有启用状态，新建默认禁用；显式 `-Enable` 才启用，不自动恢复已经停用的监控。补传以 G 热备为快照，传递 G 路径、回执、远端与限额参数，Hot 写入期间也视为资源忙。监控同时读取 stdout/stderr，超时仅处理自己启动的查询。最终成功依据锁定且验证过的快照与完整远端核对，不是固定容量百分比。禁用监控不等于终止此前已经启动的上传。
 
 所有云端入口使用同一远端 binding 和网络初始化。远端不存在、binding 损坏时失败，不改用“第一个可用账户”。代理关闭时清除旧进程代理变量；命令以实际退出码判定，不把 PowerShell 5.1 包装出的正常 stderr 通知误判为失败。
