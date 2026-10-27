@@ -58,12 +58,33 @@ foreach ($sample in $categories.Keys) {
     Assert-Equal (Get-RcloneFailureCategory -Output @($sample)) $categories[$sample] "Wrong rclone category for '$sample'."
 }
 
-$diagnostic = ConvertTo-RcloneSafeDiagnostic @(
-    'Error: request https://example.invalid/path account@example.com state=abcdefghijklmnopqrstuvwxyz C:\private\file.txt'
+$ordinary = 'Error: https://example.invalid/path?id=abcdefghijklmnopqrstuvwxyz&state=ready account@example.com C:\private\file.txt \\server\share\file.txt'
+Assert-Equal (ConvertTo-RcloneSafeDiagnostic @($ordinary)) $ordinary 'Ordinary URLs, accounts, paths and long IDs must remain unchanged.'
+$credentialCases = @(
+    @('Error: password=synthetic-password account@example.com', 'Error: password=[redacted] account@example.com'),
+    @('Error: passwd=''synthetic password'' C:\private\file.txt', 'Error: passwd=[redacted] C:\private\file.txt'),
+    @('Error: {"refresh_token": "synthetic token", "client_id": "abcdefghijklmnopqrstuvwxyz"}', 'Error: {"refresh_token": [redacted], "client_id": "abcdefghijklmnopqrstuvwxyz"}'),
+    @('Error: token=short; client_secret=synthetic-secret', 'Error: token=[redacted]; client_secret=[redacted]'),
+    @('Error: API_KEY=synthetic-key, pwd=synthetic-pwd', 'Error: API_KEY=[redacted], pwd=[redacted]'),
+    @('Error: Authorization: Bearer synthetic-bearer', 'Error: Authorization: [redacted]'),
+    @('Error: Authorization=Basic c3ludGhldGljOnBhc3M=', 'Error: Authorization=[redacted]'),
+    @('Error: {"Authorization": "Bearer synthetic-json"}', 'Error: {"Authorization": [redacted]}'),
+    @('Error: Bearer synthetic-standalone', 'Error: Bearer [redacted]'),
+    @('Error: https://user:synthetic-pass@example.invalid/file?id=ordinary', 'Error: https://user:[redacted]@example.invalid/file?id=ordinary'),
+    @('Error: https://example.invalid/?access_token=synthetic-url&id=ordinary', 'Error: https://example.invalid/?access_token=[redacted]&id=ordinary'),
+    @('Error: https://example.invalid/?access%5Ftoken=synthetic-encoded#part', 'Error: https://example.invalid/?access%5Ftoken=[redacted]#part'),
+    @('Error: https://example.invalid/callback?code=synthetic-code&state=ready', 'Error: https://example.invalid/callback?code=[redacted]&state=ready'),
+    @('Error: https://example.invalid/?X-Amz-Signature=synthetic-signature&file=ordinary', 'Error: https://example.invalid/?X-Amz-Signature=[redacted]&file=ordinary'),
+    @('Error: https://user@example.invalid/?key=synthetic-api-key&page=2', 'Error: https://user@example.invalid/?key=[redacted]&page=2')
 )
-if ($diagnostic -match 'https://|account@example|abcdefghijklmnopqrstuvwxyz|C:\\private') {
-    throw 'Safe rclone diagnostics must redact URLs, accounts, long identifiers, and local paths.'
+foreach ($case in $credentialCases) {
+    Assert-Equal (ConvertTo-RcloneSafeDiagnostic @($case[0])) $case[1] 'Credentials must be hidden while surrounding ordinary content remains.'
 }
+Assert-Equal (ConvertTo-RcloneSafeDiagnostic @('Error: first', 'ordinary tail')) 'Error: first' 'Error selection must remain unchanged.'
+Assert-Equal (ConvertTo-RcloneSafeDiagnostic @('', '{', ']')) 'no_output' 'Empty diagnostic behavior must remain unchanged.'
+Assert-Equal (ConvertTo-RcloneSafeDiagnostic @('ordinary tail')) 'ordinary tail' 'Non-error fallback must remain unchanged.'
+$longDiagnostic = 'Error: ' + ('ordinary-id-' * 30)
+Assert-Equal (ConvertTo-RcloneSafeDiagnostic @($longDiagnostic)) $longDiagnostic.Substring(0, 240) 'Diagnostics must retain the 240-character limit.'
 
 function global:rclone {
     param([Parameter(ValueFromRemainingArguments)][object[]]$CommandArguments)

@@ -400,11 +400,24 @@ function ConvertTo-RcloneSafeDiagnostic {
     }
     if ($line.Count -eq 0) { return 'no_output' }
     $safe = [string]$line[0]
-    $safe = $safe -replace 'https?://\S+', '[url]'
-    $safe = $safe -replace '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+', '[account]'
-    $safe = $safe -replace '(?i)(token|code|secret|state)=\S+', '$1=[redacted]'
-    $safe = $safe -replace '(?i)\b[A-Za-z0-9_-]{24,}\b', '[redacted]'
-    $safe = $safe -replace '(?i)\b[A-Z]:\\[^""\r\n]+', '[path]'
+    # Identify credentials by their fields or URL structure, never by length or location.
+    $secretNames = '(?:password|passwd|pwd|(?:access|refresh|id)[_-]?token|token|(?:client[_-]?)?secret|(?:api|access|secret)[_-]?key)'
+    $secretValue = '(?:"(?:\\.|[^"\\])*"|''(?:\\.|[^''\\])*''|[^\s,;&<>"'']+)'
+    $safe = [regex]::Replace($safe, '(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"'']+', {
+        param($urlMatch)
+        $url = $urlMatch.Value -replace '(^[a-z][a-z0-9+.-]*://[^/@\s:]+:)[^/@\s]*(?=@)', '$1[redacted]'
+        return [regex]::Replace($url, '(?<prefix>[?&#](?<name>[^=&#?]+)=)[^&#]*', {
+            param($parameter)
+            $name = [Uri]::UnescapeDataString($parameter.Groups['name'].Value)
+            if ($name -match ('(?i)^(?:' + $secretNames + '|code|key|auth|authorization|signature|sig|x-(?:amz|goog)-(?:signature|security-token))$')) {
+                return $parameter.Groups['prefix'].Value + '[redacted]'
+            }
+            return $parameter.Value
+        })
+    })
+    $safe = $safe -replace ('(?i)(?<![\w-])(' + $secretNames + '["'']?\s*[:=]\s*)' + $secretValue), '$1[redacted]'
+    $safe = $safe -replace ('(?i)(\b(?:proxy-)?authorization["'']?\s*[:=]\s*)(?:(?:Basic|Bearer)\s+[^\s,;&<>"'']+|' + $secretValue + ')'), '$1[redacted]'
+    $safe = $safe -replace '(?i)(\bBearer\s+)[^\s,;&<>"'']+', '$1[redacted]'
     if ($safe.Length -gt 240) { $safe = $safe.Substring(0, 240) }
     return $safe
 }
