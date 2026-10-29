@@ -122,7 +122,16 @@ function New-DevConfigCandidate([string]$Container){
   if([IO.File]::Exists($binding)){$null=Copy-RcloneRemoteBindingToManifest -BindingPath $binding -ManifestDirectory (Join-Path $candidateStage '_manifests')}
  }
  try{$capture=Invoke-DevConfigSourceCapture $cfg $ProfileRoot $Container -IncludeHistory:$IncludeHistory -KnownInventory $pendingAv -MaxAttempts $CaptureAttempts -PostCapture $prepare}catch{
-  $script:run.capture_attempt_count=[int]$_.Exception.Data['backup_capture_attempt_count'];$script:run.capture_retry_history=@($_.Exception.Data['backup_capture_retry_history']|Where-Object{$_});throw
+  $failure=$_;$script:run.capture_attempt_count=[int]$failure.Exception.Data['backup_capture_attempt_count'];$script:run.capture_retry_history=@($failure.Exception.Data['backup_capture_retry_history']|Where-Object{$_})
+  $details=@($failure.Exception.Data['backup_selection_details']|Where-Object{$_})
+  if($details.Count){
+   try{
+    $name='devconfig-selection-'+$script:run.run_id+'.json'
+    Write-BackupJsonAtomic (Join-Path $StateDir $name) ([ordered]@{schema='devconfig.selection-diagnostic.v1';run_id=$script:run.run_id;failure='backup_source_selection_changed_during_collection';attempts=$details;payload_content_read=$false})
+    $script:run.selection_diagnostic=$name
+   }catch{$script:run.selection_diagnostic_status='write_failed'}
+  }
+  throw $failure
  }
  $stage=$capture.stage;$inventory=$capture.inventory;$captureChanges=$capture.changed_after_capture_count
  $sqliteSnapshots=@($inventory.sqlite_snapshots);$script:run.sqlite_snapshots=$sqliteSnapshots

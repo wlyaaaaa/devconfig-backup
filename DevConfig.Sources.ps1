@@ -181,6 +181,24 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
  $Inventory|Add-Member -NotePropertyName sqlite_snapshots -NotePropertyValue $snapshots.ToArray() -Force
  $Inventory.bytes=[long](($Inventory.files|Measure-Object length -Sum).Sum)
 }
+function Get-DevConfigSelectionEvidence($Inventory,$Added,$Removed){
+ # Only the local diagnostic gets exact paths; run summaries get configured source IDs.
+ $groups=@{};$paths=[Collections.Generic.List[object]]::new();$total=0
+ foreach($direction in @('added','removed')){
+  $rows=if($direction-ceq 'added'){@($Added)}else{@($Removed)}
+  foreach($row in $rows){
+   $total++;$path=([string]$row).Substring(2);$id='unmapped'
+   foreach($source in @($Inventory.sources)){
+    $candidate=[string]$source.id
+    if(($path-ieq $candidate -or $path.StartsWith($candidate+'/',[StringComparison]::OrdinalIgnoreCase)) -and ($id-ceq 'unmapped' -or $candidate.Length-gt $id.Length)){$id=$candidate}
+   }
+   if(-not $groups.ContainsKey($id)){$groups[$id]=[ordered]@{source_id=$id;added=0;removed=0}}
+   $groups[$id][$direction]++
+   if($paths.Count-lt 64){$paths.Add([pscustomobject]@{change=$direction;kind=$(if(([string]$row).StartsWith('d|')){'directory'}else{'file'});relative_path=$path})}
+  }
+ }
+ return [pscustomobject]@{sources=@($groups.Values|Sort-Object source_id);paths=$paths.ToArray();paths_complete=($total-le 64)}
+}
 function Test-DevConfigSelectionAfterCapture($Captured,$Current){
  # Per-file capture is not a point-in-time application snapshot. Changes to files
  # already captured are counted, while changed selection (missing/new paths) fails.
@@ -197,7 +215,9 @@ function Test-DevConfigSelectionAfterCapture($Captured,$Current){
   $leftSet=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal);$rightSet=[Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
   foreach($row in $left){[void]$leftSet.Add($row)};foreach($row in $right){[void]$rightSet.Add($row)}
   $failure=[Management.Automation.RuntimeException]::new('backup_source_selection_changed_during_collection')
-  $failure.Data['backup_stage']='selection_recheck';$failure.Data['backup_selection_added_count']=@($right|Where-Object{-not $leftSet.Contains($_)}).Count;$failure.Data['backup_selection_removed_count']=@($left|Where-Object{-not $rightSet.Contains($_)}).Count;throw $failure
+  $added=@($right|Where-Object{-not $leftSet.Contains($_)});$removed=@($left|Where-Object{-not $rightSet.Contains($_)})
+  $failure.Data['backup_stage']='selection_recheck';$failure.Data['backup_selection_added_count']=$added.Count;$failure.Data['backup_selection_removed_count']=$removed.Count
+  $failure.Data['backup_selection_evidence']=Get-DevConfigSelectionEvidence $Captured $added $removed;throw $failure
  }
  $byPath=@{};foreach($file in $Captured.files){$byPath[$file.relative_path]=$file}
  $changes=0;foreach($file in $currentFiles){$old=$byPath[$file.relative_path];if($old.PSObject.Properties['sqlite_source_signature']){if($old.sqlite_source_signature-cne (Get-DevConfigSQLiteSourceSignature $Current $file.relative_path)){$changes++}}elseif($old.length-ne $file.length -or $old.mtime_ticks-ne $file.mtime_ticks){$changes++}}
@@ -206,7 +226,7 @@ function Test-DevConfigSelectionAfterCapture($Captured,$Current){
 
 function Invoke-DevConfigSourceCapture {
  param($Config,[string]$ProfileRoot,[string]$Container,[switch]$IncludeHistory,$KnownInventory=$null,[ValidateRange(1,10)][int]$MaxAttempts=3,[scriptblock]$PostCapture)
- $history=[Collections.Generic.List[object]]::new();$disappeared=[Collections.Generic.List[object]]::new()
+ $history=[Collections.Generic.List[object]]::new();$disappeared=[Collections.Generic.List[object]]::new();$details=[Collections.Generic.List[object]]::new()
  for($attempt=1;$attempt-le $MaxAttempts;$attempt++){
   $stage=Join-Path $Container ('payload-'+$attempt);$inventory=$null;$phase='source_scan'
   try{
@@ -221,7 +241,8 @@ function Invoke-DevConfigSourceCapture {
    # can stabilize, while the original single-file warning protects its old package this run.
    if($gone.Count){
     $failure=[Management.Automation.RuntimeException]::new('backup_source_selection_changed_during_collection')
-    $failure.Data['backup_stage']=$phase;$failure.Data['backup_selection_added_count']=0;$failure.Data['backup_selection_removed_count']=$gone.Count;throw $failure
+    $failure.Data['backup_stage']=$phase;$failure.Data['backup_selection_added_count']=0;$failure.Data['backup_selection_removed_count']=$gone.Count
+    $failure.Data['backup_selection_evidence']=Get-DevConfigSelectionEvidence $inventory @() @($gone|ForEach-Object{'f|'+$_.relative_path});throw $failure
    }
    $warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($inventory.file_warnings)){Add-BackupFileWarning $warnings $warning}
    $captured=@{};foreach($file in $inventory.files){$captured[$file.relative_path]=$true}
@@ -234,7 +255,9 @@ function Invoke-DevConfigSourceCapture {
    $_.Exception.Data['backup_stage']=$phase
    $reason=Get-BackupFailureCode $_;$retryable=$reason-ceq 'backup_source_selection_changed_during_collection'
    if(-not $retryable){throw}
-   $history.Add([pscustomobject]@{attempt=$attempt;stage=$phase;reason=$reason;added_count=[int]$_.Exception.Data['backup_selection_added_count'];removed_count=[int]$_.Exception.Data['backup_selection_removed_count']})
+   $evidence=$_.Exception.Data['backup_selection_evidence'];$detail=[pscustomobject]@{attempt=$attempt;sources=@($evidence.sources);paths=@($evidence.paths);paths_complete=$evidence.paths_complete};$details.Add($detail)
+   $_.Exception.Data['backup_selection_details']=$details.ToArray()
+   $history.Add([pscustomobject]@{attempt=$attempt;stage=$phase;reason=$reason;added_count=[int]$_.Exception.Data['backup_selection_added_count'];removed_count=[int]$_.Exception.Data['backup_selection_removed_count'];sources=@($evidence.sources)})
    $_.Exception.Data['backup_capture_retry_history']=$history.ToArray()
    if($attempt-eq $MaxAttempts){throw}
    Start-Sleep -Milliseconds 150

@@ -27,6 +27,14 @@ function Write-BackupRunHistory([string]$StateRoot,$Run,[ValidateSet('started','
  $record=[ordered]@{schema='backup.run-history.v1';event=$Event;task_kind=(Get-BackupRunTaskKind $Run);run_id=$Run.run_id;started_utc=$Run.started_utc;process_id=$PID;process_started_utc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')}
  # Keep only summary fields and fixed diagnostics, without raw output or file arrays.
  foreach($key in @('status','completed_utc','tiers','targets','collection','package','hot','local','drive','retention','failure','failure_type','failure_stage','failure_io_reason','sqlite_diagnostic','skipped_file_count','capture_attempt_count','capture_max_attempts','capture_consistency','application_recovery','pack_native_exit')){if($Run.Contains($key)){$record[$key]=$Run[$key]}}
+ if($Run.Contains('capture_retry_history')){
+  $record.capture_retry_history=@($Run.capture_retry_history|Select-Object -First 10|ForEach-Object{
+   $sources=@($_.sources|Where-Object{$_.source_id-ceq 'unmapped' -or $_.source_id-cmatch '^(home|appdata-roaming|appdata-local|extra|special)/[^\r\n|:]+$'}|Select-Object -First 64|ForEach-Object{[ordered]@{source_id=[string]$_.source_id;added=[int]$_.added;removed=[int]$_.removed}})
+   [ordered]@{attempt=[int]$_.attempt;stage='selection_recheck';reason='backup_source_selection_changed_during_collection';added_count=[int]$_.added_count;removed_count=[int]$_.removed_count;sources=$sources}
+  })
+ }
+ if($Run.selection_diagnostic-cmatch '^devconfig-selection-[a-f0-9]{32}\.json$'){$record.selection_diagnostic=[string]$Run.selection_diagnostic}
+ if($Run.selection_diagnostic_status-ceq 'write_failed'){$record.selection_diagnostic_status='write_failed'}
  if($Run.Contains('drive_diagnostic')){$diagnostic=Get-BackupHistoryDriveDiagnostic $Run.drive_diagnostic;if($diagnostic){$record.drive_diagnostic=$diagnostic}}
  $record.file_warning_count=@($Run.file_warnings|Where-Object{$_}).Count
  $path=Join-Path $StateRoot 'run-history.jsonl';$lease=$null;$temp=$path+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
