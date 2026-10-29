@@ -78,7 +78,8 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
  $python=Get-BackupExecutable python
  $snapshot=Join-Path $ScratchRoot ('sqlite-'+[guid]::NewGuid().ToString('N')+'.tmp')
  $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$python
- $start.Arguments='-I -B '+((@($script:DevConfigSQLiteHelper,$Source,$snapshot)|ForEach-Object{'"'+$_+'"'})-join ' ')
+ $captureTimeoutSeconds=120
+ $start.Arguments='-I -B '+((@($script:DevConfigSQLiteHelper,$Source,$snapshot)|ForEach-Object{'"'+$_+'"'})-join ' ')+' --timeout '+$captureTimeoutSeconds
  $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
  $process=[Diagnostics.Process]::new();$process.StartInfo=$start
  $clock=[Diagnostics.Stopwatch]::StartNew();$code=$null;$valid=$false
@@ -86,7 +87,7 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
  try{
   [void]$process.Start()
   $diagnostic.stage='process_wait'
-  if(-not $process.WaitForExit(20000)){
+  if(-not $process.WaitForExit(($captureTimeoutSeconds+5)*1000)){
    $process.Kill();$process.WaitForExit();$diagnostic.reason='timeout'
   }else{
    $diagnostic.stage='helper_reply'

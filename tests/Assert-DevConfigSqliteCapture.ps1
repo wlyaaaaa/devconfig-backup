@@ -12,10 +12,10 @@ try{
  if($LASTEXITCODE-ne 0){throw 'devconfig_sqlite_capture_test_failed'}
  # Exercise the real timeout failure path with only its test wait shortened.
  $source=Get-Content -LiteralPath (Join-Path $repo 'DevConfig.Sources.ps1') -Raw
- if(-not $source.Contains('WaitForExit(20000)')){throw 'sqlite_production_timeout_changed'}
+ if(-not $source.Contains('WaitForExit(($captureTimeoutSeconds+5)*1000)')){throw 'sqlite_production_timeout_changed'}
  $ast=[Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)
  $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name-eq 'Copy-DevConfigSQLiteDatabase'},$false)
- Invoke-Expression ($function.Extent.Text.Replace('WaitForExit(20000)','WaitForExit(1500)'))
+ Invoke-Expression ($function.Extent.Text.Replace('WaitForExit(($captureTimeoutSeconds+5)*1000)','WaitForExit(1500)'))
  $script:DevConfigSQLiteHelper=Join-Path $fixture 'delayed-helper.py'
  [IO.File]::WriteAllText($script:DevConfigSQLiteHelper,@'
 import json,sys,time

@@ -15,17 +15,35 @@ def set_stage(diagnostic, stage):
           file=sys.stderr, flush=True)
 
 
-def capture(source: Path, target: Path, timeout: float = 15.0, diagnostic=None) -> None:
+def capture(source: Path, target: Path, timeout: float = 120.0, diagnostic=None,
+            stall_timeout: float = 30.0) -> None:
     diagnostic = {} if diagnostic is None else diagnostic
     diagnostic["deadline_expired"] = False
     set_stage(diagnostic, "source_open")
     deadline = time.monotonic() + timeout
+    last_progress = time.monotonic()
+    best_remaining = None
 
     def bounded(*_):
         if time.monotonic() >= deadline:
             diagnostic["deadline_expired"] = True
             raise TimeoutError("sqlite_capture_timeout")
         return 0
+
+    def backup_progress(status, remaining, _total):
+        nonlocal last_progress, best_remaining
+        bounded()
+        now = time.monotonic()
+        # A completed step may itself take longer than the stall allowance.
+        # Credit its real progress before testing for a stalled backup. Busy,
+        # repeated pages and restarted work cannot extend the stall allowance.
+        if status in (sqlite3.SQLITE_OK, sqlite3.SQLITE_DONE) and (
+                best_remaining is None or remaining < best_remaining):
+            best_remaining = remaining
+            last_progress = now
+        if now - last_progress >= stall_timeout:
+            diagnostic["deadline_expired"] = True
+            raise TimeoutError("sqlite_capture_stalled")
 
     # mode=ro includes committed WAL pages; immutable=1 would miss live WAL.
     with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True,
@@ -42,7 +60,7 @@ def capture(source: Path, target: Path, timeout: float = 15.0, diagnostic=None) 
         set_stage(diagnostic, "target_open")
         with closing(sqlite3.connect(target, timeout=0.25)) as writer:
             set_stage(diagnostic, "online_backup")
-            reader.backup(writer, pages=256, progress=bounded, sleep=0.05)
+            reader.backup(writer, pages=256, progress=backup_progress, sleep=0.05)
             writer.set_progress_handler(bounded, 1000)
             set_stage(diagnostic, "standalone_mode")
             if writer.execute("PRAGMA journal_mode=DELETE").fetchone()[0] != "delete":
@@ -57,7 +75,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("source", type=Path)
     parser.add_argument("target", type=Path)
-    parser.add_argument("--timeout", type=float, default=15.0)
+    parser.add_argument("--timeout", type=float, default=120.0)
     args = parser.parse_args()
     diagnostic = {}
     started = time.monotonic()

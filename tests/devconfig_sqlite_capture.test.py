@@ -107,6 +107,60 @@ def run_tests(repo, fixture, powershell):
         thread.join(5)
     check(not thread.is_alive() and not errors, "Concurrent writer finished without hidden failures")
 
+    # Use the real backup with a controlled clock to separate useful work from
+    # elapsed time, without sleeping or changing any production timeout.
+    clock = [0.0]
+    steps = []
+    original_monotonic = capture.time.monotonic
+
+    class TimedReader(sqlite3.Connection):
+        def backup(self, target, **kwargs):
+            for at, status, remaining in steps:
+                clock[0] = at
+                kwargs["progress"](status, remaining, 100)
+            return super().backup(target, **kwargs)
+
+    def timed_connect(*args, **kwargs):
+        if str(args[0]).startswith("file:"):
+            kwargs["factory"] = TimedReader
+        return original_connect(*args, **kwargs)
+
+    sqlite3.connect = timed_connect
+    capture.time.monotonic = lambda: clock[0]
+    try:
+        steps[:] = [(10, sqlite3.SQLITE_OK, 90), (27, sqlite3.SQLITE_OK, 80),
+                    (45, sqlite3.SQLITE_OK, 70)]
+        cutoff = None
+        try:
+            capture.capture(source, fixture / "former-cutoff.sqlite", timeout=15)
+        except TimeoutError as exc:
+            cutoff = exc
+        check(cutoff is not None, "The same valid progress reproduces the former 15-second hard cutoff")
+        clock[0] = 0
+        slow = fixture / "slow-progress.sqlite"
+        capture.capture(source, slow)
+        check(clock[0] > 15 and slow.exists(), "Valid forward progress survives the former 15-second cutoff and long completed I/O steps")
+        for name, sequence in (
+                ("stalled", [(1, sqlite3.SQLITE_OK, 90), (20, sqlite3.SQLITE_BUSY, 0),
+                             (31, sqlite3.SQLITE_OK, 90)]),
+                ("restarted", [(1, sqlite3.SQLITE_OK, 90), (20, sqlite3.SQLITE_OK, 95),
+                               (31, sqlite3.SQLITE_OK, 94)]),
+                ("hard-limit", [(29, sqlite3.SQLITE_OK, 90), (58, sqlite3.SQLITE_OK, 80),
+                                (87, sqlite3.SQLITE_OK, 70), (120, sqlite3.SQLITE_OK, 60)])):
+            clock[0] = 0
+            steps[:] = sequence
+            failure = None
+            diagnostic = {}
+            try:
+                capture.capture(source, fixture / (name + ".sqlite"), diagnostic=diagnostic)
+            except TimeoutError as exc:
+                failure = exc
+            check(failure is not None and diagnostic["deadline_expired"],
+                  name + " remains bounded; busy/repeated pages cannot reset progress")
+    finally:
+        sqlite3.connect = original_connect
+        capture.time.monotonic = original_monotonic
+
     # End to end: sidecars are omitted only for the successfully captured base;
     # unrelated files remain selected and every archive payload retains its hash.
     (codex / "orphan.sqlite-wal").write_text("independent selected data", encoding="utf-8")
@@ -202,7 +256,7 @@ _monotonic = time.monotonic
 class DeadlineConnection(sqlite3.Connection):
     def set_progress_handler(self, callback, instructions):
         def expired():
-            time.monotonic = lambda: _monotonic() + 30
+            time.monotonic = lambda: _monotonic() + 150
             return callback()
         return super().set_progress_handler(expired, instructions)
 def deadline_connect(*args, **kwargs):
@@ -220,7 +274,7 @@ sqlite3.connect = deadline_connect
     diagnostic = receipt["sqlite_diagnostic"]
     check(result.returncode != 0 and receipt["status"] == "failed" and current.read_bytes() == before, "Deadline interrupt remains a failed task and preserves the successful package")
     check(diagnostic["stage"] == "integrity_check" and diagnostic["reason"] == "timeout" and diagnostic["sqlite_error_code"] == sqlite3.SQLITE_INTERRUPT and diagnostic["sqlite_error_name"] == "SQLITE_INTERRUPT", "Real progress-handler interruption is classified as timeout through the formal failed receipt: " + json.dumps(diagnostic))
-    check(diagnostic["native_exit"] == 1 and diagnostic["os_error_code"] is None and diagnostic["elapsed_ms"] >= 15000, "Deadline receipt preserves the helper exit, elapsed time and absent OS error")
+    check(diagnostic["native_exit"] == 1 and diagnostic["os_error_code"] is None and diagnostic["elapsed_ms"] >= 120000, "Deadline receipt preserves the helper exit, elapsed time and absent OS error")
     history = [json.loads(line) for line in (output / "state" / "run-history.jsonl").read_text(encoding="utf-8-sig").splitlines()]
     check(history[-1]["run_id"] == receipt["run_id"] and history[-1]["sqlite_diagnostic"] == diagnostic, "Final failure history preserves the complete safe SQLite diagnostic")
     failure = None
