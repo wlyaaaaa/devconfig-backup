@@ -91,7 +91,21 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
   }else{
    $diagnostic.stage='helper_reply'
   }
-  $reply=$process.StandardOutput.ReadToEnd();$null=$process.StandardError.ReadToEnd();$code=$process.ExitCode
+  $reply=$process.StandardOutput.ReadToEnd();$stageReply=$process.StandardError.ReadToEnd();$code=$process.ExitCode
+  if($diagnostic.reason-eq 'timeout'){
+   foreach($line in ($stageReply-split '[\r\n]+')){
+    try{
+     $marker=$line|ConvertFrom-Json -ErrorAction Stop
+     $keys=@($marker.PSObject.Properties.Name)
+     if($keys.Count-eq 2 -and $keys-ccontains 'schema' -and $keys-ccontains 'stage' -and
+        $marker.schema-is [string] -and $marker.stage-is [string] -and
+        $marker.schema-ceq 'devconfig.sqlite-stage.v1' -and
+        $marker.stage-cin @('source_open','source_read','target_create','target_open','online_backup','standalone_mode','integrity_check')){
+      $diagnostic.stage=[string]$marker.stage
+     }
+    }catch{}
+   }
+  }
   if($diagnostic.reason-ne 'timeout'){
    try{
     $detail=$reply|ConvertFrom-Json

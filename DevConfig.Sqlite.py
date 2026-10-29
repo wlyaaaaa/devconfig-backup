@@ -5,12 +5,20 @@ from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
+import sys
 import time
+
+
+def set_stage(diagnostic, stage):
+    diagnostic["stage"] = stage
+    print(json.dumps({"schema": "devconfig.sqlite-stage.v1", "stage": stage}),
+          file=sys.stderr, flush=True)
 
 
 def capture(source: Path, target: Path, timeout: float = 15.0, diagnostic=None) -> None:
     diagnostic = {} if diagnostic is None else diagnostic
-    diagnostic.update(stage="source_open", deadline_expired=False)
+    diagnostic["deadline_expired"] = False
+    set_stage(diagnostic, "source_open")
     deadline = time.monotonic() + timeout
 
     def bounded(*_):
@@ -22,24 +30,24 @@ def capture(source: Path, target: Path, timeout: float = 15.0, diagnostic=None) 
     # mode=ro includes committed WAL pages; immutable=1 would miss live WAL.
     with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True,
                                 timeout=0.25, isolation_level=None)) as reader:
-        diagnostic["stage"] = "source_read"
+        set_stage(diagnostic, "source_read")
         reader.execute("PRAGMA query_only=ON")
         reader.execute("BEGIN")
         # Establish one read snapshot before the incremental backup starts.
         reader.execute("SELECT count(*) FROM sqlite_schema").fetchone()
-        diagnostic["stage"] = "target_create"
+        set_stage(diagnostic, "target_create")
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open("xb"):
             pass
-        diagnostic["stage"] = "target_open"
+        set_stage(diagnostic, "target_open")
         with closing(sqlite3.connect(target, timeout=0.25)) as writer:
-            diagnostic["stage"] = "online_backup"
+            set_stage(diagnostic, "online_backup")
             reader.backup(writer, pages=256, progress=bounded, sleep=0.05)
             writer.set_progress_handler(bounded, 1000)
-            diagnostic["stage"] = "standalone_mode"
+            set_stage(diagnostic, "standalone_mode")
             if writer.execute("PRAGMA journal_mode=DELETE").fetchone()[0] != "delete":
                 raise sqlite3.DatabaseError("sqlite_standalone_mode_failed")
-            diagnostic["stage"] = "integrity_check"
+            set_stage(diagnostic, "integrity_check")
             if writer.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
                 raise sqlite3.DatabaseError("sqlite_integrity_failed")
             bounded()
