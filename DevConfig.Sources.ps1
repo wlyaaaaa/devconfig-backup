@@ -63,6 +63,14 @@ function Get-DevConfigSourceInventory {
  foreach($extra in @($Config.ExtraDirs)){if($extra){Add-SelectedSource $extra.Src ('extra/'+$extra.Name) $true}}
  foreach($path in @($Config.SpecialFiles)){if($path){Add-SelectedSource (Join-Path $profile $path) ('special/'+$path) $false}}
  foreach($required in @($Config.RequiredSources)){if($required -and $required-notin @($sources|ForEach-Object{$_.id})){throw 'required_backup_source_not_declared'}}
+ # Remove configured directory scaffolding; selected files and scan-known warning paths
+ # below restore all needed ancestors in the next step.
+ foreach($root in @($Config.OmitEmptyDirectoryRelativePaths)){
+  if(-not $root){continue};$root=([string]$root).Replace('\','/').Trim('/')
+  foreach($directory in @($dirSet)){
+   if($directory-ieq $root -or $directory.StartsWith($root+'/',[StringComparison]::OrdinalIgnoreCase)){[void]$dirSet.Remove($directory)}
+  }
+ }
  # Parent directories are part of the same deterministic logical tree.
  foreach($key in @($fileMap.Keys)+@($warnings|ForEach-Object{$_.relative_path})){$parent=[IO.Path]::GetDirectoryName($key).Replace('\','/');while($parent){[void]$dirSet.Add($parent);$next=[IO.Path]::GetDirectoryName($parent);$parent=if($next){$next.Replace('\','/')}else{''}}}
  [string[]]$keys=@($fileMap.Keys);[Array]::Sort($keys,[StringComparer]::OrdinalIgnoreCase)

@@ -167,6 +167,9 @@
     # Exact live process coordination files, not application configuration.
     # Do not exclude *.lock generally: dependency lockfiles remain recoverable.
     ExcludeRelativePaths = @(
+        # Live REPL executions and generated hook bytecode have no recovery value.
+        'home/.codex/node_repl/active_execs',
+        'home/.codex/managed-hooks/codex-context/hooks/*/__pycache__',
         # Empty SQLite maintenance mutex; it is recreated by the running owner.
         'home/.codex/.sqlite-maintenance.lock',
         # Claude 的文件检查点、缓存、会话环境与调试日志不是恢复配置；
@@ -205,6 +208,9 @@
         'home/.codex/visualizations',
         'home/.codex/dictation-history'
     )
+
+    # Retain real plan files and their ancestors, not empty per-turn scaffolding.
+    OmitEmptyDirectoryRelativePaths = @('home/.codex/plans')
 
     # 历史/对话日志目录名（默认排除；-IncludeHistory 时保留）
     HistoryDirs = @(

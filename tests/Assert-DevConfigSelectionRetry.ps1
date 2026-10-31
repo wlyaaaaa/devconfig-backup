@@ -77,6 +77,54 @@ try{
  $oldAv=[pscustomobject]@{files=@();file_warnings=@([pscustomobject]@{relative_path='home/.claude/file-history/session/missing.txt';reason='antivirus_blocked';error_code=225;stage='hash'})}
  Check (@((Get-DevConfigSourceInventory $current $profile -KnownInventory $oldAv).file_warnings).Count-eq 0) 'A prior antivirus warning inside a now-excluded subtree does not keep that retired scope alive'
 
+ # Replay the observed volatile selection churn using production capture on fake homes.
+ $volatilePatterns=@('home/.codex/node_repl/active_execs','home/.codex/managed-hooks/codex-context/hooks/*/__pycache__')
+ $kept=@('.codex/plans/keep/plan.md','.codex/managed-hooks/codex-context/hooks/bundle-a/hook.py','.codex/managed-hooks/codex-context/hooks/bundle-a/bundle.json','.codex/managed-hooks/codex-context/active-runtime.json','.codex/node_repl/config.json','.codex/node_repl/active_execs-backup/keep.json','.codex/managed-hooks/codex-context/hooks/bundle-a/__pycache__-backup/keep.txt','.codex/managed-hooks/other/hooks/a/__pycache__/keep.pyc')
+ foreach($variant in @('old','fixed')){
+  $profile=Join-Path $fixture ('volatile-'+$variant);$captureConfig=$current.Clone()
+  if($variant-eq 'old'){$captureConfig.ExcludeRelativePaths=@($current.ExcludeRelativePaths|Where-Object{$_-notin $volatilePatterns});$captureConfig.Remove('OmitEmptyDirectoryRelativePaths')}
+  foreach($path in @('.codex/config.toml','.codex/memories/extensions/s/SKILL.md','.claude/settings.json','.gemini/antigravity/antigravity_state.pbtxt','.config/opencode/opencode.jsonc')+$kept){Put (Join-Path $profile $path) 'recoverable'}
+  Put (Join-Path $profile '.codex/node_repl/active_execs/run-0.json') 'runtime'
+  Put (Join-Path $profile '.codex/managed-hooks/codex-context/hooks/bundle-a/__pycache__/hook.pyc') 'bytecode'
+  [void][IO.Directory]::CreateDirectory((Join-Path $profile '.codex/plans/temporary/turn'))
+  [void][IO.Directory]::CreateDirectory((Join-Path $profile '.codex/ordinary-empty'))
+  $script:profile=$profile;$script:round=0
+  $churn={param($stage)
+   $script:round++;$codex=Join-Path $script:profile '.codex'
+   [IO.File]::Delete((Join-Path $codex ('node_repl/active_execs/run-'+($script:round-1)+'.json')))
+   Put (Join-Path $codex ('node_repl/active_execs/run-'+$script:round+'.json')) 'runtime'
+   $cache=Join-Path $codex 'managed-hooks/codex-context/hooks/bundle-a/__pycache__'
+   if([IO.Directory]::Exists($cache)){[IO.Directory]::Delete($cache,$true)}else{Put (Join-Path $cache 'hook.pyc') 'bytecode'}
+   $empty=Join-Path $codex 'plans/temporary'
+   if([IO.Directory]::Exists($empty)){[IO.Directory]::Delete($empty,$true)}else{[void][IO.Directory]::CreateDirectory((Join-Path $empty 'turn'))}
+  }
+  $failure=$null;$result=$null
+  try{$result=Invoke-DevConfigSourceCapture $captureConfig $profile (Join-Path $fixture ('volatile-capture-'+$variant)) -PostCapture $churn}catch{$failure=$_}
+  if($variant-eq 'old'){
+   Check ($failure.Exception.Message-ceq 'backup_source_selection_changed_during_collection' -and $failure.Exception.Data['backup_capture_attempt_count']-eq 3 -and $script:round-eq 3) 'Observed runtime and empty-plan churn exhausts old selection at 3/3'
+  }else{
+   Check ($null-eq $failure -and $result.attempt_count-eq 1 -and $result.max_attempts-eq 3 -and $script:round-eq 1) 'Same churn succeeds with fixed selection at 1/3'
+   Check (@($result.inventory.files|Where-Object{Test-BackupRelativePathExcluded $_.relative_path $volatilePatterns}).Count-eq 0 -and 'home/.codex/plans/temporary'-notin $result.inventory.directories) 'Volatile runtime files, bytecode and empty plan scaffolding are omitted'
+   Check (@($kept|Where-Object{('home/'+$_)-notin $result.inventory.files.relative_path}).Count-eq 0 -and 'home/.codex/plans/keep'-in $result.inventory.directories -and 'home/.codex/ordinary-empty'-in $result.inventory.directories) 'Real plans, hook recovery dependencies, similar paths and ordinary empty directories remain'
+  }
+ }
+ Check ($current.OmitEmptyDirectoryRelativePaths.Count-eq 1 -and $current.OmitEmptyDirectoryRelativePaths[0]-ceq 'home/.codex/plans' -and 'home/.codex'-in $current.RequiredSources -and '__pycache__'-notin $current.ExcludeDirs -and '*.lock'-notin $current.ExcludeFiles) 'Empty-directory scope is exact and required sources and global exclusions are unchanged'
+ foreach($case in @(
+  @('plan-add','.codex/plans/new-thread/turn/plan.md','add'),
+  @('plan-remove','.codex/plans/keep/plan.md','remove'),
+  @('hook-bundle','.codex/managed-hooks/codex-context/hooks/new-bundle/hook.py','add'),
+  @('similar-runtime','.codex/node_repl/active_execs-backup/new.json','add'),
+  @('similar-cache','.codex/managed-hooks/codex-context/hooks/bundle-a/__pycache__-backup/new.txt','add'),
+  @('other-cache','.codex/managed-hooks/other/hooks/a/__pycache__/new.pyc','add'),
+  @('ordinary-empty','.codex/new-empty','directory'),
+  @('similar-plans','.codex/plans-backup/new-empty','directory')
+ )){
+  $script:round=0;$script:changePath=Join-Path $profile $case[1];$script:changeKind=$case[2]
+  $realChange={param($stage)$script:round++;if($script:round-ne 1){return};if($script:changeKind-eq 'remove'){[IO.File]::Delete($script:changePath)}elseif($script:changeKind-eq 'directory'){[void][IO.Directory]::CreateDirectory($script:changePath)}else{Put $script:changePath 'new recoverable configuration'}}
+  $result=Invoke-DevConfigSourceCapture $current $profile (Join-Path $fixture ('negative-'+$case[0])) -PostCapture $realChange
+  Check ($result.attempt_count-eq 2 -and $result.retry_history[0].stage-ceq 'selection_recheck') ($case[0]+' remains a real selection change and requires recapture')
+ }
+
  # Only local synthetic rclone trees: warning metacharacters must not act as glob syntax.
  $env:RCLONE_CONFIG=Join-Path $fixture 'empty-rclone.conf';Put $env:RCLONE_CONFIG ''
  $src=Join-Path $fixture 'filter-source';$dst=Join-Path $fixture 'filter-target'
@@ -93,5 +141,11 @@ try{
  Write-Output ('RESULT: '+$script:checks+' selection retry and literal-filter checks passed; runtime='+$PSVersionTable.PSVersion)
 }finally{
  $env:RCLONE_CONFIG=$oldRcloneConfig
- if([IO.Directory]::Exists($fixture)){$result=& pwsh -NoProfile -ExecutionPolicy Bypass -File 'E:\.agents\tools\Move-TaskItemToRecycleBin.ps1' -LiteralPath $fixture -AllowedRoot $parent -Json|ConvertFrom-Json;if($result.status-ne 'recycled' -or -not $result.original_path_verified -or -not $result.recovery_item_exists){throw 'fixture_recycle_failed'}}
+ if([IO.Directory]::Exists($fixture)){
+  $result=& pwsh -NoProfile -ExecutionPolicy Bypass -File 'E:\.agents\tools\Move-TaskItemToRecycleBin.ps1' -LiteralPath $fixture -AllowedRoot $parent -Json|ConvertFrom-Json
+  # Long trees may be renamed within the owned parent before verified Shell recycling.
+  $expectedOriginal=if($result.temporary_path){$result.temporary_path}else{$fixture}
+  $verified=$result.original_path_verified -or ($result.shell_source_verified -and $result.temporary_path -and [IO.Path]::GetDirectoryName($result.temporary_path)-ieq $parent)
+  if($result.status-ne 'recycled' -or $result.source-ine $fixture -or $result.actual_original_path-ine $expectedOriginal -or -not $verified -or -not $result.recovery_item_exists -or [IO.Directory]::Exists($fixture)){throw 'fixture_recycle_failed'}
+ }
 }
