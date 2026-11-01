@@ -166,8 +166,21 @@ def run_tests(repo, fixture, powershell):
     (codex / "orphan.sqlite-wal").write_text("independent selected data", encoding="utf-8")
     (codex / "dependency.lock").write_text("dependency version", encoding="utf-8")
     (codex / ".sqlite-maintenance.lock").write_bytes(b"")
+    scheduler = codex / "sqlite" / "codex.db"
+    scheduler.parent.mkdir()
+    schedule_writer = sqlite3.connect(scheduler)
+    schedule_writer.execute("PRAGMA journal_mode=WAL")
+    schedule_writer.execute("PRAGMA wal_autocheckpoint=0")
+    schedule_writer.execute("CREATE TABLE scheduled(value)")
+    schedule_writer.execute("INSERT INTO scheduled VALUES('committed WAL')")
+    schedule_writer.commit()
+    check(Path(str(scheduler) + "-wal").stat().st_size > 0, "Exact .db fixture has committed WAL content")
+    (codex / "unlisted.db").write_bytes(b"ordinary unlisted database-shaped data")
+    (scheduler.parent / "orphan.db-wal").write_bytes(b"independent sidecar-shaped data")
     sources = fixture / "sources.psd1"
-    sources.write_text("@{HomeDirs=@('.codex');RequiredSources=@('home/.codex');SQLiteBackupRelativePaths=@('home/.codex/*.sqlite');ExcludeRelativePaths=@('home/.codex/.sqlite-maintenance.lock')}", encoding="utf-8")
+    policy_command = "ConvertTo-Json -InputObject @((Import-PowerShellDataFile '" + str(repo / "sources.psd1").replace("'", "''") + "').SQLiteBackupRelativePaths) -Compress"
+    patterns = json.loads(subprocess.run([str(powershell), "-NoProfile", "-Command", policy_command], check=True, capture_output=True, text=True).stdout)
+    sources.write_text("@{HomeDirs=@('.codex');RequiredSources=@('home/.codex');SQLiteBackupRelativePaths=@(" + ",".join("'" + pattern.replace("'", "''") + "'" for pattern in patterns) + ");ExcludeRelativePaths=@('home/.codex/.sqlite-maintenance.lock')}", encoding="utf-8")
     output = fixture / "output"
 
     def backup(script_repo=repo):
@@ -192,8 +205,15 @@ def run_tests(repo, fixture, powershell):
             check(hashlib.sha256(package.read(entry["relative_path"])).hexdigest() == entry["sha256"], "Archived bytes match the manifest hash: " + entry["relative_path"])
         restored = fixture / "from-package.sqlite"
         restored.write_bytes(package.read("home/.codex/state_1.sqlite"))
+        db_snapshot = [item for item in manifest["sqlite_snapshots"] if item["relative_path"] == "home/.codex/sqlite/codex.db"]
+        check(len(db_snapshot) == 1 and db_snapshot[0]["method"] == "sqlite_online_backup" and db_snapshot[0]["integrity_check"] == "ok", "Actual source policy selects exact .db for verified online backup")
+        check(not any("sqlite/codex.db-" in name for name in names) and {"home/.codex/unlisted.db", "home/.codex/sqlite/orphan.db-wal"}.issubset(names), "Successful .db snapshot excludes only its own sidecars and preserves unlisted data")
+        restored_db = fixture / "from-package.db"
+        restored_db.write_bytes(package.read("home/.codex/sqlite/codex.db"))
     with sqlite3.connect(restored) as connection:
         check(connection.execute("SELECT count(*) FROM data").fetchone() == (1000,), "Archived SQLite is independently readable with committed records")
+    with sqlite3.connect(restored_db) as connection:
+        check(connection.execute("SELECT value FROM scheduled").fetchall() == [("committed WAL",)], "Archived exact .db is independently readable with committed WAL records")
 
     update = fixture / "update.py"
     update.write_text("import sqlite3,sys\nc=sqlite3.connect(sys.argv[1]);c.execute('UPDATE data SET value=123');c.commit();c.close()\n", encoding="utf-8")
@@ -283,6 +303,11 @@ sqlite3.connect = deadline_connect
     except TimeoutError as exc:
         failure = exc
     check(failure is not None, "Capture deadline aborts a valid database without reporting success")
+    schedule_writer.close()
+    scheduler.write_bytes(b"not a SQLite database")
+    Path(str(scheduler) + "-wal").write_bytes(b"sidecar must not turn failure into a raw backup")
+    result, receipt = backup()
+    check(result.returncode != 0 and receipt["failure"] == "backup_sqlite_capture_failed" and receipt["failure_path"] == "home/.codex/sqlite/codex.db" and current.read_bytes() == before, "Failed exact .db snapshot cannot omit sidecars and publish a raw fallback")
 
 
 if __name__ == "__main__":

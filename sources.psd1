@@ -77,6 +77,7 @@
     # independent copies of the database and its WAL/SHM/journal files.
     SQLiteBackupRelativePaths = @(
         'home/.codex/*.sqlite',
+        'home/.codex/sqlite/codex.db',
         'appdata-roaming/FlyingBird/FlyingBird/database.sqlite'
     )
 

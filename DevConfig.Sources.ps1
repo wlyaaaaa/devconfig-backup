@@ -75,7 +75,7 @@ function Get-DevConfigSourceInventory {
  foreach($key in @($fileMap.Keys)+@($warnings|ForEach-Object{$_.relative_path})){$parent=[IO.Path]::GetDirectoryName($key).Replace('\','/');while($parent){[void]$dirSet.Add($parent);$next=[IO.Path]::GetDirectoryName($parent);$parent=if($next){$next.Replace('\','/')}else{''}}}
  [string[]]$keys=@($fileMap.Keys);[Array]::Sort($keys,[StringComparer]::OrdinalIgnoreCase)
  $files=@($keys|ForEach-Object{$fileMap[$_]});[long]$bytes=0;foreach($file in $files){$bytes+=$file.length}
- $sqlitePaths=@($files|Where-Object{$_.relative_path-like '*.sqlite' -and (Test-BackupNameExcluded $_.relative_path @($Config.SQLiteBackupRelativePaths))}|ForEach-Object{$_.relative_path})
+ $sqlitePaths=@($files|Where-Object{($_.relative_path-like '*.sqlite' -or $_.relative_path-like '*.db') -and (Test-BackupNameExcluded $_.relative_path @($Config.SQLiteBackupRelativePaths))}|ForEach-Object{$_.relative_path})
  return [pscustomobject]@{root=$profile;files=$files;directories=@($dirSet);sources=@($sources);file_count=$files.Count;bytes=$bytes;source_count=$sources.Count;optional_absent_count=@($sources|Where-Object{$_.status-eq 'optional_absent'}).Count;hashes_computed=[bool]$Hash;file_warnings=$warnings.ToArray();sqlite_paths=$sqlitePaths}
 }
 function Get-DevConfigSQLiteSourceSignature($Inventory,[string]$Path){
