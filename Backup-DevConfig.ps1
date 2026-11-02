@@ -16,7 +16,8 @@ param(
  [string]$SourcesFile='',[string]$OutputRoot='',
  [string]$SevenZipPath='E:\Scoop\shims\7z.exe',[switch]$SkipSystemExport,
  [ValidateRange(1,10)][int]$CaptureAttempts=3,
- [ValidateSet('ServerCopy','Upload')][string]$CloudLatestMode='ServerCopy'
+ [ValidateSet('ServerCopy','Upload')][string]$CloudLatestMode='ServerCopy',
+ [ValidateRange(0,7200)][int]$ResourceLockWaitSeconds=0
 )
 if(-not $SourcesFile){$SourcesFile=Join-Path $PSScriptRoot 'sources.psd1'}
 if(-not $OutputRoot){$OutputRoot=$PSScriptRoot}
@@ -186,7 +187,7 @@ $runPath=Join-Path $StateDir ('devconfig-'+$(if($Tier.Count-eq 1 -and $Tier[0]-e
 try{
  Write-BackupJsonAtomic $runPath $run
  Write-BackupRunHistory $StateDir $run started
- $outLease=Open-BackupResourceLock $OutDir
+ $outLease=Open-BackupResourceLock $OutDir -WaitSeconds $ResourceLockWaitSeconds
  if($Tier-contains 'Local' -or $Tier-contains 'Hot'){
   if($ProfileRoot-match '(?i)[\\/]systemprofile$'){throw 'backup_interactive_user_profile_required'}
   if(-not $SkipSystemExport -and (Resolve-BackupPath $ProfileRoot)-ine (Resolve-BackupPath $env:USERPROFILE)){throw 'system_export_requires_matching_profile'}

@@ -1,5 +1,5 @@
 ' Hidden launcher for DevConfigBackup-* scheduled tasks.
-Dim fso, shell, here, tier, pwsh, exe, command, exitCode
+Dim fso, shell, here, tier, pwsh, exe, command, exitCode, lockWait
 
 Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
@@ -23,6 +23,9 @@ Else
     exe = "powershell.exe"
 End If
 
-command = exe & " -NoProfile -ExecutionPolicy Bypass -File """ & here & "\Backup-DevConfig.ps1"" -Tier " & tier
+' Leave at least one hour of the existing task limit for backup work.
+lockWait = 3600
+If LCase(tier) = "drive" Then lockWait = 7200
+command = exe & " -NoProfile -ExecutionPolicy Bypass -File """ & here & "\Backup-DevConfig.ps1"" -Tier " & tier & " -ResourceLockWaitSeconds " & lockWait
 exitCode = shell.Run(command, 0, True)
 WScript.Quit exitCode

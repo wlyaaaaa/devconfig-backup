@@ -85,9 +85,19 @@ function Write-BackupJsonAtomic([string]$Path,$Value){
   if((Get-BackupStableFileHash $full)-cne $expectedHash){throw 'backup_json_readback_failed'}
  }finally{if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)}}
 }
-function Open-BackupResourceLock([string]$Resource){
+function Open-BackupResourceLock([string]$Resource,[ValidateRange(0,7200)][int]$WaitSeconds=0){
  $path=Resolve-BackupPath $Resource;Assert-BackupPathChain $path;[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path))
- try{return [IO.File]::Open(($path+'.backup.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}catch [IO.IOException]{throw 'backup_resource_busy'}
+ $clock=[Diagnostics.Stopwatch]::StartNew()
+ while($true){
+  try{return [IO.File]::Open(($path+'.backup.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}catch [IO.IOException]{
+   if((Get-BackupUnreadableReason $_.Exception)-notin @('sharing_violation','lock_violation')){throw}
+   if($WaitSeconds-eq 0){throw 'backup_resource_busy'}
+   $remaining=$WaitSeconds*1000-$clock.Elapsed.TotalMilliseconds
+   if($remaining-le 0){throw 'backup_resource_wait_timeout'}
+   Start-Sleep -Milliseconds ([int][Math]::Min(500,$remaining))
+   if($clock.Elapsed.TotalSeconds-ge $WaitSeconds){throw 'backup_resource_wait_timeout'}
+  }
+ }
 }
 function Test-BackupNameExcluded([string]$Name,[string[]]$Patterns=@()){foreach($pattern in $Patterns){if($Name-like $pattern){return $true}};return $false}
 function Test-BackupRelativePathExcluded([string]$Path,[string[]]$Patterns=@()){
