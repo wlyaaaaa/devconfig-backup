@@ -379,15 +379,23 @@ function ConvertTo-RcloneSafeDiagnostic {
     [CmdletBinding()]
     param([string[]]$Output)
 
+    # Native commands may append a Failed-to summary after the concrete ERROR.
     $line = @(
         $Output |
-            Where-Object {
-                -not [string]::IsNullOrWhiteSpace($_) -and
-                $_ -notmatch '^\s*[\{\}\[\],]\s*$' -and
-                $_ -match '(?i)error|failed|fatal|critical|warning|unknown|usage'
-            } |
+            Where-Object { $_ -match '(?i)(?:^|\s)(?:error|fatal|critical)(?:\s*:|\s+)' } |
             Select-Object -Last 1
     )
+    if ($line.Count -eq 0) {
+        $line = @(
+            $Output |
+                Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_) -and
+                    $_ -notmatch '^\s*[\{\}\[\],]\s*$' -and
+                    $_ -match '(?i)error|failed|fatal|critical|warning|unknown|usage'
+                } |
+                Select-Object -Last 1
+        )
+    }
     if ($line.Count -eq 0) {
         $line = @(
             $Output |

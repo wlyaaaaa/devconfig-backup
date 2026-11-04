@@ -40,7 +40,8 @@ $cases=@(
  @{Call=2;Exit=7;Output='ERROR invalid_grant password=PRIVATE_PASSWORD';Category='oauth_auth'},
  @{Call=3;Exit=3;Output='ERROR 429 rate limit exceeded https://synthetic.invalid?token=PRIVATE_TOKEN';Category='rate_limit'},
  @{Call=4;Exit=1;Output=('ERROR synthetic/path/file.bin: mismatched checksum '+('x'*400)+' token=PRIVATE_TOKEN');Category='unknown'},
- @{Call=4;Exit=5;Output='ERROR TLS handshake failed Authorization: Bearer PRIVATE_BEARER';Category='network'}
+ @{Call=4;Exit=5;Output='ERROR TLS handshake failed Authorization: Bearer PRIVATE_BEARER';Category='network'},
+ @{Call=4;Exit=1;Output=@('2026/11/04 11:00:00 ERROR : synthetic/path/file.bin: md5 differ token=PRIVATE_TOKEN','2026/11/04 11:00:00 NOTICE: 1 errors while checking','2026/11/04 11:00:00 NOTICE: Failed to check: 1 differences found');Category='unknown';DetailMatch='synthetic/path/file.bin: md5 differ'}
 )
 foreach($case in $cases){
  $script:FaultCall=$case.Call;$script:NativeExit=$case.Exit;$script:ProviderOutput=$case.Output;$script:Calls=[Collections.Generic.List[object]]::new();$script:Published=@{}
@@ -54,6 +55,7 @@ foreach($case in $cases){
  $local=$script:Published[(Join-Path $StateRoot 'wechat-drive-failure-diagnostic.json')]
  Check ($local.run_id-ceq $run.run_id -and $local.detail.Length-le 240 -and $local.detail-notmatch 'PRIVATE_TOKEN|PRIVATE_PASSWORD|PRIVATE_BEARER') 'Local diagnostic text must be bounded, secret-filtered and tied to the failed run.'
  Check ($run.drive_diagnostic_file-ceq 'wechat-drive-failure-diagnostic.json') 'The run must reference the bounded local diagnostic artifact.'
+ if($case.DetailMatch){Check ($local.detail.Contains($case.DetailMatch)) 'The production catch must retain the concrete native error before the trailing failure summary.'}
  $history=Get-BackupHistoryDriveDiagnostic $diagnostic;$json=$history|ConvertTo-Json -Compress
  Check ($history.stage-ceq $diagnostic.stage -and $history.native_exit-eq $case.Exit -and $history.category-ceq $case.Category -and $json-notmatch 'synthetic/path|file.bin|PRIVATE_|detail') 'Run history must retain only fixed diagnostic fields, never provider text or payload filenames.'
  Check (($run|ConvertTo-Json -Depth 6 -Compress)-notmatch 'PRIVATE_|synthetic/path|mismatched checksum') 'Status output must not contain the local provider diagnostic body.'
@@ -69,4 +71,14 @@ Check ($script:Published.ContainsKey((Join-Path $StateRoot 'wechat-drive-success
 Check ($script:Calls[0][0]-ceq 'copy' -and $script:Calls[1]-contains '--one-way' -and $script:Calls[2]-contains '--delete-after' -and $script:Calls[3]-notcontains '--one-way' -and $script:Calls[4][0]-ceq 'copyto') 'Cloud operations and preprune/final check semantics must remain unchanged.'
 $invalid=Get-BackupHistoryDriveDiagnostic ([pscustomobject]@{stage='wechat_drive_final_check';native_exit=1;category='arbitrary provider text'})
 Check ($null-eq $invalid) 'History must reject nonfixed provider categories.'
-Write-Host 'PASS: five in-memory WeChat Drive failures, local evidence write failure and successful publication retain native diagnostics, secret filtering, bounded local evidence and safe history.'
+foreach($level in @('FATAL','CRITICAL')){
+ $safe=ConvertTo-RcloneSafeDiagnostic @("2026/11/04 11:00:00 $level : concrete failure",'NOTICE: Failed to check: final summary')
+ Check ($safe.Contains($level+' : concrete failure')) 'Specific fatal and critical log lines must survive the trailing summary.'
+}
+$copyError='2026/11/04 11:00:00 ERROR : synthetic/path/file.bin: Failed to copy: token=PRIVATE_TOKEN '+('x'*400)
+$safe=ConvertTo-RcloneSafeDiagnostic @($copyError,'NOTICE: Failed to copy: final summary')
+Check ($safe.Length-eq 240 -and $safe.Contains('synthetic/path/file.bin: Failed to copy: token=[redacted]') -and $safe-notmatch 'PRIVATE_TOKEN') 'An object-level Failed to copy error must remain selected, secret-filtered and bounded.'
+Check ((ConvertTo-RcloneSafeDiagnostic @('WARNING: earlier','NOTICE: Failed to check: final summary'))-ceq 'NOTICE: Failed to check: final summary') 'Without a specific error log level, the existing failure-keyword fallback must remain unchanged.'
+Check ((ConvertTo-RcloneSafeDiagnostic @('', '{', 'plain provider message', '}'))-ceq 'plain provider message') 'Plain output fallback must ignore empty and structural JSON lines.'
+Check ((ConvertTo-RcloneSafeDiagnostic @())-ceq 'no_output') 'Empty output must keep the no_output diagnostic.'
+Write-Host 'PASS: six in-memory WeChat Drive failures, multiline error selection, fallback, local evidence write failure and successful publication retain native diagnostics, secret filtering, bounded local evidence and safe history.'
