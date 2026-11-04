@@ -2,11 +2,11 @@
 .SYNOPSIS
   注册 DevConfig + WeChat 备份的计划任务（幂等，可重复运行）。
 .DESCRIPTION
-  - DevConfigBackup-Local        : 每天 23:05 + 登录后20分钟 -> -Tier Local,Hot（本地包+G盘热备）
-  - DevConfigBackup-Drive-Daily  : 每天 00:00               -> -Tier Drive（Google Drive）
-  - WeChatBackup-Hot-Daily       : 每天 20:30               -> -Target Hot（G盘热备）
-  - WeChatBackup-Drive-Weekly    : 每天 22:00 检查          -> -Target Drive（保留原任务名）
-  上述是当前机器的本地时刻；换机后以 PCConfig 登记的北京时间日程为准。
+  - DevConfigBackup-Local        : 每天北京时间 12:05 + 登录后20分钟 -> -Tier Local,Hot（本地包+G盘热备）
+  - DevConfigBackup-Drive-Daily  : 每天北京时间 13:00               -> -Tier Drive（Google Drive）
+  - WeChatBackup-Hot-Daily       : 每天北京时间 09:30               -> -Target Hot（G盘热备）
+  - WeChatBackup-Drive-Weekly    : 每天北京时间 11:00 检查          -> -Target Drive（保留原任务名）
+  默认值按北京时间换算成本机钟点；触发器带时区偏移，之后本机改时区北京时间不变。显式传参仍为本机钟点。
   说明: 本地/G 热备与 Drive 拆成独立任务，离线不会阻断本地保护，失败后下次定时自然重跑。
   H盘是默认锁定的人工冷备，不注册自动写入任务；Drive 依靠 rclone copy 自动跳过已存在文件。
   DevConfig/Drive/WeChat Drive 保持当前用户 Limited；WeChat Hot 使用同一用户、Interactive、Highest，以便创建 Windows VSS 快照。实际注册/提权仍由 PCConfig 负责。
@@ -18,15 +18,26 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $DailyAt  = '23:05',
-    [string] $DriveAt  = '00:00',
-    [string] $WeChatHotAt = '20:30',
-    [Alias('WeChatDriveWeeklyAt')][string] $WeChatDriveAt = '22:00',
+    [string] $DailyAt  = '',
+    [string] $DriveAt  = '',
+    [string] $WeChatHotAt = '',
+    [Alias('WeChatDriveWeeklyAt')][string] $WeChatDriveAt = '',
     [ValidateSet('DevConfigBackup-Local','DevConfigBackup-Drive-Daily','WeChatBackup-Hot-Daily','WeChatBackup-Drive-Weekly')]
     [string[]] $TaskName = @()
 )
 
 $ErrorActionPreference = 'Stop'
+function Convert-BeijingTimeToLocal([string] $At) {
+    $culture = [Globalization.CultureInfo]::InvariantCulture
+    $today = [DateTime]::Today.ToString('yyyy-MM-dd', $culture)
+    $beijing = [DateTimeOffset]::ParseExact("$today ${At}:00 +08:00", 'yyyy-MM-dd HH:mm:ss zzz', $culture)
+    return [TimeZoneInfo]::ConvertTime($beijing, [TimeZoneInfo]::Local).ToString('HH:mm', $culture)
+}
+if ([string]::IsNullOrEmpty($DailyAt)) { $DailyAt = Convert-BeijingTimeToLocal '12:05' }
+if ([string]::IsNullOrEmpty($DriveAt)) { $DriveAt = Convert-BeijingTimeToLocal '13:00' }
+if ([string]::IsNullOrEmpty($WeChatHotAt)) { $WeChatHotAt = Convert-BeijingTimeToLocal '09:30' }
+if ([string]::IsNullOrEmpty($WeChatDriveAt)) { $WeChatDriveAt = Convert-BeijingTimeToLocal '11:00' }
+
 . (Join-Path $PSScriptRoot 'ScheduledTask-Registration.Common.ps1')
 $devScript = Join-Path $PSScriptRoot 'Backup-DevConfig.ps1'
 $wxScript  = Join-Path $PSScriptRoot 'Backup-WeChat.ps1'
@@ -69,7 +80,7 @@ $sWeChatDrive = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetwo
     -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 30)
 
-# ① 本地 + G 热备：每天23:05 + 登录后20分钟（桌面机错过晚间窗口时补一份；不走海外流量）
+# ① 本地 + G 热备：默认每天北京时间12:05 + 登录后20分钟（错过窗口时补一份；不走海外流量）
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $logonTrigger.Delay = 'PT20M'
 

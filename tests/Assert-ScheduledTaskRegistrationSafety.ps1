@@ -299,6 +299,26 @@ try {
     $mockDrive = $global:DevConfigBackupTaskRegistrationMock['DevConfigBackup-Drive-Daily']
     $mockWeChatHot = $global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Hot-Daily']
     $mockWeChatDrive = $global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Drive-Weekly']
+    $setupAst = [System.Management.Automation.Language.Parser]::ParseInput($setupText, [ref]$null, [ref]$null)
+    $conversion = $setupAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Convert-BeijingTimeToLocal' }, $true)
+    Assert-Condition ($null -ne $conversion) 'Setup must provide the Beijing-to-local time converter.'
+    . ([scriptblock]::Create($conversion.Extent.Text))
+    $beijingTimes = [ordered]@{
+        'DevConfigBackup-Local' = '12:05'
+        'DevConfigBackup-Drive-Daily' = '13:00'
+        'WeChatBackup-Hot-Daily' = '09:30'
+        'WeChatBackup-Drive-Weekly' = '11:00'
+    }
+    foreach ($name in $beijingTimes.Keys) {
+        $localAt = Convert-BeijingTimeToLocal $beijingTimes[$name]
+        Assert-Condition ($localAt -match '^\d{2}:\d{2}$') 'Converted local time must use HH:mm.'
+        $culture = [Globalization.CultureInfo]::InvariantCulture
+        $beijing = [DateTimeOffset]::ParseExact(('{0} {1} +08:00' -f [DateTime]::Today.ToString('yyyy-MM-dd', $culture), $beijingTimes[$name]), 'yyyy-MM-dd HH:mm zzz', $culture)
+        $localDate = [DateTime]::SpecifyKind($beijing.LocalDateTime.Date.Add([TimeSpan]::Parse($localAt)), [DateTimeKind]::Unspecified)
+        $utc = [TimeZoneInfo]::ConvertTimeToUtc($localDate, [TimeZoneInfo]::Local)
+        Assert-Condition (([DateTimeOffset]$utc).ToOffset([TimeSpan]::FromHours(8)).ToString('HH:mm') -ceq $beijingTimes[$name]) "Local time must round-trip to the registered Beijing time for $name."
+        Assert-Condition ($global:DevConfigBackupTaskRegistrationMock[$name].Triggers[0].At -ceq $localAt) "Default trigger must use the converted Beijing time for $name."
+    }
     Assert-Condition ($mockLocal.Actions[0].Arguments -match 'Backup-DevConfig-Hidden\.vbs" Local,Hot$') 'Local task action changed.'
     Assert-Condition ($mockDrive.Actions[0].Arguments -match 'Backup-DevConfig-Hidden\.vbs" Drive$') 'Drive task action changed.'
     Assert-Condition ($mockWeChatHot.Actions[0].Arguments -match 'Backup-WeChat-Hidden\.vbs" Hot$') 'WeChat hot task action changed.'
@@ -310,6 +330,13 @@ try {
     foreach ($task in @($mockLocal, $mockDrive, $mockWeChatHot, $mockWeChatDrive)) {
         $expectedRunLevel = if ($task.TaskName -eq 'WeChatBackup-Hot-Daily') { 'Highest' } else { 'Limited' }
         Assert-Condition ($task.Principal.UserId -eq $env:USERNAME -and $task.Principal.LogonType -eq 'Interactive' -and $task.Principal.RunLevel -eq $expectedRunLevel) 'Task principal changed.'
+    }
+
+    $global:DevConfigBackupTaskRegistrationMock = @{}
+    & $setupPath -DailyAt '01:02' -DriveAt '03:04' -WeChatHotAt '05:06' -WeChatDriveWeeklyAt '07:08'
+    $explicitTimes = @('01:02', '03:04', '05:06', '07:08'); $index = 0
+    foreach ($name in $beijingTimes.Keys) {
+        Assert-Condition ($global:DevConfigBackupTaskRegistrationMock[$name].Triggers[0].At -ceq $explicitTimes[$index++]) 'Explicit local times and the weekly parameter alias must remain unchanged.'
     }
 
     $legacyHot = New-TestTask -Definition $definitions[2] -Xml 'xml:legacy-hot'
