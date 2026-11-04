@@ -89,6 +89,8 @@ DevConfig 的两项隐藏任务在同一输出锁上串行执行：Local/Hot 最
 
 ZIP 上传失败的运行回执保留原 `drive_dated_upload_failed` / `drive_latest_upload_failed`，并在 `drive_diagnostic` 写入固定阶段、dated/latest 类别、`.zip`、rclone 原始退出码、Upload/ServerCopy 模式及现有分类器提取的固定 provider 类别；同一固定诊断进入运行历史，后续成功不会覆盖。不保存 provider 原文、账号或路径；未识别错误归为 `unknown`。这不能追溯此前已丢弃的 provider 细因，也不将后续自然成功解释成已根治历史失败。
 
+微信 Drive 的复制、清理前单向核对、同步和最终双向核对失败时，保留原失败码，并在运行回执和历史的 `drive_diagnostic` 保存固定阶段、rclone 原始退出码及错误类别；失败不推进旧成功回执。经现有凭据过滤、最多 240 字符的错误正文只写本机 `state/wechat-drive-failure-diagnostic.json`，原子覆盖最近一份，并用 `run_id` 绑定本次失败；运行回执仅以 `drive_diagnostic_file` 引用，不将正文放入状态输出或运行历史。诊断文件写入失败记为 `drive_diagnostic_status=write_failed`，仍保留原云端失败。
+
 打包失败的 `pack_diagnostic` 和 rclone 预检返回的 `Diagnostic` 最多保留 240 字符，只隐藏密码、令牌、Authorization/Bearer、URL 的秘密参数及 userinfo 密码；普通账号、邮箱、路径、无秘密 URL 和普通长 ID 原样保留。运行回执写到本机 `state/`，该目录被 Git 排除，不随配置包上传；运行结果的标准输出同样保留凭据过滤。当前 Drive 入口只使用预检的固定错误类别，不保存预检诊断；运行历史仍只记录摘要和上述固定字段。
 
 `Install-WeChatDriveMonitor.ps1` 默认保留已有启用状态，新建默认禁用；显式 `-Enable` 才启用，不自动恢复已经停用的监控。补传以 G 热备为快照，传递 G 路径、回执、远端与限额参数，Hot 写入期间也视为资源忙。监控同时读取 stdout/stderr，超时仅处理自己启动的查询。最终成功依据锁定且验证过的快照与完整远端核对，不是固定容量百分比。禁用监控不等于终止此前已经启动的上传。

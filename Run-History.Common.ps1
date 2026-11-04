@@ -10,6 +10,12 @@ function Get-BackupRunTaskKind($Run){
 }
 function Get-BackupHistoryDriveDiagnostic($Diagnostic){
  if(-not $Diagnostic){return $null}
+ $wechatStages=@('wechat_drive_copy','wechat_drive_preprune_check','wechat_drive_sync','wechat_drive_final_check')
+ $categories=@('proxy_connect','timeout','oauth_auth','rate_limit','api_config','permission','network','config','remote_api','unknown')
+ if([string]$Diagnostic.stage-in $wechatStages){
+  $nativeExit=0;if(-not [int]::TryParse([string]$Diagnostic.native_exit,[ref]$nativeExit) -or [string]$Diagnostic.category-notin $categories){return $null}
+  return [pscustomobject][ordered]@{stage=[string]$Diagnostic.stage;native_exit=$nativeExit;category=[string]$Diagnostic.category}
+ }
  $allowed=[ordered]@{
   stage=@('drive_package_copy','drive_portable_metadata_copy','drive_portable_metadata_verify')
   object_kind=@('dated','latest')

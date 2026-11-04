@@ -110,6 +110,17 @@ function Get-WeChatDriveDestination {
     $dest=$resolved.Remote+$GDriveFolder.TrimEnd('/','\')
     return $dest
 }
+function Invoke-WeChatDriveRclone {
+    param([string]$Stage,[string]$Failure,[object[]]$Arguments)
+    $output=@(Invoke-BackupRclone @Arguments)
+    $nativeExit=$LASTEXITCODE
+    if($nativeExit-ne 0){
+        $failureException=[Exception]::new($Failure)
+        $failureException.Data['backup_drive_diagnostic']=[pscustomobject][ordered]@{stage=$Stage;native_exit=[int]$nativeExit;category=(Get-RcloneFailureCategory -Output $output)}
+        $failureException.Data['backup_drive_diagnostic_detail']=ConvertTo-RcloneSafeDiagnostic -Output $output
+        throw $failureException
+    }
+}
 function Invoke-WeChatDrivePublication {
     param($Snapshot,$UploadSource,[string]$Destination)
     $dest=$Destination
@@ -120,15 +131,11 @@ function Invoke-WeChatDrivePublication {
     $limit=@();if($MaxTransfer -and $MaxTransfer-ne '0'){$limit=@('--max-transfer',$MaxTransfer,'--cutoff-mode','cautious')}
     # The source is the locked, verified G generation, never the running WeChat directory.
     # Never delete cloud extras before all current source objects have arrived.
-    Invoke-BackupRclone copy $HotRoot $dest @filter @common @limit *> $null
-    if($LASTEXITCODE-ne 0){throw 'wechat_drive_copy_failed'}
-    Invoke-BackupRclone check $HotRoot $dest @filter --one-way --checkers 8 --retries 2 --contimeout 20s --timeout 120s *> $null
-    if($LASTEXITCODE-ne 0){throw 'wechat_drive_preprune_verification_failed'}
+    Invoke-WeChatDriveRclone 'wechat_drive_copy' 'wechat_drive_copy_failed' (@('copy',$HotRoot,$dest)+$filter+$common+$limit)
+    Invoke-WeChatDriveRclone 'wechat_drive_preprune_check' 'wechat_drive_preprune_verification_failed' (@('check',$HotRoot,$dest)+$filter+@('--one-way','--checkers','8','--retries','2','--contimeout','20s','--timeout','120s'))
     # The exact same filter constrains pruning. DbOnly never deletes existing media.
-    Invoke-BackupRclone sync $HotRoot $dest @filter @common @limit --delete-after *> $null
-    if($LASTEXITCODE-ne 0){throw 'wechat_drive_convergence_failed'}
-    Invoke-BackupRclone check $HotRoot $dest @filter --checkers 8 --retries 2 --contimeout 20s --timeout 120s *> $null
-    if($LASTEXITCODE-ne 0){throw 'wechat_drive_final_verification_failed'}
+    Invoke-WeChatDriveRclone 'wechat_drive_sync' 'wechat_drive_convergence_failed' (@('sync',$HotRoot,$dest)+$filter+$common+$limit+@('--delete-after'))
+    Invoke-WeChatDriveRclone 'wechat_drive_final_check' 'wechat_drive_final_verification_failed' (@('check',$HotRoot,$dest)+$filter+@('--checkers','8','--retries','2','--contimeout','20s','--timeout','120s'))
     if((Get-BackupStableFileHash ($HotRoot+'.backup-manifest.json'))-cne $UploadSource.hot_manifest_sha256){throw 'wechat_hot_generation_changed_during_upload'}
     # The resolved remote name can be an account address; receipts keep only the folder.
     $receipt=Get-WeChatSummary $Snapshot 'drive';$receipt.Remove('destination');$receipt.source=$HotRoot
@@ -225,6 +232,15 @@ try{
     $run.status=if($code-eq 0){'complete'}else{'failed'}
 }catch{
     $run.status='failed';$run.failure=Get-BackupFailureCode $_;$code=1
+    $diagnostic=$_.Exception.Data['backup_drive_diagnostic']
+    if($diagnostic){
+        $run.drive_diagnostic=$diagnostic;$run.failure_stage=$diagnostic.stage
+        # Provider text stays in one bounded local artifact, outside status/history output.
+        try{
+            Write-BackupJsonAtomic (Join-Path $StateRoot 'wechat-drive-failure-diagnostic.json') ([ordered]@{schema='wechat.drive-failure-diagnostic.v1';run_id=$run.run_id;failure=$run.failure;diagnostic=$diagnostic;detail=[string]$_.Exception.Data['backup_drive_diagnostic_detail']})
+            $run.drive_diagnostic_file='wechat-drive-failure-diagnostic.json'
+        }catch{$run.drive_diagnostic_status='write_failed'}
+    }
     foreach($phase in @('hot','local','drive')){if($run[$phase]-eq 'running'){$run[$phase]='failed'}}
 }finally{
     if($lease){$lease.Dispose()}
