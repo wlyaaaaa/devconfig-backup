@@ -36,17 +36,30 @@ function Repair-BackupVssJournal([string]$StateRoot,[string]$VolumeRoot,[string]
  if($journal.schema-cne 'devconfig.wechat-vss-journal.v1' -or $journal.shadow_id-cnotmatch '^\{[0-9A-Fa-f-]{36}\}$' -or [IO.Path]::GetFullPath([string]$journal.volume_root)-ine $root -or [IO.Path]::GetFullPath([string]$journal.source)-ine $sourceFull){throw 'backup_vss_journal_invalid'}
  Remove-BackupVssSnapshotExact ([string]$journal.shadow_id);[IO.File]::Delete($journalPath)
 }
+function Invoke-BackupVssCreate($Class,[string]$VolumeRoot){
+ $parameters=$Class.GetMethodParameters('Create');$parameters['Volume']=$VolumeRoot;$parameters['Context']='ClientAccessible'
+ $failedCodes=[Collections.Generic.List[uint32]]::new()
+ for($attempt=1;$attempt-le 3;$attempt++){
+  $result=$Class.InvokeMethod('Create',$parameters,$null);$code=[uint32]$result['ReturnValue']
+  if($code-eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$result['ShadowID'])){return [pscustomobject]@{ShadowId=[string]$result['ShadowID'];SourceSnapshot=[ordered]@{create_attempts=$attempt;create_failed_codes=$failedCodes.ToArray()}}}
+  $failedCodes.Add($code)
+  if($attempt-eq 3 -or $code-notin @(7,9,10,12)){
+   $failure=[Exception]::new("backup_vss_create_failed:$($code)_attempts_$attempt");$failure.Data['backup_vss_source_snapshot']=[ordered]@{create_attempts=$attempt;create_failed_codes=$failedCodes.ToArray()};throw $failure
+  }
+  Start-Sleep -Seconds (@(120,300)[$attempt-1])
+ }
+}
 function New-BackupVssSnapshot([string]$Source,[string]$StateRoot,[string]$RunId){
  if(-not (Test-BackupAdministrator)){throw 'backup_vss_administrator_required'};$sourceFull=Resolve-BackupPath $Source;$volumeRoot=[IO.Path]::GetPathRoot($sourceFull);$volumeId=Get-BackupVssVolumeIdentity $volumeRoot;Repair-BackupVssJournal $StateRoot $volumeRoot $sourceFull
  $class=[System.Management.ManagementClass]::new('root\cimv2','Win32_ShadowCopy',$null);$shadowId=$null
- try{$parameters=$class.GetMethodParameters('Create');$parameters['Volume']=$volumeRoot;$parameters['Context']='ClientAccessible';$result=$class.InvokeMethod('Create',$parameters,$null);if([uint32]$result['ReturnValue'] -ne 0 -or [string]::IsNullOrWhiteSpace([string]$result['ShadowID'])){throw "backup_vss_create_failed:$([uint32]$result['ReturnValue'])"};$shadowId=[string]$result['ShadowID']}finally{$class.Dispose()}
+ try{$created=Invoke-BackupVssCreate $class $volumeRoot;$shadowId=$created.ShadowId}finally{$class.Dispose()}
  $journalPath=Get-BackupVssJournalPath $StateRoot
  try{
   Write-BackupJsonAtomic $journalPath ([ordered]@{schema='devconfig.wechat-vss-journal.v1';shadow_id=$shadowId;volume_root=$volumeRoot;volume_id=$volumeId;source=$sourceFull;snapshot_source=$null;state='created';run_id=$RunId;created_utc=(Get-BackupUtc)})
   $shadow=@(Get-CimInstance -ClassName Win32_ShadowCopy -Namespace root/cimv2 -Filter ("ID='{0}'"-f $shadowId) -ErrorAction Stop);if($shadow.Count -ne 1){throw 'backup_vss_readback_failed'};$shadow=$shadow[0];$expectedVolume=Get-BackupVssVolumeIdentity $volumeRoot;if(-not ([string]$shadow.VolumeName).Equals($volumeId,[StringComparison]::OrdinalIgnoreCase) -or [int]$shadow.State -ne 12 -or -not [bool]$shadow.ClientAccessible -or -not [bool]$shadow.NoAutoRelease){throw 'backup_vss_snapshot_identity_invalid'};$snapshotSource=Get-BackupVssSourcePath $shadow $sourceFull
   Write-BackupJsonAtomic $journalPath ([ordered]@{schema='devconfig.wechat-vss-journal.v1';shadow_id=[string]$shadow.ID;volume_root=$volumeRoot;volume_id=$expectedVolume;source=$sourceFull;snapshot_source=$snapshotSource;state='active';run_id=$RunId;created_utc=(Get-BackupUtc)})
-  return [pscustomobject]@{ShadowId=[string]$shadow.ID;SnapshotSource=$snapshotSource;Source=$sourceFull;VolumeRoot=$volumeRoot;JournalPath=$journalPath}
- }catch{try{Remove-BackupVssSnapshotExact $shadowId;if([IO.File]::Exists($journalPath)){[IO.File]::Delete($journalPath)}}catch{};throw}
+  return [pscustomobject]@{ShadowId=[string]$shadow.ID;SnapshotSource=$snapshotSource;Source=$sourceFull;VolumeRoot=$volumeRoot;JournalPath=$journalPath;SourceSnapshot=$created.SourceSnapshot}
+ }catch{$_.Exception.Data['backup_vss_source_snapshot']=$created.SourceSnapshot;try{Remove-BackupVssSnapshotExact $shadowId;if([IO.File]::Exists($journalPath)){[IO.File]::Delete($journalPath)}}catch{};throw}
 }
 function Remove-BackupVssSnapshot([Parameter(Mandatory)]$Capture){
  Remove-BackupVssSnapshotExact ([string]$Capture.ShadowId);$journalPath=[string]$Capture.JournalPath;if($journalPath -and [IO.File]::Exists($journalPath)){[IO.File]::Delete($journalPath)}

@@ -49,12 +49,13 @@ function Get-WeChatCloudFilter {
     foreach($name in $exclDirs){$result+=@('--filter',('- '+$name+'/**'))};return $result
 }
 function Get-WeChatSummary {
-    param($Manifest,[string]$Kind)
+    param($Manifest,[string]$Kind,$SourceSnapshot=$null)
     $portable=[string]$Manifest.destination+'.backup-manifest.json'
     $manifestHash=Get-BackupStableFileHash $portable
     $manifestBytes=[long](Get-Item -LiteralPath $portable -ErrorAction Stop).Length
     $warnings=@($Manifest.file_warnings|Where-Object{$_})
-    return [ordered]@{manifest_sha256=$manifestHash;manifest_bytes=$manifestBytes;schema=('wechat.'+$Kind+'-backup-receipt.v2');status='complete';completed_utc=(Get-BackupUtc);source=$Source;destination=$Manifest.destination;generation_id=$Manifest.run_id;collection_status='complete';verification_status='sha256_full_tree';verification_scope='selected_files_excluding_file_warnings';retention_status='source_follow_verified';content_sha256=$Manifest.content_sha256;file_count=$Manifest.file_count;bytes=$Manifest.bytes;excluded_directory_count=$exclDirs.Count;file_warnings=$warnings;payload_names_emitted=($warnings.Count-gt 0);payload_content_interpreted=$false;capture_consistency=$script:SourceCaptureMode;application_consistency='not_proven';application_recovery='not_tested'}
+    $summary=[ordered]@{manifest_sha256=$manifestHash;manifest_bytes=$manifestBytes;schema=('wechat.'+$Kind+'-backup-receipt.v2');status='complete';completed_utc=(Get-BackupUtc);source=$Source;destination=$Manifest.destination;generation_id=$Manifest.run_id;collection_status='complete';verification_status='sha256_full_tree';verification_scope='selected_files_excluding_file_warnings';retention_status='source_follow_verified';content_sha256=$Manifest.content_sha256;file_count=$Manifest.file_count;bytes=$Manifest.bytes;excluded_directory_count=$exclDirs.Count;file_warnings=$warnings;payload_names_emitted=($warnings.Count-gt 0);payload_content_interpreted=$false;capture_consistency=$script:SourceCaptureMode;application_consistency='not_proven';application_recovery='not_tested'}
+    if($Kind-ceq 'hot' -and $SourceSnapshot){$summary.source_snapshot=$SourceSnapshot};return $summary
 }
 function New-WeChatUploadSourceRecord {
     return [ordered]@{kind='g_hot_verified_generation';gate='pending';refusal=$null;hot_generation_id=$null;hot_completed_utc=$null;hot_age_hours=$null;max_hot_age_hours=$MaxHotAgeHours;hot_receipt_status=$null;hot_verification_status=$null;hot_capture_consistency=$null;hot_manifest_sha256=$null;pre_upload_check='not_run'}
@@ -188,7 +189,7 @@ $code=0;$lease=$null;$driveLease=$null;$snapshot=$null;$vssCapture=$null;$source
 try{
     Write-BackupJsonAtomic $runPath $run
     Write-BackupRunHistory $StateRoot $run started
-    if($UseVss -and $capturesSource){$vssCapture=New-BackupVssSnapshot -Source $Source -StateRoot $StateRoot -RunId $run.run_id;$sourceForCapture=$vssCapture.SnapshotSource}
+    if($UseVss -and $capturesSource){$vssCapture=New-BackupVssSnapshot -Source $Source -StateRoot $StateRoot -RunId $run.run_id;$run.source_snapshot=$vssCapture.SourceSnapshot;$sourceForCapture=$vssCapture.SnapshotSource}
     if($Target-contains 'Hot'){
         try {
          $run.hot='running';Write-BackupJsonAtomic $runPath $run
@@ -197,7 +198,7 @@ try{
          $receiptPath=$script:HotReceiptFile
          $hot=Invoke-VerifiedBackupTree -Source $sourceForCapture -SourceIdentity $Source -Destination $HotRoot -ExcludeDirs $exclDirs -LockHeld -PostCommitReceiptPath $receiptPath -PostCommit {
              param($record)
-             Write-BackupJsonAtomic $receiptPath (Get-WeChatSummary $record 'hot')
+             Write-BackupJsonAtomic $receiptPath (Get-WeChatSummary $record 'hot' $vssCapture.SourceSnapshot)
          }
          } finally {$hotLease.Dispose()}
         foreach($warning in @($hot.file_warnings)){Add-BackupFileWarning $script:WeChatFileWarnings $warning};$run.file_warnings=$script:WeChatFileWarnings.ToArray()
@@ -232,6 +233,7 @@ try{
     $run.status=if($code-eq 0){'complete'}else{'failed'}
 }catch{
     $run.status='failed';$run.failure=Get-BackupFailureCode $_;$code=1
+    $sourceSnapshot=$_.Exception.Data['backup_vss_source_snapshot'];if($sourceSnapshot){$run.source_snapshot=$sourceSnapshot}
     $diagnostic=$_.Exception.Data['backup_drive_diagnostic']
     if($diagnostic){
         $run.drive_diagnostic=$diagnostic;$run.failure_stage=$diagnostic.stage

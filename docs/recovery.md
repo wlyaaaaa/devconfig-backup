@@ -85,6 +85,8 @@ DevConfig 的两项隐藏任务在同一输出锁上串行执行：Local/Hot 最
 
 微信 Drive 保留 `WeChatBackup-Drive-Weekly` 名称，改为每天检查：先持有 G 锁恢复遗留事务，再验证当前热备；同一范围、目录和清单的云端成功不足 7 天时记为 `skipped_current`，不刷新成功时间，其余情况按现有流程上传。单次失败不再拖一周。四个任务的业务失败都由下次定时自然重跑，任务的 `RestartCount` 不作为业务补跑承诺。
 
+微信 Hot 仅在创建卷影返回 7、9、10、12 时重试，总共最多 3 次，间隔依次为 120 秒、300 秒；其他返回值及返回 0 但无 ShadowID 立即失败。重试发生在获取 G 锁之前；用尽仍失败，不回退读取实时源。Create 成功后的写日志、读回失败不重试，仍按既有流程清理本任务卷影。Hot 成功回执、`wechat-local-last.json` 运行记录及 `run-history.jsonl` 最终行以 `source_snapshot.create_attempts` 记录总次数、`source_snapshot.create_failed_codes` 记录成功前失败的数字返回值（首次成功为 `[]`）；用尽失败时记录全部失败值，`failure` 保留最后返回值及次数，例如 `backup_vss_create_failed:10_attempts_3`。Drive 不创建卷影，回执不写这些字段；旧回执缺字段仍可消费。
+
 每次运行在 `state/run-history.jsonl` 记录开始和最终摘要，保留最近约 200 行，不记录文件名或内容。`Backup-Status.ps1` 将保留各类任务最近失败；有开始但无最终记录且进程已结束的运行显示为“进程中途结束”，能匹配到对应任务运行时附退出码。最新任务信息被后来运行覆盖时，回读同名任务的结构化事件，以唯一启动及实例 GUID 关联退出码；查询限 6 小时、128 条，日志缺失或关联不明时为 null。历史仅覆盖启用记录以后的运行，不能重建过去已覆盖的原因。
 
 ZIP 上传失败的运行回执保留原 `drive_dated_upload_failed` / `drive_latest_upload_failed`，并在 `drive_diagnostic` 写入固定阶段、dated/latest 类别、`.zip`、rclone 原始退出码、Upload/ServerCopy 模式及现有分类器提取的固定 provider 类别；同一固定诊断进入运行历史，后续成功不会覆盖。不保存 provider 原文、账号或路径；未识别错误归为 `unknown`。这不能追溯此前已丢弃的 provider 细因，也不将后续自然成功解释成已根治历史失败。
