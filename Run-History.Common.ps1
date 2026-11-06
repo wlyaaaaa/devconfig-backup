@@ -33,6 +33,7 @@ function Write-BackupRunHistory([string]$StateRoot,$Run,[ValidateSet('started','
  $record=[ordered]@{schema='backup.run-history.v1';event=$Event;task_kind=(Get-BackupRunTaskKind $Run);run_id=$Run.run_id;started_utc=$Run.started_utc;process_id=$PID;process_started_utc=(Get-Process -Id $PID).StartTime.ToUniversalTime().ToString('o')}
  # Keep only summary fields and fixed diagnostics, without raw output or file arrays.
  foreach($key in @('status','completed_utc','tiers','targets','collection','package','hot','local','drive','retention','failure','failure_type','failure_stage','failure_io_reason','sqlite_diagnostic','skipped_file_count','capture_attempt_count','capture_max_attempts','capture_consistency','application_recovery','pack_native_exit')){if($Run.Contains($key)){$record[$key]=$Run[$key]}}
+ if($Run.Contains('source_snapshot')){$record.source_snapshot=[ordered]@{create_attempts=[int]$Run.source_snapshot.create_attempts;create_failed_codes=@($Run.source_snapshot.create_failed_codes|ForEach-Object{[uint32]$_})}}
  if($Run.Contains('capture_retry_history')){
   $record.capture_retry_history=@($Run.capture_retry_history|Select-Object -First 10|ForEach-Object{
    $sources=@($_.sources|Where-Object{$_.source_id-ceq 'unmapped' -or $_.source_id-cmatch '^(home|appdata-roaming|appdata-local|extra|special)/[^\r\n|:]+$'}|Select-Object -First 64|ForEach-Object{[ordered]@{source_id=[string]$_.source_id;added=[int]$_.added;removed=[int]$_.removed}})
