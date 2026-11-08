@@ -5,7 +5,7 @@
   - DevConfigBackup-Local        : 每天北京时间 12:05 + 登录后20分钟 -> -Tier Local,Hot（本地包+G盘热备）
   - DevConfigBackup-Drive-Daily  : 每天北京时间 13:00               -> -Tier Drive（Google Drive）
   - WeChatBackup-Hot-Daily       : 每天北京时间 09:30               -> -Target Hot（G盘热备）
-  - WeChatBackup-Drive-Weekly    : 每天北京时间 11:00 检查          -> -Target Drive（保留原任务名）
+  - WeChatBackup-Drive-Weekly    : 每天北京时间 12:00 检查          -> -Target Drive（保留原任务名）
   默认值按北京时间换算成本机钟点；触发器带时区偏移，之后本机改时区北京时间不变。显式传参仍为本机钟点。
   说明: 本地/G 热备与 Drive 拆成独立任务，离线不会阻断本地保护，失败后下次定时自然重跑。
   H盘是默认锁定的人工冷备，不注册自动写入任务；Drive 依靠 rclone copy 自动跳过已存在文件。
@@ -27,6 +27,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$weChatDriveAtWasExplicit = -not [string]::IsNullOrWhiteSpace($WeChatDriveAt)
 function Convert-BeijingTimeToLocal([string] $At) {
     $culture = [Globalization.CultureInfo]::InvariantCulture
     $today = [DateTime]::Today.ToString('yyyy-MM-dd', $culture)
@@ -36,7 +37,7 @@ function Convert-BeijingTimeToLocal([string] $At) {
 if ([string]::IsNullOrEmpty($DailyAt)) { $DailyAt = Convert-BeijingTimeToLocal '12:05' }
 if ([string]::IsNullOrEmpty($DriveAt)) { $DriveAt = Convert-BeijingTimeToLocal '13:00' }
 if ([string]::IsNullOrEmpty($WeChatHotAt)) { $WeChatHotAt = Convert-BeijingTimeToLocal '09:30' }
-if ([string]::IsNullOrEmpty($WeChatDriveAt)) { $WeChatDriveAt = Convert-BeijingTimeToLocal '11:00' }
+if ([string]::IsNullOrEmpty($WeChatDriveAt)) { $WeChatDriveAt = Convert-BeijingTimeToLocal '12:00' }
 
 . (Join-Path $PSScriptRoot 'ScheduledTask-Registration.Common.ps1')
 $devScript = Join-Path $PSScriptRoot 'Backup-DevConfig.ps1'
@@ -180,8 +181,12 @@ if ($allowSubset) {
             # A selected existing task keeps its live timing/settings preimage;
             # the new Action and Principal still go through the normal transaction.
             if($definition.Name -eq 'WeChatBackup-Drive-Weekly'){
-                $at=([DateTimeOffset]::Parse([string]$lookup.Task.Triggers[0].StartBoundary)).ToLocalTime().ToString('HH:mm:ss')
-                $definition.Triggers = @((New-ScheduledTaskTrigger -Daily -At $at))
+                if($weChatDriveAtWasExplicit){
+                    $definition.Triggers = @((New-ScheduledTaskTrigger -Daily -At $WeChatDriveAt))
+                }else{
+                    $at=([DateTimeOffset]::Parse([string]$lookup.Task.Triggers[0].StartBoundary)).ToLocalTime().ToString('HH:mm:ss')
+                    $definition.Triggers = @((New-ScheduledTaskTrigger -Daily -At $at))
+                }
             }else{$definition.Triggers = @($lookup.Task.Triggers)}
             $definition.Settings = $lookup.Task.Settings
         }

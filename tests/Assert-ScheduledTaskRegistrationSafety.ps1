@@ -307,7 +307,7 @@ try {
         'DevConfigBackup-Local' = '12:05'
         'DevConfigBackup-Drive-Daily' = '13:00'
         'WeChatBackup-Hot-Daily' = '09:30'
-        'WeChatBackup-Drive-Weekly' = '11:00'
+        'WeChatBackup-Drive-Weekly' = '12:00'
     }
     foreach ($name in $beijingTimes.Keys) {
         $localAt = Convert-BeijingTimeToLocal $beijingTimes[$name]
@@ -358,6 +358,10 @@ try {
     & $setupPath -TaskName WeChatBackup-Drive-Weekly
     $migratedDrive=$global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Drive-Weekly']
     Assert-Condition ($migratedDrive.Triggers[0].Type -eq 'daily' -and $migratedDrive.Triggers[0].At -eq '22:00:00' -and $migratedDrive.Settings.ExecutionTimeLimit -eq $legacyDrive.Settings.ExecutionTimeLimit) 'Existing weekly task must become daily at its original local time.'
+    $global:DevConfigBackupTaskRegistrationMock = @{'WeChatBackup-Drive-Weekly'=$legacyDrive}
+    & $setupPath -TaskName WeChatBackup-Drive-Weekly -WeChatDriveAt '21:00'
+    $explicitMigratedDrive=$global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Drive-Weekly']
+    Assert-Condition ($explicitMigratedDrive.Triggers[0].Type -eq 'daily' -and $explicitMigratedDrive.Triggers[0].At -eq '21:00') 'An explicit Drive time must override the existing trigger for a selected task.'
     $unknownSetupRejected = $false
     try { & $setupPath -TaskName Unknown-Task } catch { $unknownSetupRejected = $true }
     Assert-Condition ($unknownSetupRejected -and $global:DevConfigBackupTaskRegistrationMock.Count -eq 1) 'Setup must reject unsupported task names without touching registered tasks.'
