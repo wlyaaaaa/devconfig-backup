@@ -295,6 +295,10 @@ sqlite3.connect = deadline_connect
     check(result.returncode != 0 and receipt["status"] == "failed" and current.read_bytes() == before, "Deadline interrupt remains a failed task and preserves the successful package")
     check(diagnostic["stage"] == "integrity_check" and diagnostic["reason"] == "timeout" and diagnostic["sqlite_error_code"] == sqlite3.SQLITE_INTERRUPT and diagnostic["sqlite_error_name"] == "SQLITE_INTERRUPT", "Real progress-handler interruption is classified as timeout through the formal failed receipt: " + json.dumps(diagnostic))
     check(diagnostic["native_exit"] == 1 and diagnostic["os_error_code"] is None and diagnostic["elapsed_ms"] >= 120000, "Deadline receipt preserves the helper exit, elapsed time and absent OS error")
+    progress = diagnostic["backup_progress"]
+    check(progress["step_count"] > 0 and progress["remaining_pages"] == 0 and progress["total_pages"] > 0
+          and progress["sqlite_status"] == sqlite3.SQLITE_DONE,
+          "Formal failure retains the completed page progress before integrity-check timeout")
     history = [json.loads(line) for line in (output / "state" / "run-history.jsonl").read_text(encoding="utf-8-sig").splitlines()]
     check(history[-1]["run_id"] == receipt["run_id"] and history[-1]["sqlite_diagnostic"] == diagnostic, "Final failure history preserves the complete safe SQLite diagnostic")
     failure = None

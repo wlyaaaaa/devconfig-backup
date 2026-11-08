@@ -20,9 +20,12 @@ def capture(source: Path, target: Path, timeout: float = 120.0, diagnostic=None,
     diagnostic = {} if diagnostic is None else diagnostic
     diagnostic["deadline_expired"] = False
     set_stage(diagnostic, "source_open")
-    deadline = time.monotonic() + timeout
-    last_progress = time.monotonic()
+    started = time.monotonic()
+    deadline = started + timeout
+    last_progress = started
     best_remaining = None
+    last_report = None
+    step_count = 0
 
     def bounded(*_):
         if time.monotonic() >= deadline:
@@ -31,9 +34,17 @@ def capture(source: Path, target: Path, timeout: float = 120.0, diagnostic=None,
         return 0
 
     def backup_progress(status, remaining, _total):
-        nonlocal last_progress, best_remaining
-        bounded()
+        nonlocal last_progress, best_remaining, last_report, step_count
         now = time.monotonic()
+        step_count += 1
+        if last_report is None or now - last_report >= 5 or status == sqlite3.SQLITE_DONE:
+            print(json.dumps({"schema": "devconfig.sqlite-progress.v1",
+                              "step_count": step_count, "sqlite_status": status,
+                              "remaining_pages": remaining, "total_pages": _total,
+                              "elapsed_ms": max(0, round((now - started) * 1000))}),
+                  file=sys.stderr, flush=True)
+            last_report = now
+        bounded()
         # A completed step may itself take longer than the stall allowance.
         # Credit its real progress before testing for a stalled backup. Busy,
         # repeated pages and restarted work cannot extend the stall allowance.

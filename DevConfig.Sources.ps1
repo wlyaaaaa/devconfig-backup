@@ -94,26 +94,34 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
  $diagnostic=[ordered]@{stage='process_start';reason='native_error';native_exit=$null;sqlite_error_code=$null;sqlite_error_name=$null;os_error_code=$null;elapsed_ms=0}
  try{
   [void]$process.Start()
+  $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
   $diagnostic.stage='process_wait'
   if(-not $process.WaitForExit(($captureTimeoutSeconds+5)*1000)){
    $process.Kill();$process.WaitForExit();$diagnostic.reason='timeout'
   }else{
    $diagnostic.stage='helper_reply'
   }
-  $reply=$process.StandardOutput.ReadToEnd();$stageReply=$process.StandardError.ReadToEnd();$code=$process.ExitCode
-  if($diagnostic.reason-eq 'timeout'){
-   foreach($line in ($stageReply-split '[\r\n]+')){
+  $reply=$stdout.GetAwaiter().GetResult();$stageReply=$stderr.GetAwaiter().GetResult();$code=$process.ExitCode
+  # Keep only numeric progress and fixed stages, even when the parent had to kill
+  # a helper blocked inside one native backup step. Never retain raw stderr.
+  foreach($line in ($stageReply-split '[\r\n]+')){
     try{
      $marker=$line|ConvertFrom-Json -ErrorAction Stop
      $keys=@($marker.PSObject.Properties.Name)
      if($keys.Count-eq 2 -and $keys-ccontains 'schema' -and $keys-ccontains 'stage' -and
         $marker.schema-is [string] -and $marker.stage-is [string] -and
         $marker.schema-ceq 'devconfig.sqlite-stage.v1' -and
-        $marker.stage-cin @('source_open','source_read','target_create','target_open','online_backup','standalone_mode','integrity_check')){
+        $marker.stage-cin @('source_open','source_read','target_create','target_open','online_backup','standalone_mode','integrity_check') -and $diagnostic.reason-eq 'timeout'){
       $diagnostic.stage=[string]$marker.stage
      }
+     $progressKeys=@('step_count','sqlite_status','remaining_pages','total_pages','elapsed_ms')
+     if($marker.schema-ceq 'devconfig.sqlite-progress.v1' -and $keys.Count-eq 6 -and
+        -not @($keys|Where-Object{$_-cnotin @('schema')+$progressKeys}).Count){
+      $progress=[ordered]@{};$safe=$true
+      foreach($key in $progressKeys){$value=$marker.$key;if(($value-isnot [int] -and $value-isnot [long]) -or $value-lt 0){$safe=$false;break};$progress[$key]=[long]$value}
+      if($safe -and $progress.step_count-gt 0 -and $progress.remaining_pages-le $progress.total_pages){$diagnostic.backup_progress=$progress}
+     }
     }catch{}
-   }
   }
   if($diagnostic.reason-ne 'timeout'){
    try{

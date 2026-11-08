@@ -55,7 +55,7 @@ Codex 的 `node_repl/active_execs` 与 `managed-hooks/codex-context/hooks/*/__py
 
 `SQLiteBackupRelativePaths` 登记的 SQLite 库需要 PATH 中可用的 Python 3 标准库 `sqlite3`。采集用 `DevConfig.Sqlite.py` 在只读连接中建立读事务，再调用 [SQLite 在线备份 API](https://www.sqlite.org/backup.html)，包含已提交的 WAL 内容，排除尚未提交的事务；不会对活动库执行 checkpoint、VACUUM 或修改数据库内容。独立候选切换为无需侧文件的 DELETE 日志模式并执行 `integrity_check`，随后仍核对文件哈希、包清单与压缩包。每库采集与完整性检查共用 120 秒硬期限，在线复制另有 30 秒无进展期限；只有待复制页数实际下降才刷新进度，忙重试或重复页不会刷新。宿主等待同一硬期限另加 5 秒退出余量，超时后结束自己启动的采集进程，忙/超时最多重试三次；持续占用、拒读、损坏、缺少 Python 或写盘错误失败并保留旧成功版本，不用原始复制兜底。
 
-失败运行回执的 `sqlite_diagnostic` 只记录固定阶段、原因、子进程退出码、SQLite 数字码及错误名、操作系统数字码和耗时；不记录数据库内容或原始标准错误。进度回调超过期限而被 SQLite 转换为 `SQLITE_INTERRUPT` 时仍归类为超时。诊断补强不代表已经确定历史失败的原因。
+失败运行回执的 `sqlite_diagnostic` 只记录固定阶段、原因、子进程退出码、SQLite 数字码及错误名、操作系统数字码和耗时；不记录数据库内容或原始标准错误。`backup_progress` 保留最后一次安全数字进度（回调次数、SQLite 状态、剩余页、总页和经过毫秒），首次、每隔至少 5 秒及完成时采样；即使父进程超时终止子进程，也可区分尚无回调、复制中和已复制完。父进程同时读取两条输出管道，避免进度输出堵住子进程。进度回调超过期限而被 SQLite 转换为 `SQLITE_INTERRUPT` 时仍归类为超时。诊断补强不代表已经确定历史失败的原因。
 
 只有成功在线备份的库才从包中排除其同名 `-wal`、`-shm`、`-journal`，独立的侧文件形状数据不受影响。运行回执、包回执和清单的 `sqlite_snapshots` 列出库路径、方法和完整性结果，不含数据库正文。SQLite 副本自身是事务一致的；不同库、普通文件和系统导出仍分别采集，`capture_consistency=per_file_verified_not_point_in_time`、`application_consistency=not_proven` 保持原义。源库及其侧文件在扫描和复核间的元数据变化计入 `changed_after_capture_count`，不会要求持续写入的活动库哈希前后相等。验证入口为 `tests/Assert-DevConfigSqliteCapture.ps1` 与 `tests/Assert-LockedSourceResilience.ps1`。
 
