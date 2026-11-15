@@ -45,8 +45,10 @@ try {
     Write-BackupJsonAtomic $journalPath ([ordered]@{schema='devconfig.wechat-vss-journal.v1';shadow_id='{00000000-0000-0000-0000-000000000000}';volume_root='E:\';source=[IO.Path]::GetFullPath($source);snapshot_source='\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy999\fixture';run_id='fixture';created_utc=(Get-BackupUtc)})
     $refused = $false
     $cleanupCode = $null
+    function Get-CimInstance { throw 'fixture_vss_query_failed' }
     try { Repair-BackupVssJournal $state 'E:\' $source } catch { $cleanupCode = $_.Exception.Message; $refused = [IO.File]::Exists($journalPath) }
-    Check ($refused -and [IO.File]::Exists($journalPath)) 'VSS cleanup refuses an unverified snapshot identity and preserves its journal'
+    Remove-Item Function:\Get-CimInstance
+    Check ($refused -and [IO.File]::Exists($journalPath)) 'VSS query failure preserves its journal without treating absence as proven'
     [IO.File]::Delete($journalPath)
 
     $invalidId = $false

@@ -24,9 +24,9 @@ function Get-BackupVssSourcePath([Parameter(Mandatory)]$Shadow,[Parameter(Mandat
  $relative=$sourceFull.Substring($volumeRoot.Length).TrimStart('\','/');$snapshot=if($relative){$device.TrimEnd('\')+'\'+$relative}else{$device.TrimEnd('\')}
  if(-not [IO.Directory]::Exists($snapshot)){throw 'backup_vss_source_snapshot_missing'};return $snapshot
 }
-function Remove-BackupVssSnapshotExact([Parameter(Mandatory)][string]$ShadowId){
+function Remove-BackupVssSnapshotExact([Parameter(Mandatory)][string]$ShadowId,[switch]$AllowMissing){
  if($ShadowId -notmatch '^\{[0-9A-Fa-f-]{36}\}$'){throw 'backup_vss_shadow_id_invalid'}
- $targets=@(Get-CimInstance -ClassName Win32_ShadowCopy -Namespace root/cimv2 -ErrorAction Stop|Where-Object{$_.ID-ceq $ShadowId});if($targets.Count -ne 1){throw 'backup_vss_delete_target_not_unique'}
+ $targets=@(Get-CimInstance -ClassName Win32_ShadowCopy -Namespace root/cimv2 -ErrorAction Stop|Where-Object{$_.ID-ceq $ShadowId});if($targets.Count -eq 0 -and $AllowMissing){return};if($targets.Count -ne 1){throw 'backup_vss_delete_target_not_unique'}
  $targets[0]|Remove-CimInstance -ErrorAction Stop
  if(@(Get-CimInstance -ClassName Win32_ShadowCopy -Namespace root/cimv2 -ErrorAction Stop|Where-Object{$_.ID-ceq $ShadowId}).Count -ne 0){throw 'backup_vss_delete_readback_failed'}
 }
@@ -34,7 +34,7 @@ function Get-BackupVssJournalPath([string]$StateRoot){return Join-Path (Resolve-
 function Repair-BackupVssJournal([string]$StateRoot,[string]$VolumeRoot,[string]$Source){
  $journalPath=Get-BackupVssJournalPath $StateRoot;if(-not [IO.File]::Exists($journalPath)){return};$journal=Read-BackupJson $journalPath -Required;$sourceFull=Resolve-BackupPath $Source;$root=[IO.Path]::GetFullPath($VolumeRoot)
  if($journal.schema-cne 'devconfig.wechat-vss-journal.v1' -or $journal.shadow_id-cnotmatch '^\{[0-9A-Fa-f-]{36}\}$' -or [IO.Path]::GetFullPath([string]$journal.volume_root)-ine $root -or [IO.Path]::GetFullPath([string]$journal.source)-ine $sourceFull){throw 'backup_vss_journal_invalid'}
- Remove-BackupVssSnapshotExact ([string]$journal.shadow_id);[IO.File]::Delete($journalPath)
+ Remove-BackupVssSnapshotExact ([string]$journal.shadow_id) -AllowMissing;[IO.File]::Delete($journalPath)
 }
 function Invoke-BackupVssCreate($Class,[string]$VolumeRoot){
  $parameters=$Class.GetMethodParameters('Create');$parameters['Volume']=$VolumeRoot;$parameters['Context']='ClientAccessible'
