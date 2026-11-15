@@ -51,6 +51,8 @@ pwsh -File Restore-WeChat.ps1 -BackupRoot 'X:\backup\xwechat_files' -Target 'E:\
 
 Codex 的 `.sqlite-maintenance.lock` 是运行互斥标记，仅按完整相对路径排除；通用缓存、临时目录和文件仍按 `sources.psd1` 的选择策略排除，其他 `*.lock` 继续保留。必需根不存在或真配置不可读仍失败。
 
+PowerToys 的 `appdata-local/Microsoft/PowerToys/settings.json.cli-lock` 与 Typora 的 `appdata-roaming/Typora/Local Storage/leveldb/LOCK` 也是空运行互斥文件，由应用重新创建，无需恢复，按这两个完整路径有意排除。PowerToys 的 `settings.json` 和 Typora 的 LevelDB 数据、CURRENT、MANIFEST 仍照常采集。依据分别是 [PowerToys 官方修复](https://github.com/microsoft/PowerToys/pull/51427)和 [LevelDB 锁文件实现](https://github.com/google/leveldb/blob/main/util/env_windows.cc)。运行回执、包回执及包清单的 `intentional_exclusions` 列出本包采用的 `ExcludeRelativePaths` 策略（可能含通配规则，不表示每条都匹配到现存文件）；这些有意排除项不计入 `skipped_files`。只上传已有包时沿用包回执的策略，旧包未记此字段时为空。
+
 Codex 的 `node_repl/active_execs` 与 `managed-hooks/codex-context/hooks/*/__pycache__` 按完整相对范围排除；REPL 的其他配置、钩子源码、bundle 和 `active-runtime.json` 保留。`OmitEmptyDirectoryRelativePaths` 只登记 `home/.codex/plans`，该范围没有选中文件后代的空目录不进入选择清单；真实计划文件、其祖先和扫描时已知警告路径的祖先仍保留，其他空配置目录照带。真实文件或新钩子包的增删仍触发原有有界重采，不改变 SQLite、重试上限或失败策略。
 
 `SQLiteBackupRelativePaths` 登记的 SQLite 库需要 PATH 中可用的 Python 3 标准库 `sqlite3`。采集用 `DevConfig.Sqlite.py` 在只读连接中建立读事务，再调用 [SQLite 在线备份 API](https://www.sqlite.org/backup.html)，包含已提交的 WAL 内容，排除尚未提交的事务；不会对活动库执行 checkpoint、VACUUM 或修改数据库内容。独立候选切换为无需侧文件的 DELETE 日志模式并执行 `integrity_check`，随后仍核对文件哈希、包清单与压缩包。每库采集与完整性检查共用 120 秒硬期限，在线复制另有 30 秒无进展期限；只有待复制页数实际下降才刷新进度，忙重试或重复页不会刷新。宿主等待同一硬期限另加 5 秒退出余量，超时后结束自己启动的采集进程，忙/超时最多重试三次；持续占用、拒读、损坏、缺少 Python 或写盘错误失败并保留旧成功版本，不用原始复制兜底。

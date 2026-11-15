@@ -182,6 +182,9 @@
         'home/.claude/session-env',
         'home/.claude/shell-snapshots',
         'home/.claude/usage-data',
+        # Empty runtime mutexes, recreated by their applications; keep settings and DB payloads.
+        'appdata-local/Microsoft/PowerToys/settings.json.cli-lock',
+        'appdata-roaming/Typora/Local Storage/leveldb/LOCK',
         'appdata-roaming/WhirlwindFX/SignalRgb/QtWebEngine/*/Local Storage/leveldb/LOCK',
         'home/.gemini/antigravity-cli/presence/*.lock',
         # Codex-managed sandbox executables are ephemeral and intentionally ACL-locked;

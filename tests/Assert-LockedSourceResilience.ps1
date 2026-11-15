@@ -74,7 +74,17 @@ try{
 
  # End to end: task stays successful but distinguishable; required lock fails with a named path.
  $output=Join-Path $fixture 'output';$hot=Join-Path $fixture 'hot';$sources=Join-Path $fixture 'sources.psd1'
- Put $sources "@{HomeFiles=@('.gitconfig');HomeDirs=@('settings');RequiredSources=@('home/.gitconfig');ExcludeDirs=@();ExcludeFiles=@();HistoryDirs=@();HistoryFiles=@()}"
+ $runtimeLocks=@('appdata-local/Microsoft/PowerToys/settings.json.cli-lock','appdata-roaming/Typora/Local Storage/leveldb/LOCK')
+ foreach($relative in $runtimeLocks){
+  $sourceRelative=$relative.Replace('appdata-local/','AppData/Local/').Replace('appdata-roaming/','AppData/Roaming/')
+  $path=Join-Path $profile $sourceRelative;Put $path ''; $handles.Add((Hold $path))
+ }
+ Put (Join-Path $profile 'AppData/Local/Microsoft/PowerToys/settings.json') '{"enabled":true}'
+ Put (Join-Path $profile 'AppData/Local/Microsoft/PowerToys/dependency.lock') 'version=1'
+ Put (Join-Path $profile 'AppData/Roaming/Typora/Local Storage/leveldb/CURRENT') 'MANIFEST-000001'
+ Put (Join-Path $profile 'AppData/Roaming/Typora/Local Storage/leveldb/000001.ldb') 'database payload'
+ $excludes=(@($policy.ExcludeRelativePaths)|ForEach-Object{"'$_'"})-join ','
+ Put $sources "@{HomeFiles=@('.gitconfig');HomeDirs=@('settings');RequiredSources=@('home/.gitconfig');AppDataLocalDirs=@('Microsoft/PowerToys');AppDataRoamingDirs=@('Typora');ExcludeRelativePaths=@($excludes);ExcludeDirs=@();ExcludeFiles=@();HistoryDirs=@();HistoryFiles=@()}"
  $base=@('-ProfileRoot',$profile,'-SourcesFile',$sources,'-OutputRoot',$output,'-HotRoot',$hot,'-SkipSystemExport','-Json','-Tier','Local,Hot')
  $r=Run $base;$run=Read-BackupJson (Join-Path $output 'state\devconfig-local-last.json') -Required
  Check ($r.Exit-eq 0) ('Skipped files do not fail the task: '+$r.Text)
@@ -83,6 +93,13 @@ try{
  $pack=Get-VerifiedDevConfigPackage (Join-Path $output 'out');$hotPack=Get-VerifiedDevConfigPackage $hot
  Check ($pack.Sha-ceq $hotPack.Sha -and $pack.Receipt.skipped_file_count-eq 2 -and @($pack.Receipt.collection_warnings)-ccontains 'skipped_unreadable_files') 'Package is published and verified with the skip recorded in its receipt'
  $manifest=Read-BackupJson ($pack.Zip+'.manifest.json') -Required
+ foreach($relative in $runtimeLocks){
+  foreach($proof in @($run,$pack.Receipt,$manifest)){Check ($relative-in @($proof.intentional_exclusions)) ('Receipt records intentional exclusion: '+$relative)}
+  Check ($relative-notin @($manifest.files.relative_path) -and $relative-notin @($manifest.skipped_files.relative_path)) ('Runtime lock is neither payload nor skipped: '+$relative)
+ }
+ foreach($relative in @('appdata-local/Microsoft/PowerToys/settings.json','appdata-local/Microsoft/PowerToys/dependency.lock','appdata-roaming/Typora/Local Storage/leveldb/CURRENT','appdata-roaming/Typora/Local Storage/leveldb/000001.ldb')){
+  Check ($relative-in @($manifest.files.relative_path)) ('Recoverable neighbor remains in package: '+$relative)
+ }
  Check (@($manifest.files|Where-Object{$_.relative_path-like '*exclusive*' -or $_.relative_path-like '*guard*'}).Count-eq 0 -and $manifest.skipped_file_count-eq 2 -and @($manifest.files|Where-Object{$_.relative_path-ceq 'home/settings/ok.txt'}).Count-eq 1) 'Package manifest lists the skipped files and omits their payload'
  foreach($h in @($handles)){$h.Dispose()};$handles.Clear()
  $r=Run $base;$run=Read-BackupJson (Join-Path $output 'state\devconfig-local-last.json') -Required

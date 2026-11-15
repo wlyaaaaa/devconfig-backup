@@ -30,6 +30,7 @@ $script:GDriveRemoteWasExplicit=$PSBoundParameters.ContainsKey('GDriveRemote')
 $Tier=@(@($Tier)|ForEach-Object{$_-split ','}|ForEach-Object{$_.Trim()}|Where-Object{$_}|Select-Object -Unique)
 if($Tier.Count-eq 0 -or @($Tier|Where-Object{$_-notin @('Local','Hot','Drive')}).Count){throw 'invalid_backup_tier'}
 $cfg=Import-PowerShellDataFile -LiteralPath $SourcesFile -ErrorAction Stop
+$intentionalExclusions=@($cfg.ExcludeRelativePaths|Where-Object{$_})
 $OutputRoot=Resolve-BackupPath $OutputRoot;$OutDir=Join-Path $OutputRoot 'out';$StateDir=Join-Path $OutputRoot 'state';$StageParent=Join-Path $OutputRoot 'staging'
 $HotRoot=Resolve-BackupPath $HotRoot
 if($Tier-contains 'Hot'){Assert-BackupPathsIndependent $OutDir $HotRoot}
@@ -137,6 +138,7 @@ function New-DevConfigCandidate([string]$Container){
  $stage=$capture.stage;$inventory=$capture.inventory;$captureChanges=$capture.changed_after_capture_count
  $sqliteSnapshots=@($inventory.sqlite_snapshots);$script:run.sqlite_snapshots=$sqliteSnapshots
  $script:run.capture_attempt_count=$capture.attempt_count;$script:run.capture_retry_history=$capture.retry_history
+ $script:run.intentional_exclusions=$intentionalExclusions
  $skipped=@($inventory.skipped_files|Select-Object relative_path,reason);$script:run.skipped_file_count=$skipped.Count;$script:run.skipped_files=$skipped
  $warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($inventory.file_warnings)+@($preparation.file_warnings)){Add-BackupFileWarning $warnings $warning}
  foreach($file in $inventory.files){
@@ -154,7 +156,7 @@ function New-DevConfigCandidate([string]$Container){
  $script:run.collection=$(if($skipped.Count){'complete_with_skipped_files'}else{'complete'});$script:run.package='running';Write-BackupJsonAtomic $runPath $script:run
  $previous=$null;try{$previous=Get-VerifiedDevConfigPackage $OutDir}catch{}
  if($previous -and $previous.Receipt.content_sha256-ceq $contentHash){$script:run.package='reused';return $previous}
- $manifest=[ordered]@{schema='devconfig.payload-manifest.v1';capture_consistency='per_file_verified_not_point_in_time';changed_after_capture_count=$captureChanges;content_sha256=$contentHash;payload_tree_sha256=$treeHash;policy_sha256=$policyHash;file_count=$payload.file_count;bytes=$payload.bytes;directories=$payload.directories;files=@($payload.files|Select-Object relative_path,length,mtime_ticks,sha256);sources=$inventory.sources;skipped_file_count=$skipped.Count;skipped_files=$skipped;file_warnings=$warnings.ToArray();sqlite_snapshots=$sqliteSnapshots;application_consistency='not_proven'}
+ $manifest=[ordered]@{schema='devconfig.payload-manifest.v1';capture_consistency='per_file_verified_not_point_in_time';changed_after_capture_count=$captureChanges;content_sha256=$contentHash;payload_tree_sha256=$treeHash;policy_sha256=$policyHash;file_count=$payload.file_count;bytes=$payload.bytes;directories=$payload.directories;files=@($payload.files|Select-Object relative_path,length,mtime_ticks,sha256);sources=$inventory.sources;intentional_exclusions=$intentionalExclusions;skipped_file_count=$skipped.Count;skipped_files=$skipped;file_warnings=$warnings.ToArray();sqlite_snapshots=$sqliteSnapshots;application_consistency='not_proven'}
  Write-BackupJsonAtomic (Join-Path $stage 'backup-manifest.json') $manifest
  $name='devconfig-'+(Get-Date -Format yyyyMMdd-HHmmss)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)+'.zip';$zip=Join-Path $Container $name
  $zipExe=Get-BackupExecutable 7z -FallbackPath $SevenZipPath
@@ -169,7 +171,7 @@ function New-DevConfigCandidate([string]$Container){
  & $zipExe t -bso0 -bsp0 -- $zip *> $null;if($LASTEXITCODE-ne 0){throw 'backup_archive_test_failed'}
  Assert-BackupArchiveManifest $zip $manifest
  $hash=Get-BackupStableFileHash $zip
- $receipt=[ordered]@{schema='devconfig.package-receipt.v2';zip_entry_encoding='utf-8';capture_consistency='per_file_verified_not_point_in_time';status='complete';collection_status='complete';archive_verification='7z_test_pass';completed_utc=(Get-BackupUtc);package_name=$name;sha256=$hash;package_bytes=(Get-Item $zip).Length;content_sha256=$contentHash;payload_tree_sha256=$treeHash;file_count=$payload.file_count;skipped_file_count=$skipped.Count;collection_warnings=@(if($skipped.Count){'skipped_unreadable_files'});file_warnings=$warnings.ToArray();sqlite_snapshots=$sqliteSnapshots;application_recovery='not_tested'}
+ $receipt=[ordered]@{schema='devconfig.package-receipt.v2';zip_entry_encoding='utf-8';capture_consistency='per_file_verified_not_point_in_time';status='complete';collection_status='complete';archive_verification='7z_test_pass';completed_utc=(Get-BackupUtc);package_name=$name;sha256=$hash;package_bytes=(Get-Item $zip).Length;content_sha256=$contentHash;payload_tree_sha256=$treeHash;file_count=$payload.file_count;intentional_exclusions=$intentionalExclusions;skipped_file_count=$skipped.Count;collection_warnings=@(if($skipped.Count){'skipped_unreadable_files'});file_warnings=$warnings.ToArray();sqlite_snapshots=$sqliteSnapshots;application_recovery='not_tested'}
  Write-BackupJsonAtomic ($zip+'.manifest.json') $manifest;Write-BackupJsonAtomic ($zip+'.receipt.json') $receipt
  [IO.File]::WriteAllText(($zip+'.sha256'),($hash+'  '+$name+"`n"),[Text.Encoding]::ASCII)
  return [pscustomobject]@{Zip=$zip;Sha=$hash;Name=$name;Receipt=[pscustomobject]$receipt;MB=[math]::Round($receipt.package_bytes/1MB,2)}
@@ -182,7 +184,7 @@ if($Plan){
  if($Json){$result|ConvertTo-Json -Depth 8}else{[pscustomobject]$result|Format-List};exit 0
 }
 $script:overallExitCode=0;$outLease=$null;$pin=$null;$container=$null;$pack=$null
-$script:run=[ordered]@{schema='devconfig.run.v2';run_id=[guid]::NewGuid().ToString('N');status='running';started_utc=(Get-BackupUtc);completed_utc=$null;tiers=$Tier;collection='not_requested';package='not_requested';hot='not_requested';drive='not_requested';retention='not_requested';failure=$null;skipped_file_count=0;skipped_files=@();file_warnings=@();optional_tools_absent=@();capture_attempt_count=0;capture_max_attempts=$CaptureAttempts;capture_retry_history=@();application_recovery='not_tested'}
+$script:run=[ordered]@{schema='devconfig.run.v2';run_id=[guid]::NewGuid().ToString('N');status='running';started_utc=(Get-BackupUtc);completed_utc=$null;tiers=$Tier;collection='not_requested';package='not_requested';hot='not_requested';drive='not_requested';retention='not_requested';failure=$null;skipped_file_count=0;skipped_files=@();intentional_exclusions=@();file_warnings=@();optional_tools_absent=@();capture_attempt_count=0;capture_max_attempts=$CaptureAttempts;capture_retry_history=@();application_recovery='not_tested'}
 $runPath=Join-Path $StateDir ('devconfig-'+$(if($Tier.Count-eq 1 -and $Tier[0]-eq 'Drive'){'drive'}else{'local'})+'-last.json')
 try{
  Write-BackupJsonAtomic $runPath $run
@@ -199,7 +201,7 @@ try{
   $pack=Get-VerifiedDevConfigPackage $OutDir
   if($run.package-ne 'reused'){$run.package='complete'};$run.retention='complete'
   [IO.File]::WriteAllText((Join-Path $StateDir 'latest.sha256'),($pack.Sha+'  '+$pack.Name),[Text.Encoding]::ASCII)
- }else{$pack=Get-DrivePackageSnapshot -OutDir $OutDir -StateDir $StateDir;$run.package='verified_existing';$run.file_warnings=@($pack.Receipt.file_warnings|Where-Object{$_})}
+ }else{$pack=Get-DrivePackageSnapshot -OutDir $OutDir -StateDir $StateDir;$run.package='verified_existing';$run.intentional_exclusions=@($pack.Receipt.intentional_exclusions|Where-Object{$_});$run.file_warnings=@($pack.Receipt.file_warnings|Where-Object{$_})}
  $pin=[IO.File]::Open($pack.Zip,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
  # Serialize collection, publication and retention through the same output lease.
  Write-BackupJsonAtomic $runPath $run
