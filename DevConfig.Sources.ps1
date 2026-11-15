@@ -296,6 +296,16 @@ function Invoke-DevConfigSourceCapture {
  }
 }
 
+function Export-DevConfigWifiProfiles([string]$Destination){
+ [void][IO.Directory]::CreateDirectory($Destination)
+ # netsh silently truncates long output paths to 123 characters plus .xml.
+ # A relative folder keeps the filename short even in a deeply nested worktree.
+ Push-Location -LiteralPath $Destination
+ try{
+  & netsh.exe wlan export profile key=clear 'folder=.' *> $null
+  if($LASTEXITCODE-ne 0){throw 'wifi_profile_export_failed'}
+ }finally{Pop-Location}
+}
 function Invoke-DevConfigSystemExport($Config,[string]$Stage,$FileWarnings=$null,$KnownWarnings=@()){
  $system=Join-Path $Stage '_system';$man=Join-Path $Stage '_manifests';$missing=[Collections.Generic.List[string]]::new();$since=[DateTimeOffset]::UtcNow
  [void][IO.Directory]::CreateDirectory($system);[void][IO.Directory]::CreateDirectory($man)
@@ -321,9 +331,7 @@ function Invoke-DevConfigSystemExport($Config,[string]$Stage,$FileWarnings=$null
   if(-not $warning -and $stageCode.StartsWith('destination_')){$warning=Get-BackupDestinationWarning $_ ([string]$_.Exception.Data['backup_destination_path']) '_system/hosts' $stageCode $since}
   if(-not $warning){throw};Add-BackupFileWarning $FileWarnings $warning
  }
- $wifi=Join-Path $system 'wifi';[void][IO.Directory]::CreateDirectory($wifi)
- & netsh.exe wlan export profile key=clear "folder=$wifi" *> $null
- if($LASTEXITCODE-ne 0){throw 'wifi_profile_export_failed'}
+ Export-DevConfigWifiProfiles (Join-Path $system 'wifi')
  foreach($definition in @(@('scoop','scoop.json'),@('code','vscode-extensions.txt'),@('cursor','cursor-extensions.txt'))){
   $command=Get-Command $definition[0] -ErrorAction SilentlyContinue|Select-Object -First 1
   if(-not $command){$missing.Add($definition[0]);continue}
