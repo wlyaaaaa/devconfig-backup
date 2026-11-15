@@ -4,6 +4,7 @@ $ErrorActionPreference='Stop';$repo=Split-Path -Parent $PSScriptRoot
 . (Join-Path $repo 'Backup.Common.ps1');. (Join-Path $repo 'Run-History.Common.ps1')
 $parent=[IO.Path]::GetFullPath($env:TEMP).TrimEnd('\');$fixture=Join-Path $parent ('backup-history-'+[guid]::NewGuid().ToString('N'));$children=@();$runtime=(Get-Process -Id $PID).Path
 function Check([bool]$Ok,[string]$Message){if(-not $Ok){throw $Message};Write-Host ('PASS: '+$Message)}
+Check ((Get-BackupRunTaskKind ([pscustomobject]@{schema='wechat.run.v2';targets=@('Drive')}))-eq 'wechat-drive' -and (Get-BackupRunTaskKind ([pscustomobject]@{schema='devconfig.run.v2';tiers=@('Drive')}))-eq 'devconfig-drive' -and (Get-BackupRunTaskKind ([pscustomobject]@{schema='wechat.run.v2';targets=@('Hot')}))-eq 'wechat-local' -and (Get-BackupRunTaskKind ([pscustomobject]@{schema='devconfig.run.v2';tiers=@('Local','Hot')}))-eq 'devconfig-local') 'Single Drive target runs are classified as drive tasks, not local'
 function Start-FixtureChild([string]$Command){$psi=[Diagnostics.ProcessStartInfo]::new();$psi.FileName=$runtime;$psi.Arguments='-NoProfile -NonInteractive -EncodedCommand '+[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($Command));$psi.UseShellExecute=$false;$psi.CreateNoWindow=$true;return [Diagnostics.Process]::Start($psi)}
 $script:HistoryEvents=@();$script:HistoryEventsDenied=$false
 function Get-WinEvent {param($LogName,$FilterXPath,$MaxEvents,$ErrorAction) if($script:HistoryEventsDenied){throw 'synthetic_event_log_access_denied'};return $script:HistoryEvents}

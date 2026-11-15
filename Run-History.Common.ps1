@@ -5,7 +5,7 @@ function Read-BackupRunHistoryLines([string]$Path){
 }
 function Get-BackupRunTaskKind($Run){
  $family=if([string]$Run.schema-like 'wechat.*'){'wechat'}else{'devconfig'}
- $targets=if($family-eq 'wechat'){@($Run.targets)}else{@($Run.tiers)}
+ $targets=@(if($family-eq 'wechat'){$Run.targets}else{$Run.tiers})
  return $family+'-'+$(if($targets.Count-eq 1 -and $targets[0]-eq 'Drive'){'drive'}else{'local'})
 }
 function Get-BackupHistoryDriveDiagnostic($Diagnostic){
