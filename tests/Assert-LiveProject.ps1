@@ -14,7 +14,8 @@ try{
  Check ($v.metrics.sources.value.available-eq 2 -and $v.metrics.sources.value.planned-eq 3 -and $v.metrics.sources.value.optional_absent-eq 1) 'Available sources are distinct from the selected plan'
  Check ($v.metrics.compression.value.percent-eq 50 -and $v.metrics.sqlite.value-eq 1 -and $v.metrics.retained.value-eq 1) 'Aggregation counts verified SQLite copies and distinct packages'
  Check ($null-eq $v.metrics.exclusions.value -and $v.metrics.exclusions.note -and $v.metrics.files.at-ceq $at) 'An old missing field stays unknown and source time is preserved'
- Check ($v.artifacts.Count-eq 2 -and $v.artifacts[0].kind-eq 'copy' -and $v.metrics.wechat_files.value-eq 4 -and ([IO.File]::ReadAllText($live)-notmatch [regex]::Escape($name))) 'Completed artifacts are ordered, with no private package names'
+ Check ($v.artifacts.Count-eq 2 -and $v.artifacts[0].kind-eq 'copy' -and $v.metrics.wechat_files.value-eq 4) 'Completed artifacts are ordered'
+ Check ($null-eq $v.artifacts[0].open -and $v.artifacts[1].open.path-ceq $name) 'Only the real package file gets an open target; the directory stays a summary'
  $manifest.Remove('sqlite_snapshots');Write-BackupJsonAtomic ($zip+'.manifest.json') $manifest;Write-BackupProjectLive $root $wx;$v=Read-BackupJson $live
  Check ($null-eq $v.metrics.sqlite.value -and $v.metrics.sqlite.note) 'Missing SQLite evidence is not a measured zero'
  $manifest.file_count=3;Write-BackupJsonAtomic ($zip+'.manifest.json') $manifest;[IO.File]::Delete($wx);Write-BackupProjectLive $root $wx;$v=Read-BackupJson $live

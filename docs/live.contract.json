@@ -2,9 +2,9 @@
   "v": 1, "id": "devconfig-backup", "name": "配置搬家箱", "about": "这里装两样：开发配置包，和微信原始副本。", "headline": "sources",
   "tasks": ["task-0c85efb5fa8cf695279c0ae7", "task-328521d491c392166c1df6e3", "task-94d5b1f54e0d3fb57803c4cb", "task-29d31f43d4581d4111fc288d"], "skills": [], "bindings_complete": true,
   "sections": [
-    {"id":"config","label":"开发配置包","about":"搬家能带走多少，这箱子有多大？","note":"处可能是文件夹、文件或系统导出，不等于软件个数。日期取包回执，不取包名。","metrics":["sources","files","package_size"]},
-    {"id":"wechat","label":"微信原始副本","about":"我的微信攒了多大？","note":"这是数据库和图片视频等文件的个数，不是消息条数。","metrics":["wechat_size","wechat_files"]},
-    {"id":"more-data","label":"更多数据","about":"好奇：压缩、包内数据库副本、留存版本和代码规模。","note":"完整性检查不等于恢复演练；旧包没有记录的排除策略留空。","metrics":["compression","sqlite","exclusions","retained","docs_files","code_files"]}
+    {"id":"config","label":"开发配置包","about":"搬家能带走多少，这箱子有多大？","note":"处可能是文件夹、文件或系统导出，不等于软件个数。日期取包回执，不取包名。","metrics":["config_completed","sources","files","package_size"]},
+    {"id":"wechat","label":"微信原始副本","about":"我的微信攒了多大？","note":"这是数据库和图片视频等文件的个数，不是消息条数。","metrics":["wechat_completed","wechat_size","wechat_files"]},
+    {"id":"more-data","label":"更多数据","about":"好奇：压缩、包内数据库副本、留存版本和代码规模。","note":"完整性检查不等于恢复演练；旧包未记录的排除策略不是零。产物提供完成摘要，只有真实包文件能在本机打开；微信目录不设打开按钮。","metrics":["compression","sqlite","exclusions","retained","docs_files","code_files"]}
   ],
   "metrics": [
     {"id":"sources","label":"装进箱的配置","source":"devconfig.live","pointer":"/metrics/sources/value","time":"/metrics/sources/at","mode":"live","unit":"","public":"same"},
@@ -14,10 +14,12 @@
     {"id":"wechat_files","label":"微信副本文件数","source":"devconfig.live","pointer":"/metrics/wechat_files/value","time":"/metrics/wechat_files/at","mode":"live","unit":"个","public":"same"},
     {"id":"compression","label":"配置包压小了多少","source":"devconfig.live","pointer":"/metrics/compression/value","time":"/metrics/compression/at","mode":"live","unit":"","public":"same"},
     {"id":"sqlite","label":"包内完整性检查通过的数据库副本","source":"devconfig.live","pointer":"/metrics/sqlite/value","time":"/metrics/sqlite/at","mode":"live","unit":"个","public":"same","note":"各库分别一致，不证明软件已能恢复。"},
-    {"id":"exclusions","label":"包里记录的有意不装项","source":"devconfig.live","pointer":"/metrics/exclusions/value","time":"/metrics/exclusions/at","mode":"live","unit":"处","public":"same","note":"旧包没有这个字段，下一包起才有；不把未记录当成 0。"},
+    {"id":"exclusions","label":"包里记录的有意不装项","source":"devconfig.live","pointer":"/metrics/exclusions/value","time":"/metrics/exclusions/at","mode":"live","unit":"处","public":"same","note":"旧包没有这个字段，下一包起才有；不把未记录当成 0。", "unknown_text": "旧包未记录，下一包才有。"},
     {"id":"retained","label":"本机留着的不同配置包","source":"devconfig.live","pointer":"/metrics/retained/value","time":"/metrics/retained/at","mode":"live","unit":"份","public":"same"},
     {"id":"docs_files","label":"自有文档文件","source":"devconfig.static","pointer":"/metrics/docs_files","mode":"static","unit":"个","public":"same"},
-    {"id":"code_files","label":"自有代码文件（含测试）","source":"devconfig.static","pointer":"/metrics/code_files","mode":"static","unit":"个","public":"same"}
+    {"id":"code_files","label":"自有代码文件（含测试）","source":"devconfig.static","pointer":"/metrics/code_files","mode":"static","unit":"个","public":"same"},
+    {"id": "config_completed","label": "配置包完成于","source": "devconfig.live","pointer": "/metrics/files/at","time": "/metrics/files/at","mode": "live","unit": "","public": "same"},
+    {"id": "wechat_completed","label": "微信副本完成于","source": "devconfig.live","pointer": "/metrics/wechat_files/at","time": "/metrics/wechat_files/at","mode": "live","unit": "","public": "same"}
   ],
   "artifacts": {"source":"devconfig.live","pointer":"/artifacts"},
   "size": {"source":"devconfig.static","pointer":"/size"},

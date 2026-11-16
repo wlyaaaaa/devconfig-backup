@@ -29,14 +29,14 @@ function Write-BackupProjectLive([string]$OutputRoot,[string]$HotReceiptPath='G:
   $metrics.retained=@{value=$packages.Count;at=$at;note='只计存在且长度匹配的完成包；latest 别名和其它副本不重复计数'}
   foreach($r in @($packages|Sort-Object { [DateTimeOffset]$_.completed_utc } -Descending)){
    $excluded=if($r.PSObject.Properties['intentional_exclusions']){[string]@($r.intentional_exclusions).Count}else{'旧包未记录'}
-   $artifacts+=@{at=$r.completed_utc;kind='archive';title=('开发配置包 · {0:N0} 个文件 · {1:N0} MB · 有意不装：{2}' -f $r.file_count,($r.package_bytes/1MB),$excluded);status='completed';public='same';open=@{source='devconfig.packages'}}
+   $artifacts+=@{at=$r.completed_utc;kind='archive';title=('开发配置包 · {0:N0} 个文件 · {1:N0} MB · 有意不装：{2}' -f $r.file_count,($r.package_bytes/1MB),$excluded);status='completed';public='same';open=@{source='devconfig.packages';path=$r.package_name}}
   }
  }catch{$metrics.retained.note='本机包目录或完成回执不可读，不能取得完整库存'}
  try{
   $w=Read-BackupJson $HotReceiptPath -Required
   if($w.schema-cne 'wechat.hot-backup-receipt.v2' -or $w.status-cne 'complete' -or $w.collection_status-cne 'complete' -or $w.verification_status-cne 'sha256_full_tree' -or $w.retention_status-cne 'source_follow_verified'){throw 'live_wechat_receipt_not_verified'}
   $metrics.wechat_size=@{value=$w.bytes;at=$w.completed_utc;note='生产回执的文件合计，未重扫微信或核验云端'};$metrics.wechat_files=@{value=$w.file_count;at=$w.completed_utc;note='文件个数，不是消息条数'}
-  if([IO.Directory]::Exists($w.destination)){$artifacts=@(@{at=$w.completed_utc;kind='copy';title=('微信原始副本 · {0:N0} 个文件 · {1:N2} GB' -f $w.file_count,($w.bytes/1GB));status='completed';public='same';open=@{source='devconfig.wechat'}})+$artifacts}
+  if([IO.Directory]::Exists($w.destination)){$artifacts=@(@{at=$w.completed_utc;kind='copy';title=('微信原始副本摘要 · {0:N0} 个文件 · {1:N2} GB' -f $w.file_count,($w.bytes/1GB));status='completed';public='same'})+$artifacts}
  }catch{$metrics.wechat_size.note='微信完整生产回执不可读或核验状态不全';$metrics.wechat_files.note=$metrics.wechat_size.note}
  Write-BackupJsonAtomic $OutputPath ([ordered]@{v=1;at=$at;scope='已发布的本机配置包和 G 盘微信副本；各文件分别采集，不证明应用已能恢复';metrics=$metrics;artifacts=$artifacts})
 }
