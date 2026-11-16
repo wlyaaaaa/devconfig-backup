@@ -30,6 +30,7 @@ $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Backup.Common.ps1')
 if($UseVss -and -not $Plan -and -not (Test-BackupAdministrator)){Invoke-ProjectElevated (New-ProjectInvocation $PSCommandPath $PSBoundParameters);exit $LASTEXITCODE}
 . (Join-Path $PSScriptRoot 'Run-History.Common.ps1')
+. (Join-Path $PSScriptRoot 'Live.Project.ps1')
 . (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
 $script:GDriveRemoteWasExplicit=$PSBoundParameters.ContainsKey('GDriveRemote')
 $script:SourceCaptureMode=if($UseVss){'vss_crash_consistent'}else{'live_source'}
@@ -251,6 +252,7 @@ try{
     $run.completed_utc=Get-BackupUtc
     try{Write-BackupJsonAtomic $runPath $run}catch{$code=1;$run.status='failed';$run.failure='run_status_publication_failed'}
     try{Write-BackupRunHistory $StateRoot $run final}catch{$code=1;$run.status='failed';$run.failure='run_history_publication_failed'}
+    try{Write-BackupProjectLive (Split-Path -Parent $StateRoot) $script:HotReceiptFile (Join-Path $StateRoot 'live.project.json')}catch{Write-Warning 'live_project_output_failed'}
 }
 if($Json){$run|ConvertTo-Json -Depth 8}else{[pscustomobject]$run|Format-List}
 exit $code

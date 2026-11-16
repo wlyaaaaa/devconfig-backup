@@ -24,6 +24,7 @@ if(-not $OutputRoot){$OutputRoot=$PSScriptRoot}
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'Backup.Common.ps1')
 . (Join-Path $PSScriptRoot 'Run-History.Common.ps1')
+. (Join-Path $PSScriptRoot 'Live.Project.ps1')
 . (Join-Path $PSScriptRoot 'DevConfig.Sources.ps1')
 . (Join-Path $PSScriptRoot 'Initialize-BackupNetwork.ps1')
 $script:GDriveRemoteWasExplicit=$PSBoundParameters.ContainsKey('GDriveRemote')
@@ -228,6 +229,7 @@ try{
  if($container -and [IO.Directory]::Exists($container)){try{Remove-BackupOwnedDirectory $container $StageParent '^run-[a-f0-9]{32}$'}catch{$script:overallExitCode=1;$run.status='failed';$run.failure='backup_staging_cleanup_failed'}}
  $run.completed_utc=Get-BackupUtc;try{Write-BackupJsonAtomic $runPath $run}catch{$script:overallExitCode=1;$run.status='failed';$run.failure='backup_status_publication_failed'}
  try{Write-BackupRunHistory $StateDir $run final}catch{$script:overallExitCode=1;$run.status='failed';$run.failure='run_history_publication_failed'}
+ try{Write-BackupProjectLive $OutputRoot}catch{Write-Warning 'live_project_output_failed'}
 }
 if($Json){$run|ConvertTo-Json -Depth 8}else{[pscustomobject]$run|Format-List}
 exit $script:overallExitCode

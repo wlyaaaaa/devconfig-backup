@@ -7,4 +7,7 @@
 5. 让 AI 做什么：查失败原因，或按 [恢复说明](docs/recovery.md) 核对后恢复；微信内容还要在官方客户端确认。
 
 给 AI 的项目约定见 [AGENTS.md](AGENTS.md)。
+
+实况接入见 [接入单](docs/live.contract.json)。两套备份的原入口在收尾时生成被 Git 排除的 `state/live.project.json`，只读已发布包的清单和生产回执；不增加计划任务。产物入口打开本机备份目录，不提供下载。
+按需更新规模：在本仓库点入 `Backup.Common.ps1`、`Live.Project.ps1` 后运行 `Update-BackupProjectSnapshot $PWD`；静态数内容不变就保留原时刻。读取接入单不会执行备份或更新静态数。
 <!-- 恢复接口兼容说明：确认云端账号授权后，将包内 _manifests\rclone-remote-binding.json 恢复到 E:\Projects\Backups\devconfig-backup\state\rclone-remote-binding.json，只还原非秘密的远端别名选择。H 盘冷备由 PCConfig 的 Invoke-CoreRecoveryMaintenance.ps1 -Mode Cold -Execute -Json 负责，本库不直接写 H。完整步骤见 docs/recovery.md。 -->
