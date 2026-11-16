@@ -15,6 +15,8 @@ try{
  [IO.File]::WriteAllText($sources,"@{HomeFiles=@('setting.txt');RequiredSources=@('home/setting.txt')}")
  $text=@(& $runtime -NoProfile -File (Join-Path $repo 'Backup-DevConfig.ps1') -SourcesFile $sources -ProfileRoot $profile -OutputRoot $output -SkipSystemExport -Tier Local -Json 2>&1)
  if($LASTEXITCODE-ne 0){throw 'relative_test_fixture_backup_failed'}
+ $live=Read-BackupJson (Join-Path $output 'state\live.project.json') -Required
+ if($live.metrics.sources.value.available-ne 1 -or $live.metrics.files.value-ne 1){throw 'devconfig_live_output_not_connected_to_entrypoint'}
  Push-Location $output
  try{
   [Environment]::CurrentDirectory=$env:WINDIR

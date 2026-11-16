@@ -20,13 +20,15 @@ function Set-ReceiptField([string]$Path,[string]$Name,$Value){$r=Read-BackupJson
 try{
  [void][IO.Directory]::CreateDirectory($script:FixtureRoot)
  $ws=Join-Path $script:FixtureRoot 'source';$wh=Join-Path $script:FixtureRoot 'hot';$wr=Join-Path $script:FixtureRoot 'hot-receipt.json'
- $wl=Join-Path $script:FixtureRoot 'local-must-not-exist';$wc=Join-Path $script:FixtureRoot 'cloud';$state=Join-Path $script:FixtureRoot 'state'
+ $wl=Join-Path $script:FixtureRoot 'local-must-not-exist';$wc=Join-Path $script:FixtureRoot 'cloud';$state=Join-Path $script:FixtureRoot 'state-custom'
  $runPath=Join-Path $state 'wechat-drive-last.json';$successPath=Join-Path $state 'wechat-drive-success.json'
  Put (Join-Path $ws 'account\db_storage\fixture.bin') 'verified data';Put (Join-Path $ws 'account\media.bin') 'verified media';Put (Join-Path $wc 'obsolete.bin') 'obsolete'
  $env:RCLONE_CONFIG=Join-Path $script:FixtureRoot 'rclone.conf';Put $env:RCLONE_CONFIG "[fixture-local]`ntype = local`n"
  $hotArgs=@('-Source',$ws,'-HotRoot',$wh,'-HotReceiptPath',$wr,'-StateRoot',$state,'-Target','Hot','-Json')
  $driveArgs=@('-Source',$ws,'-LocalRoot',$wl,'-HotRoot',$wh,'-HotReceiptPath',$wr,'-StateRoot',$state,'-Target','Drive','-GDriveRemote','fixture-local:','-GDriveFolder',$wc.Replace('\','/'),'-Json')
  $r=Run $hotArgs;Check ($r.Exit-eq 0) ('Fixture G generation is produced by the real Hot entrypoint: '+$r.Text)
+ $live=Read-BackupJson (Join-Path $state 'live.project.json') -Required
+ Check ($live.metrics.wechat_files.value-eq 2 -and $live.metrics.wechat_size.value-gt 0) 'The real Hot entrypoint updates live output inside the selected StateRoot'
  $manifest=Read-BackupJson ($wh+'.backup-manifest.json') -Required
 
  # A non-VSS Hot generation is refused by default.
