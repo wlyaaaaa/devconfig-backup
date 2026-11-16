@@ -28,6 +28,7 @@ def run_tests(repo, fixture, powershell):
     codex.mkdir(parents=True)
     source = codex / "state_1.sqlite"
     writer = sqlite3.connect(source)
+    writer.execute("PRAGMA page_size=8192")
     writer.execute("PRAGMA journal_mode=WAL")
     writer.execute("PRAGMA wal_autocheckpoint=0")
     writer.execute("CREATE TABLE data(value, padding)")

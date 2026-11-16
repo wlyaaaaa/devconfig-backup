@@ -70,6 +70,10 @@ def capture(source: Path, target: Path, timeout: float = 120.0, diagnostic=None,
             pass
         set_stage(diagnostic, "target_open")
         with closing(sqlite3.connect(target, timeout=0.25)) as writer:
+            # Retain copied pages for the full integrity check instead of
+            # rereading a large snapshot through SQLite's default 2 MiB cache.
+            writer.execute(f"PRAGMA page_size={reader.execute('PRAGMA page_size').fetchone()[0]}")
+            writer.execute("PRAGMA cache_size=-262144")
             set_stage(diagnostic, "online_backup")
             reader.backup(writer, pages=256, progress=backup_progress, sleep=0.05)
             writer.set_progress_handler(bounded, 1000)
