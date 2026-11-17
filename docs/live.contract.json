@@ -14,7 +14,7 @@
     {"id":"wechat_files","label":"微信副本文件数","source":"devconfig.live","pointer":"/metrics/wechat_files/value","time":"/metrics/wechat_files/at","mode":"live","unit":"个","public":"same"},
     {"id":"compression","label":"配置包压小了多少","source":"devconfig.live","pointer":"/metrics/compression/value","time":"/metrics/compression/at","mode":"live","unit":"","public":"same"},
     {"id":"sqlite","label":"包内完整性检查通过的数据库副本","source":"devconfig.live","pointer":"/metrics/sqlite/value","time":"/metrics/sqlite/at","mode":"live","unit":"个","public":"same","note":"各库分别一致，不证明软件已能恢复。"},
-    {"id":"exclusions","label":"包里记录的有意不装项","source":"devconfig.live","pointer":"/metrics/exclusions/value","time":"/metrics/exclusions/at","mode":"live","unit":"处","public":"same","note":"旧包没有这个字段，下一包起才有；不把未记录当成 0。", "unknown_text": "旧备份包没记这一项，下一个包起才有。"},
+    {"id":"exclusions","label":"包里记录的有意不装项","source":"devconfig.live","pointer":"/metrics/exclusions/value","time":"/metrics/exclusions/at","mode":"live","unit":"处","public":"same","note":"新备份会记下这一项", "unknown_text": "旧备份包没记这一项，下一个包起才有。"},
     {"id":"retained","label":"本机留着的不同配置包","source":"devconfig.live","pointer":"/metrics/retained/value","time":"/metrics/retained/at","mode":"live","unit":"份","public":"same"},
     {"id":"docs_files","label":"自有文档文件","source":"devconfig.static","pointer":"/metrics/docs_files","mode":"static","unit":"个","public":"same"},
     {"id":"code_files","label":"自有代码文件（含测试）","source":"devconfig.static","pointer":"/metrics/code_files","mode":"static","unit":"个","public":"same"},
