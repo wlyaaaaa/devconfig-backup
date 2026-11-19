@@ -141,6 +141,11 @@ def run_tests(repo, fixture, powershell):
         slow = fixture / "slow-progress.sqlite"
         capture.capture(source, slow)
         check(clock[0] > 15 and slow.exists(), "Valid forward progress survives the former 15-second cutoff and long completed I/O steps")
+        steps[:] = [(step * 4.7, sqlite3.SQLITE_OK, 100 - step) for step in range(1, 51)]
+        clock[0] = 0
+        slow_copy = fixture / "beyond-old-host-limit.sqlite"
+        capture.capture(source, slow_copy, timeout=1800)
+        check(clock[0] > 125 and slow_copy.exists(), "An online copy making slow progress passes the former 120-second hard deadline")
         for name, sequence in (
                 ("stalled", [(1, sqlite3.SQLITE_OK, 90), (20, sqlite3.SQLITE_BUSY, 0),
                              (31, sqlite3.SQLITE_OK, 90)]),
@@ -274,10 +279,11 @@ def run_tests(repo, fixture, powershell):
     instrument = '''
 _connect = sqlite3.connect
 _monotonic = time.monotonic
+_capture_timeout = float(sys.argv[sys.argv.index("--timeout") + 1])
 class DeadlineConnection(sqlite3.Connection):
     def set_progress_handler(self, callback, instructions):
         def expired():
-            time.monotonic = lambda: _monotonic() + 150
+            time.monotonic = lambda: _monotonic() + _capture_timeout + 1
             return callback()
         return super().set_progress_handler(expired, instructions)
 def deadline_connect(*args, **kwargs):

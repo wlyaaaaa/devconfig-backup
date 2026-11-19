@@ -86,7 +86,10 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
  $python=Get-BackupExecutable python
  $snapshot=Join-Path $ScratchRoot ('sqlite-'+[guid]::NewGuid().ToString('N')+'.tmp')
  $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$python
- $captureTimeoutSeconds=120
+ # Keep the original host idle bound, with a larger total budget for slow copies
+ # that are still making measurable progress under system load.
+ $captureTimeoutSeconds=1800
+ $idleTimeoutMs=125000
  $start.Arguments='-I -B '+((@($script:DevConfigSQLiteHelper,$Source,$snapshot)|ForEach-Object{'"'+$_+'"'})-join ' ')+' --timeout '+$captureTimeoutSeconds
  $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
  $process=[Diagnostics.Process]::new();$process.StartInfo=$start
@@ -94,35 +97,49 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
  $diagnostic=[ordered]@{stage='process_start';reason='native_error';native_exit=$null;sqlite_error_code=$null;sqlite_error_name=$null;os_error_code=$null;elapsed_ms=0}
  try{
   [void]$process.Start()
-  $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError.ReadToEndAsync()
+  $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError
   $diagnostic.stage='process_wait'
-  if(-not $process.WaitForExit(($captureTimeoutSeconds+5)*1000)){
-   $process.Kill();$process.WaitForExit();$diagnostic.reason='timeout'
-  }else{
-   $diagnostic.stage='helper_reply'
-  }
-  $reply=$stdout.GetAwaiter().GetResult();$stageReply=$stderr.GetAwaiter().GetResult();$code=$process.ExitCode
-  # Keep only numeric progress and fixed stages, even when the parent had to kill
-  # a helper blocked inside one native backup step. Never retain raw stderr.
-  foreach($line in ($stageReply-split '[\r\n]+')){
+  $hardDeadline=($captureTimeoutSeconds+5)*1000
+  $idleDeadline=$idleTimeoutMs
+  $lastStage=$null;$bestRemaining=$null
+  # Drain stdout concurrently and only credit safe, strictly advancing reports.
+  while(($waitMs=[math]::Min($hardDeadline,$idleDeadline)-$clock.ElapsedMilliseconds)-gt 0){
+    $lineRead=$stderr.ReadLineAsync()
+    if(-not $lineRead.Wait([int]$waitMs)){break}
+    $line=$lineRead.GetAwaiter().GetResult()
+    if($null-eq $line){break}
     try{
      $marker=$line|ConvertFrom-Json -ErrorAction Stop
      $keys=@($marker.PSObject.Properties.Name)
      if($keys.Count-eq 2 -and $keys-ccontains 'schema' -and $keys-ccontains 'stage' -and
         $marker.schema-is [string] -and $marker.stage-is [string] -and
         $marker.schema-ceq 'devconfig.sqlite-stage.v1' -and
-        $marker.stage-cin @('source_open','source_read','target_create','target_open','online_backup','standalone_mode','integrity_check') -and $diagnostic.reason-eq 'timeout'){
-      $diagnostic.stage=[string]$marker.stage
+        $marker.stage-cin @('source_open','source_read','target_create','target_open','online_backup','standalone_mode','integrity_check')){
+      if($lastStage-ceq 'standalone_mode' -and $marker.stage-ceq 'integrity_check'){$idleDeadline=$clock.ElapsedMilliseconds+$idleTimeoutMs}
+      $lastStage=[string]$marker.stage
      }
      $progressKeys=@('step_count','sqlite_status','remaining_pages','total_pages','elapsed_ms')
      if($marker.schema-ceq 'devconfig.sqlite-progress.v1' -and $keys.Count-eq 6 -and
         -not @($keys|Where-Object{$_-cnotin @('schema')+$progressKeys}).Count){
       $progress=[ordered]@{};$safe=$true
       foreach($key in $progressKeys){$value=$marker.$key;if(($value-isnot [int] -and $value-isnot [long]) -or $value-lt 0){$safe=$false;break};$progress[$key]=[long]$value}
-      if($safe -and $progress.step_count-gt 0 -and $progress.remaining_pages-le $progress.total_pages){$diagnostic.backup_progress=$progress}
+      if($safe -and $progress.step_count-gt 0 -and $progress.remaining_pages-le $progress.total_pages){
+       $diagnostic.backup_progress=$progress
+       if($lastStage-ceq 'online_backup' -and $progress.sqlite_status-in @(0,101) -and
+          ($bestRemaining-eq $null -or $progress.remaining_pages-lt $bestRemaining)){
+        $bestRemaining=$progress.remaining_pages
+        $idleDeadline=$clock.ElapsedMilliseconds+$idleTimeoutMs
+       }
+      }
      }
     }catch{}
   }
+  $waitMs=[math]::Max(0,[math]::Min($hardDeadline,$idleDeadline)-$clock.ElapsedMilliseconds)
+  if(-not $process.WaitForExit([int]$waitMs)){
+   $diagnostic.reason='timeout';if($lastStage){$diagnostic.stage=$lastStage}
+   $process.Kill();$process.WaitForExit()
+  }else{$diagnostic.stage='helper_reply'}
+  $reply=$stdout.GetAwaiter().GetResult();$code=$process.ExitCode
   if($diagnostic.reason-ne 'timeout'){
    try{
     $detail=$reply|ConvertFrom-Json
