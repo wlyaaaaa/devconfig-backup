@@ -71,7 +71,7 @@ function Get-BackupStatusSnapshot {
  return [pscustomobject][ordered]@{schema='devconfig.backup-status.v2';observed_utc=(Get-BackupUtc);write_mode=$(if($LiveDrive -and -not $NoDrive){'metadata_query_may_refresh_oauth'}else{'zero_write'});status=$health;local=$local;hot=$hot;wechat_hot=[pscustomobject]$wechat;drive=[pscustomobject]$drive;last_attempts=$attempts;run_history_status=$historyStatus;file_warnings=$warnings.ToArray();scheduled_tasks=$tasks;application_recovery='not_tested';log_payloads='not_read'}
 }
 function Format-BackupStatusForHuman($Snapshot){
- $labels=@{current='当前有效';stale='已过期';unknown='尚未验证';legacy_or_unverified='旧版或未验证';complete='完成';failed='失败';running='进行中';not_requested='本次未请求';not_contacted='未联网检查';attention_required='需要处理';receipts_current='成功回执均在有效期内';complete_with_skipped_files='完成，但跳过了被占用的文件';receipts_current_with_skipped_files='成功回执均在有效期内，但最近一次跳过了被占用的文件';Ready='就绪';Disabled='已禁用';passed='通过';refused='未通过，未上传';pending='未检查';not_uploaded='未上传'}
+ $labels=@{current='当前有效';stale='已过期';unknown='尚未验证';legacy_or_unverified='旧版或未验证';complete='完成';failed='失败';running='进行中';not_requested='本次未请求';not_contacted='未联网检查';attention_required='需要处理';receipts_current='成功回执均在有效期内';complete_with_skipped_files='完成，有文件跳过';receipts_current_with_skipped_files='成功回执均在有效期内，最近一次有文件跳过';Ready='就绪';Disabled='已禁用';passed='通过';refused='未通过，未上传';pending='未检查';not_uploaded='未上传'}
  function Label([string]$Value){if($labels.ContainsKey($Value)){return $labels[$Value]};return $Value}
  function FormatTime($Value){
   if($null-eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)){return '未提供'}
@@ -85,7 +85,7 @@ function Format-BackupStatusForHuman($Snapshot){
    return $time.ToOffset([TimeSpan]::FromHours(8)).ToString('yyyy-MM-dd HH:mm:ss',[Globalization.CultureInfo]::InvariantCulture)+' 北京时间'
   }catch{return '时间不明'}
  }
- $labels.receipts_current_with_file_warnings='成功回执均在有效期内，但有文件警告';$labels.interrupted='进程中途结束'
+ $labels.receipts_current_with_file_warnings='成功回执均在有效期内，但有文件警告';$labels.insufficient_destination_space='目标盘空间不足';$labels.interrupted='进程中途结束'
  $lines=[Collections.Generic.List[string]]::new();$lines.Add('DevConfig / 微信备份状态');$lines.Add('检查时间：'+(FormatTime $Snapshot.observed_utc));$lines.Add('总体：'+(Label $Snapshot.status));$lines.Add('')
  if($Snapshot.run_history_status-eq 'unreadable'){$lines.Add('运行历史不可读，历史失败与未收尾运行尚未核实。')}
  foreach($entry in @(@('本地配置',$Snapshot.local),@('G 盘配置',$Snapshot.hot),@('G 盘微信',$Snapshot.wechat_hot))){
@@ -94,7 +94,7 @@ function Format-BackupStatusForHuman($Snapshot){
  }
  $lines.Add('');$lines.Add('最近尝试（失败不会覆盖上一个成功版本）：');foreach($attempt in $Snapshot.last_attempts){$lines.Add(('  {0}：{1}  {2}' -f $attempt.schema,(Label $attempt.status),$attempt.failure));if($attempt.failure_path){$lines.Add('    出错文件：'+$attempt.failure_path)};if($attempt.upload_source){$u=$attempt.upload_source;$lines.Add(('    上传来源：G 盘热备 {0}；核验门：{1}{2}' -f (FormatTime $u.hot_completed_utc),(Label ([string]$u.gate)),$(if($u.refusal){'；原因：'+$u.refusal}else{''})))};foreach($skip in @($attempt.skipped_files|Where-Object{$_})){$lines.Add(('    已跳过：{0}（{1}）' -f $skip.relative_path,$skip.reason))}}
  foreach($attempt in $Snapshot.last_attempts){if($attempt.last_failure){$f=$attempt.last_failure;$time=(FormatTime $f.occurred_utc)+$(if($f.time_basis-eq 'started_utc_no_final'){'（开始时间）'}else{''});$lines.Add(('  {0} 最近失败：{1}；{2}；任务返回 {3}' -f $attempt.task_kind,$time,$f.failure,$f.task_scheduler_exit))};foreach($pending in @($attempt.unfinished_runs|Where-Object{$_})){$lines.Add(('  {0} 未收尾：{1}；{2}；任务返回 {3}' -f $attempt.task_kind,(FormatTime $pending.started_utc),(Label $pending.status),$pending.task_scheduler_exit))}}
- if(@($Snapshot.file_warnings).Count){$lines.Add('');$lines.Add('文件警告（其余文件已完成，下次照常重试）：');foreach($warning in $Snapshot.file_warnings){$lines.Add(('  {0}：{1}；Windows 错误 {2}；阶段 {3}' -f $warning.relative_path,$warning.reason,$warning.error_code,$warning.stage))}}
+ if(@($Snapshot.file_warnings).Count){$lines.Add('');$lines.Add('文件警告（下次照常重试）：');foreach($warning in $Snapshot.file_warnings){$lines.Add(('  {0}：{1}；Windows 错误 {2}；阶段 {3}' -f $warning.relative_path,(Label $warning.reason),$warning.error_code,$warning.stage))}}
  $lines.Add('');$lines.Add('计划任务：');foreach($task in $Snapshot.scheduled_tasks){$lines.Add(('  {0}：{1}；上次返回 {2}；下次 {3}' -f $task.name,(Label $task.state),$task.last_exit,(FormatTime $task.next_run)))}
  $lines.Add('');$lines.Add('云端：'+(Label $Snapshot.drive.status));$lines.Add('文件校验、复制成功与官方客户端恢复是不同结果；此页不证明应用已经恢复。')
  $lines.Add('界面每分钟刷新。关闭窗口不停止备份；启停任务请使用“管理计划任务”。')
