@@ -3,14 +3,12 @@
   注册 DevConfig + WeChat 备份的计划任务（幂等，可重复运行）。
 .DESCRIPTION
   - DevConfigBackup-Local        : 每天北京时间 12:05 + 登录后20分钟 -> -Tier Local,Hot（本地包+G盘热备）
-  - DevConfigBackup-Drive-Daily  : 每天北京时间 13:00               -> -Tier Drive（Google Drive）
   - WeChatBackup-Hot-Daily       : 每天北京时间 09:30               -> -Target Hot（G盘热备）
-  - WeChatBackup-Drive-Weekly    : 每天北京时间 12:00 检查          -> -Target Drive（保留原任务名）
   默认值按北京时间换算成本机钟点；触发器带时区偏移，之后本机改时区北京时间不变。显式传参仍为本机钟点。
-  说明: 本地/G 热备与 Drive 拆成独立任务，离线不会阻断本地保护，失败后下次定时自然重跑。
-  H盘是默认锁定的人工冷备，不注册自动写入任务；Drive 依靠 rclone copy 自动跳过已存在文件。
-  DevConfig/Drive/WeChat Drive 保持当前用户 Limited；WeChat Hot 使用同一用户、Interactive、Highest，以便创建 Windows VSS 快照。实际注册/提权仍由 PCConfig 负责。
-  可用 -TaskName 只收敛一个已登记任务；省略时保持四项任务的默认安装语义。
+  本地和 G 热备离线运行，失败后下次定时自然重跑。
+  H 盘由 PCConfig 冷备任务管理。
+  DevConfig 保持当前用户 Limited；WeChat Hot 使用同一用户、Interactive、Highest，以便创建 Windows VSS 快照。实际注册/提权仍由 PCConfig 负责。
+  可用 -TaskName 只收敛一个已登记任务；省略时保持两项任务的默认安装语义。
 .NOTES
   计划任务动作固定走 wscript.exe + VBS hidden launcher，避免 PowerShell 窗口一闪而过。
   VBS 优先使用 PowerShell 7，缺少时回退 Windows PowerShell 5.1。
@@ -19,15 +17,12 @@
 [CmdletBinding()]
 param(
     [string] $DailyAt  = '',
-    [string] $DriveAt  = '',
     [string] $WeChatHotAt = '',
-    [Alias('WeChatDriveWeeklyAt')][string] $WeChatDriveAt = '',
-    [ValidateSet('DevConfigBackup-Local','DevConfigBackup-Drive-Daily','WeChatBackup-Hot-Daily','WeChatBackup-Drive-Weekly')]
+    [ValidateSet('DevConfigBackup-Local','WeChatBackup-Hot-Daily')]
     [string[]] $TaskName = @()
 )
 
 $ErrorActionPreference = 'Stop'
-$weChatDriveAtWasExplicit = -not [string]::IsNullOrWhiteSpace($WeChatDriveAt)
 function Convert-BeijingTimeToLocal([string] $At) {
     $culture = [Globalization.CultureInfo]::InvariantCulture
     $today = [DateTime]::Today.ToString('yyyy-MM-dd', $culture)
@@ -35,9 +30,7 @@ function Convert-BeijingTimeToLocal([string] $At) {
     return [TimeZoneInfo]::ConvertTime($beijing, [TimeZoneInfo]::Local).ToString('HH:mm', $culture)
 }
 if ([string]::IsNullOrEmpty($DailyAt)) { $DailyAt = Convert-BeijingTimeToLocal '12:05' }
-if ([string]::IsNullOrEmpty($DriveAt)) { $DriveAt = Convert-BeijingTimeToLocal '13:00' }
 if ([string]::IsNullOrEmpty($WeChatHotAt)) { $WeChatHotAt = Convert-BeijingTimeToLocal '09:30' }
-if ([string]::IsNullOrEmpty($WeChatDriveAt)) { $WeChatDriveAt = Convert-BeijingTimeToLocal '12:00' }
 
 . (Join-Path $PSScriptRoot 'ScheduledTask-Registration.Common.ps1')
 $devScript = Join-Path $PSScriptRoot 'Backup-DevConfig.ps1'
@@ -64,22 +57,10 @@ $sLocalHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBat
     -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 10)
 
-# Drive：仅网络可用时启动；代理或远端失败后下次定时自然重跑。
-# 保留现有 RestartCount 设置，不把它视为业务失败的补跑承诺。
-$sDrive = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
-    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 15)
-
 $sWeChatHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 15)
-
-$sWeChatDrive = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfNetworkAvailable -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 4) `
-    -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 30)
 
 # ① 本地 + G 热备：默认每天北京时间12:05 + 登录后20分钟（错过窗口时补一份；不走海外流量）
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
@@ -95,28 +76,12 @@ $taskDefinitions = @(
         Description = '配置备份：本地包+G盘热备（每天/登录·零流量·失败后下次定时自然重跑）'
     },
     [pscustomobject]@{
-        Name = 'DevConfigBackup-Drive-Daily'
-        Triggers = @((New-ScheduledTaskTrigger -Daily -At $DriveAt))
-        Action = New-Action $devWrapper 'Drive'
-        Principal = $principal
-        Settings = $sDrive
-        Description = '配置备份：Drive增量（每天·有网才跑·失败后下次定时自然重跑）'
-    },
-    [pscustomobject]@{
         Name = 'WeChatBackup-Hot-Daily'
         Triggers = @((New-ScheduledTaskTrigger -Daily -At $WeChatHotAt))
         Action = New-Action $wxWrapper 'Hot'
         Principal = $weChatHotPrincipal
         Settings = $sWeChatHot
         Description = '微信聊天记录：每日增量到G盘热备（失败后下次定时自然重跑）'
-    },
-    [pscustomobject]@{
-        Name = 'WeChatBackup-Drive-Weekly'
-        Triggers = @((New-ScheduledTaskTrigger -Daily -At $WeChatDriveAt))
-        Action = New-Action $wxWrapper 'Drive'
-        Principal = $principal
-        Settings = $sWeChatDrive
-        Description = '微信聊天记录：每日检查Drive，当前版本成功不足7天则跳过；失败后下次定时自然重跑'
     }
 )
 
@@ -180,14 +145,7 @@ if ($allowSubset) {
             }
             # A selected existing task keeps its live timing/settings preimage;
             # the new Action and Principal still go through the normal transaction.
-            if($definition.Name -eq 'WeChatBackup-Drive-Weekly'){
-                if($weChatDriveAtWasExplicit){
-                    $definition.Triggers = @((New-ScheduledTaskTrigger -Daily -At $WeChatDriveAt))
-                }else{
-                    $at=([DateTimeOffset]::Parse([string]$lookup.Task.Triggers[0].StartBoundary)).ToLocalTime().ToString('HH:mm:ss')
-                    $definition.Triggers = @((New-ScheduledTaskTrigger -Daily -At $at))
-                }
-            }else{$definition.Triggers = @($lookup.Task.Triggers)}
+            $definition.Triggers = @($lookup.Task.Triggers)
             $definition.Settings = $lookup.Task.Settings
         }
     }

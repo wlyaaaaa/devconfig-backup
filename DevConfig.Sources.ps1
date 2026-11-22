@@ -156,12 +156,15 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
  $diagnostic.native_exit=$code
  if($diagnostic.elapsed_ms-eq 0){$diagnostic.elapsed_ms=$clock.ElapsedMilliseconds}
  if($code-ne 0 -or -not $valid){
+  if($diagnostic.sqlite_error_code-eq 13 -or $diagnostic.os_error_code-in @(28,39,112)){[IO.File]::Delete($snapshot)}
   $failure=[InvalidOperationException]::new('backup_sqlite_capture_failed')
   $failure.Data['backup_sqlite_diagnostic']=$diagnostic;$failure.Data['backup_sqlite_error_code']=$diagnostic.sqlite_error_code;$failure.Data['backup_sqlite_reason']=$diagnostic.reason
   throw $failure
  }
- $hash=Get-BackupStableFileHash $snapshot;Copy-BackupFileVerified $snapshot $Destination $hash
- return $hash
+ try{
+  $hash=Get-BackupStableFileHash $snapshot;Copy-BackupFileVerified $snapshot $Destination $hash
+  return $hash
+ }finally{[IO.File]::Delete($snapshot)}
 }
 function Test-DevConfigSQLiteSidecar([string]$Path,$Snapshots){
  foreach($snapshot in @($Snapshots)){foreach($suffix in @('-wal','-shm','-journal')){if($Path-ieq ($snapshot.relative_path+$suffix)){return $true}}};return $false
@@ -179,6 +182,7 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
  foreach($file in @($Inventory.files)){
   # The base sorts before its sidecars. Exclude them only after its online backup succeeded.
   if(Test-DevConfigSQLiteSidecar $file.relative_path $snapshots){continue}
+  if(Test-BackupWarningPath $file.relative_path $warnings){continue}
   $sqlite=$file.relative_path-in @($Inventory.sqlite_paths)
   $signature=if($sqlite){Get-DevConfigSQLiteSourceSignature $Inventory $file.relative_path}else{$null}
   $target=Join-Path $Destination $file.relative_path
@@ -186,6 +190,7 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
    $stage='source_read'
    try{
     $before=Get-Item -LiteralPath $file.full_path -Force -ErrorAction Stop
+    $stage='destination_write';Assert-BackupBytesFit $target $before.Length
     if($sqlite){
      $stage='sqlite_backup';$hash=Copy-DevConfigSQLiteDatabase $file.full_path $target ([IO.Path]::GetDirectoryName($Destination))
      [IO.File]::SetLastWriteTimeUtc($target,$before.LastWriteTimeUtc)
@@ -206,6 +211,12 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
     $_.Exception.Data['backup_source_path']=$file.full_path;$_.Exception.Data['backup_source_relative_path']=$file.relative_path
     $copyStage=[string]$_.Exception.Data['backup_file_stage'];if($copyStage){$stage=$copyStage}
     $warning=Get-BackupFileWarning $_ $file.relative_path $stage -AllowSourceDisappeared:(-not $stage.StartsWith('destination_'))
+    if(-not $warning -and $stage-in @('destination_write','sqlite_backup')){
+     $warning=Get-BackupSpaceWarning $_ $file.relative_path $stage
+     if($warning -and $sqlite){foreach($suffix in '-wal','-shm','-journal'){
+      Add-BackupFileWarning $warnings ([pscustomobject]@{relative_path=($file.relative_path+$suffix);reason=$warning.reason;error_code=$warning.error_code;stage=$stage})
+     }}
+    }
     if(-not $warning -and $stage.StartsWith('destination_')){$warning=Get-BackupDestinationWarning $_ ([string]$_.Exception.Data['backup_destination_path']) $file.relative_path $stage $since}
     if($warning){Add-BackupFileWarning $warnings $warning;break}
     $reason=Get-BackupUnreadableReason $_.Exception

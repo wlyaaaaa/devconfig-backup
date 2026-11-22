@@ -2,9 +2,7 @@ Set-StrictMode -Version 2.0
 
 $script:BackupScheduledTaskNames = @(
     'DevConfigBackup-Local',
-    'DevConfigBackup-Drive-Daily',
-    'WeChatBackup-Hot-Daily',
-    'WeChatBackup-Drive-Weekly'
+    'WeChatBackup-Hot-Daily'
 )
 
 function ConvertTo-BackupScheduledTaskValue {

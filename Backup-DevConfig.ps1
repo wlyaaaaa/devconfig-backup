@@ -11,7 +11,7 @@ param(
  [string[]]$Tier=@('Local'),[switch]$IncludeHistory,[switch]$Force,
  [string]$HotRoot='G:\80_Backup\DevConfig',[string]$GDriveRemote='gdrive:',
  [string]$GDriveFolder="Backups/$env:COMPUTERNAME",[string]$BwLimit='4M',
- [ValidateRange(1,365)][int]$KeepLocal=7,[ValidateRange(1,365)][int]$KeepHot=7,[ValidateRange(1,365)][int]$KeepDrive=3,
+ [ValidateRange(1,365)][int]$KeepLocal=2,[ValidateRange(1,365)][int]$KeepHot=2,[ValidateRange(1,365)][int]$KeepDrive=3,
  [switch]$Plan,[switch]$Json,[string]$ProfileRoot=$env:USERPROFILE,
  [string]$SourcesFile='',[string]$OutputRoot='',
  [string]$SevenZipPath='E:\Scoop\shims\7z.exe',[switch]$SkipSystemExport,
@@ -167,6 +167,7 @@ function New-DevConfigCandidate([string]$Container){
  if($zipExit-ne 0 -or -not [IO.File]::Exists($zip)){
   $script:run.pack_native_exit=$zipExit;$script:run.pack_output_lines=$zipOutput.Count
   $script:run.pack_diagnostic=ConvertTo-RcloneSafeDiagnostic -Output $zipOutput
+  if($zipOutput -match '(?i)not enough (?:disk )?space|no space left|disk is full|磁盘空间不足|没有足够的磁盘空间'){throw [ComponentModel.Win32Exception]::new(112)}
   throw 'backup_pack_failed'
  }
  & $zipExe t -bso0 -bsp0 -- $zip *> $null;if($LASTEXITCODE-ne 0){throw 'backup_archive_test_failed'}
@@ -206,7 +207,13 @@ try{
  $pin=[IO.File]::Open($pack.Zip,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
  # Serialize collection, publication and retention through the same output lease.
  Write-BackupJsonAtomic $runPath $run
- if($Tier-contains 'Hot'){$run.hot='running';Write-BackupJsonAtomic $runPath $run;try{Push-Hot $pack;$run.hot='complete'}catch{$run.hot='failed';$run.failure=Get-BackupFailureCode $_;$script:overallExitCode=1}}
+ if($Tier-contains 'Hot'){
+  $run.hot='running';Write-BackupJsonAtomic $runPath $run
+  try{Push-Hot $pack;$run.hot='complete'}catch{
+   $warning=Get-BackupSpaceWarning $_ $pack.Name 'hot_publish'
+   if($warning){$run.hot='retained_previous';$run.file_warnings+=@($warning)}else{$run.hot='failed';$run.failure=Get-BackupFailureCode $_;$script:overallExitCode=1}
+  }
+ }
  if($Tier-contains 'Drive'){
   $run.drive='running';Write-BackupJsonAtomic $runPath $run
   try{Push-Drive $pack;$run.drive='complete'}catch{
@@ -216,14 +223,20 @@ try{
   }
  }
  # Skipped unreadable files keep the task successful but are never reported as plain complete.
- $run.status=if($script:overallExitCode-ne 0){'failed'}elseif($run.skipped_file_count-gt 0){'complete_with_skipped_files'}else{'complete'}
+ $run.status=if($script:overallExitCode-ne 0){'failed'}elseif($run.skipped_file_count-gt 0 -or $run.file_warnings.reason-contains 'insufficient_destination_space'){'complete_with_skipped_files'}else{'complete'}
 }catch{
+ $warning=Get-BackupSpaceWarning $_ $(if($pack){$pack.Name}else{'devconfig.zip'}) 'local_publish'
+ if($warning){
+  $run.status='complete_with_skipped_files';$run.file_warnings+=@($warning)
+  foreach($phase in @('collection','package','retention')){if($run[$phase]-eq 'running'){$run[$phase]='retained_previous'}}
+ }else{
  $script:overallExitCode=1;$run.status='failed';$run.failure=Get-BackupFailureCode $_;$run.failure_type=$_.Exception.GetType().Name
  $run.failure_stage=[string]$_.Exception.Data['backup_stage']
  $run.failure_site=@($_.ScriptStackTrace-split "`n")[0]
  $sqliteDiagnostic=$_.Exception.Data['backup_sqlite_diagnostic'];if($sqliteDiagnostic){$run.sqlite_diagnostic=$sqliteDiagnostic}
  try{$run.failure_path=Get-BackupFailureSourcePath $_ @(@('profile',$ProfileRoot),@('output',$OutputRoot));$run.failure_io_reason=Get-BackupUnreadableReason $_.Exception}catch{$run.failure_path=$null}
  foreach($phase in @('collection','package','hot','drive','retention')){if($run[$phase]-eq 'running'){$run[$phase]='failed'}}
+ }
 }finally{
  if($pin){$pin.Dispose()};if($outLease){$outLease.Dispose()}
  if($container -and [IO.Directory]::Exists($container)){try{Remove-BackupOwnedDirectory $container $StageParent '^run-[a-f0-9]{32}$'}catch{$script:overallExitCode=1;$run.status='failed';$run.failure='backup_staging_cleanup_failed'}}

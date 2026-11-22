@@ -83,11 +83,11 @@ Defender 动作编号 2/3 对应隔离/移除，依据 [Microsoft MPTHREAT_ACTIO
 
 ## 任务、网络和 H 冷备
 
-四个正式任务由 `Setup-ScheduledTasks.ps1` 的事务式注册流程管理：精确名称、原定义前像、逐项回读和失败回滚。隐藏启动器优先 PowerShell 7，缺失才回退 5.1，并传递实际业务退出码。本地/G 与 Drive 分离，网络不可用不阻断本地保护；实际时间、启用状态及下次执行以 Task Scheduler 为准。
+`Setup-ScheduledTasks.ps1` 只注册开发配置本地/G 热备和微信 G 热备。隐藏启动器优先 PowerShell 7，缺失才回退 5.1，并传递实际业务退出码。实际时间、启用状态及下次执行以 Windows 任务计划程序为准。两项 Drive 定时上传已停用，脚本里的手动上传入口仍可按需运行。
 
-DevConfig 的两项隐藏任务在同一输出锁上串行执行：Local/Hot 最多等待 60 分钟，Drive 最多等待 120 分钟，分别在现有 2/3 小时任务总限内给业务保留至少 60 分钟。拿到锁以后才重新采集或重新读取并核验当前包；只重试真实共享/锁冲突，等满仍以 `backup_resource_wait_timeout` 失败，权限、路径及其他 I/O 错误立即失败。手动直接入口默认等待 0 秒，保持忙时拒绝；显式 `-ResourceLockWaitSeconds` 可选择有界等待，微信及其他锁调用不改变默认拒绝策略。
+DevConfig 隐藏入口持同一输出锁。Local/Hot 最多等待 60 分钟，拿到锁以后才重新采集；只重试真实共享或锁冲突，等满以 `backup_resource_wait_timeout` 失败。手动直接入口默认等待 0 秒，可用 `-ResourceLockWaitSeconds` 指定等待时间。
 
-微信 Drive 保留 `WeChatBackup-Drive-Weekly` 名称，改为每天检查：先持有 G 锁恢复遗留事务，再验证当前热备；同一范围、目录和清单的云端成功不足 7 天时记为 `skipped_current`，不刷新成功时间，其余情况按现有流程上传。单次失败不再拖一周。四个任务的业务失败都由下次定时自然重跑，任务的 `RestartCount` 不作为业务补跑承诺。
+开发配置在本机和 G 各留两个日期包。`latest.zip` 是最新日期包的硬链接（两个文件名指向同一份数据）。开发配置和微信遇到备份盘放不下的文件，跳过并在运行回执的 `file_warnings` 记录路径，保留已备份的版本。
 
 微信 Hot 仅在创建卷影返回 7、9、10、12 时重试，总共最多 3 次，间隔依次为 120 秒、300 秒；其他返回值及返回 0 但无 ShadowID 立即失败。重试发生在获取 G 锁之前；用尽仍失败，不回退读取实时源。Create 成功后的写日志、读回失败不重试，仍按既有流程清理本任务卷影。Hot 成功回执、`wechat-local-last.json` 运行记录及 `run-history.jsonl` 最终行以 `source_snapshot.create_attempts` 记录总次数、`source_snapshot.create_failed_codes` 记录成功前失败的数字返回值（首次成功为 `[]`）；用尽失败时记录全部失败值，`failure` 保留最后返回值及次数，例如 `backup_vss_create_failed:10_attempts_3`。Drive 不创建卷影，回执不写这些字段；旧回执缺字段仍可消费。
 

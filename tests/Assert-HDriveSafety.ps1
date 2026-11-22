@@ -12,14 +12,13 @@ foreach($entry in @(@('Backup-DevConfig.ps1','-Tier'),@('Backup-WeChat.ps1','-Ta
  Check ($code-ne 0 -and $output-match 'invalid_backup_(tier|target)') 'Retired Usb target is rejected before any IO'
 }
 $setup=Get-Content (Join-Path $RepoRoot 'Setup-ScheduledTasks.ps1') -Raw
-foreach($task in @('DevConfigBackup-Local','DevConfigBackup-Drive-Daily','WeChatBackup-Hot-Daily','WeChatBackup-Drive-Weekly')){Check ($setup.Contains($task)) ('Independent task remains: '+$task)}
-# Evaluate only the four settings commands, never the registration entrypoint.
+foreach($task in @('DevConfigBackup-Local','WeChatBackup-Hot-Daily')){Check ($setup.Contains($task)) ('Independent task remains: '+$task)}
+# Evaluate task settings without running registration.
 $tokens=$null;$parseErrors=$null
 $setupAst=[Management.Automation.Language.Parser]::ParseInput($setup,[ref]$tokens,[ref]$parseErrors)
 Check (@($parseErrors).Count-eq 0) 'Scheduled task setup parses before settings contract checks'
 foreach($contract in @(
- @('sLocalHot',$false,'PT10M','PT2H'),@('sDrive',$true,'PT15M','PT3H'),
- @('sWeChatHot',$false,'PT15M','PT3H'),@('sWeChatDrive',$true,'PT30M','PT4H')
+ @('sLocalHot','PT10M','PT2H'),@('sWeChatHot','PT15M','PT3H')
 )){
  $name=[string]$contract[0]
  $assignments=@($setupAst.FindAll({param($node)$node-is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left-is [Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.UserPath-ceq $name},$false))
@@ -28,9 +27,9 @@ foreach($contract in @(
  $settingsCommands=@($commands|Where-Object{$_.GetCommandName()-ceq 'New-ScheduledTaskSettingsSet'})
  Check ($settingsCommands.Count-eq 1 -and @($commands|Where-Object{$_.GetCommandName()-notin @('New-ScheduledTaskSettingsSet','New-TimeSpan')}).Count-eq 0) ('Settings are created without task registration: '+$name)
  $settings=& ([scriptblock]::Create($settingsCommands[0].Extent.Text))
- Check ($settings.RunOnlyIfNetworkAvailable-eq [bool]$contract[1]) ('Network availability matches local or Drive purpose: '+$name)
- Check ($settings.RestartCount-eq 3 -and $settings.RestartInterval-ceq $contract[2]) ('Existing scheduler restart settings are preserved without promising business retries: '+$name)
- Check ($settings.MultipleInstances-eq 2 -and $settings.StartWhenAvailable -and $settings.ExecutionTimeLimit-ceq $contract[3]) ('IgnoreNew concurrency, missed-run recovery and execution limit remain: '+$name)
+ Check (-not $settings.RunOnlyIfNetworkAvailable) ('Local backup runs without a network connection: '+$name)
+ Check ($settings.RestartCount-eq 3 -and $settings.RestartInterval-ceq $contract[1]) ('Existing scheduler restart settings are preserved without promising business retries: '+$name)
+ Check ($settings.MultipleInstances-eq 2 -and $settings.StartWhenAvailable -and $settings.ExecutionTimeLimit-ceq $contract[2]) ('IgnoreNew concurrency, missed-run recovery and execution limit remain: '+$name)
  Check (-not $settings.DisallowStartIfOnBatteries -and -not $settings.StopIfGoingOnBatteries) ('Battery power does not block or stop backup: '+$name)
 }
 foreach($name in @('Backup-DevConfig-Hidden.vbs','Backup-WeChat-Hidden.vbs')){$t=Get-Content (Join-Path $RepoRoot $name) -Raw;Check ($t-match 'WScript.Quit exitCode' -and $t-match 'shell.Run\(command, 0, True\)') 'Hidden launcher preserves actual exit code'}

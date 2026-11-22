@@ -119,6 +119,25 @@ function Test-BackupRelativePathExcluded([string]$Path,[string[]]$Patterns=@()){
  while($candidate){if(Test-BackupNameExcluded $candidate $Patterns){return $true};$index=$candidate.LastIndexOf('/');if($index-lt 0){break};$candidate=$candidate.Substring(0,$index)};return $false
 }
 function Get-BackupEntryAttributes([string]$Path){return [IO.File]::GetAttributes($Path)}
+function Get-BackupAvailableBytes([string]$Path){
+ return [IO.DriveInfo]::new([IO.Path]::GetPathRoot($Path)).AvailableFreeSpace
+}
+function Assert-BackupBytesFit([string]$Path,[long]$Bytes,[long]$Reserve=16MB){
+ if($Bytes -gt ((Get-BackupAvailableBytes $Path)-$Reserve)){throw [ComponentModel.Win32Exception]::new(112)}
+}
+function Get-BackupSpaceWarning($ErrorRecord,[string]$RelativePath,[string]$Stage){
+ $e=$ErrorRecord.Exception
+ while($e){
+  $code=$e.HResult-band 0xFFFF
+  $disk=($e-is [ComponentModel.Win32Exception] -and $e.NativeErrorCode-in @(39,112)) -or ($code-in @(39,112) -and $e.HResult-eq (-2147024896+$code))
+  $sqliteDiagnostic=$e.Data['backup_sqlite_diagnostic']
+  $sqliteFull=$e.Data['backup_sqlite_error_code']-eq 13 -or ($sqliteDiagnostic -and $sqliteDiagnostic.os_error_code-in @(28,39,112))
+  if($disk -or $sqliteFull){
+   if($e-is [ComponentModel.Win32Exception]){$code=$e.NativeErrorCode}elseif(-not $disk){$code=13}
+   return [pscustomobject]@{relative_path=$RelativePath.Replace('\','/');reason='insufficient_destination_space';error_code=$code;stage=$Stage}
+  };$e=$e.InnerException
+ }
+}
 function Get-BackupFileWarning {
  param($ErrorRecord,[string]$RelativePath,[string]$Stage,[switch]$AllowSourceDisappeared)
  $e=if($ErrorRecord-is [Exception]){$ErrorRecord}else{$ErrorRecord.Exception};$missing=$false
@@ -201,10 +220,11 @@ function Get-BackupStableFileHash([string]$Path){
  if($before.Length-ne $after.Length -or $before.LastWriteTimeUtc.Ticks-ne $after.LastWriteTimeUtc.Ticks){throw 'backup_source_changed_during_hash'};return $hash
 }
 function Get-BackupTreeInventory {
- param([string]$Root,[string[]]$ExcludeDirs=@(),[string[]]$ExcludeFiles=@(),[switch]$Hash,[switch]$SkipReparsePoints,[string]$RelativePrefix='',[string[]]$ExcludeRelativePaths=@(),$FileWarnings=$null,[switch]$AllowSourceDisappeared,$IgnoreFileWarnings=@(),$DestinationSince=$null)
+ param([string]$Root,[string[]]$ExcludeDirs=@(),[string[]]$ExcludeFiles=@(),[switch]$Hash,[switch]$SkipReparsePoints,[string]$RelativePrefix='',[string[]]$ExcludeRelativePaths=@(),$FileWarnings=$null,[switch]$AllowSourceDisappeared,$IgnoreFileWarnings=@(),$DestinationSince=$null,[string]$SpaceCheckDestination='')
  $full=Resolve-BackupPath $Root;$attributes=[IO.File]::GetAttributes($full)
  if(($attributes-band [IO.FileAttributes]::Directory)-eq 0){throw 'backup_source_not_directory'}
  $files=[Collections.Generic.Dictionary[string,object]]::new([StringComparer]::OrdinalIgnoreCase)
+ $spaceLimit=if($SpaceCheckDestination){(Get-BackupAvailableBytes $SpaceCheckDestination)-128MB}else{[long]::MaxValue}
  $directories=[Collections.Generic.List[string]]::new();$pending=[Collections.Generic.Stack[string]]::new();$pending.Push($full);$excluded=0
  while($pending.Count){
   $directory=$pending.Pop()
@@ -219,7 +239,16 @@ function Get-BackupTreeInventory {
    if($relative-match '[\r\n|]'){throw 'backup_unsupported_path_character'}
    if(Test-BackupRelativePathExcluded $logical $ExcludeRelativePaths){$excluded++;continue}
    if($isDirectory){$directories.Add($relative);$pending.Push($path);continue}
-   try{$item=[IO.FileInfo]::new($path);$item.Refresh();$null=$item.Length;$digest=if($Hash){Get-BackupStableFileHash $path}else{$null}}catch{
+   try{
+    $item=[IO.FileInfo]::new($path);$item.Refresh()
+    if($item.Length-gt $spaceLimit){
+     $old=[IO.FileInfo]::new((Join-Path $SpaceCheckDestination $relative))
+     if(-not $old.Exists -or $old.Length-ne $item.Length){
+      Add-BackupFileWarning $FileWarnings ([pscustomobject]@{relative_path=$logical;reason='insufficient_destination_space';error_code=112;stage='before_hash'});continue
+     }
+    }
+    $digest=if($Hash){Get-BackupStableFileHash $path}else{$null}
+   }catch{
     if($null-eq $FileWarnings){throw};$stage=if($Hash){'hash'}else{'scan'};$warning=if($null-ne $DestinationSince){Get-BackupDestinationWarning $_ $path $logical $stage $DestinationSince}else{Get-BackupFileWarning $_ $logical $stage -AllowSourceDisappeared:$AllowSourceDisappeared};if(-not $warning){throw};Add-BackupFileWarning $FileWarnings $warning;continue
    }
    if($files.ContainsKey($relative)){throw 'backup_case_collision'}
@@ -376,7 +405,7 @@ function Invoke-VerifiedBackupTree {
   $lease=$null;$incoming=$null;$committed=$false;$run=[guid]::NewGuid().ToString('N');$parent=[IO.Path]::GetDirectoryName($dest);$leaf=[IO.Path]::GetFileName($dest);$postReceiptPath=if($PostCommit){Resolve-BackupPath $PostCommitReceiptPath}else{$null};$previousManifestBackup=$null;$previousReceiptBackup=$null
  try{
   if(-not $LockHeld){$lease=Open-BackupResourceLock $dest};Repair-BackupTreeTransaction $dest $postReceiptPath
-  $inventory=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles -Hash -FileWarnings $warnings -AllowSourceDisappeared
+  $inventory=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles -Hash -FileWarnings $warnings -AllowSourceDisappeared -SpaceCheckDestination $dest
    $digest=Get-BackupInventoryDigest $inventory;$manifestPath=$dest+'.backup-manifest.json';$old=Read-BackupJson $manifestPath;$hadManifest=[IO.File]::Exists($manifestPath);$oldPreviousPath=if($old -and $old.previous_path){[string]$old.previous_path}else{$null}
    if($old -and $old.source-ieq $sourceIdentityPath){foreach($warning in @($old.file_warnings|Where-Object{$_ -and $_.reason-in @('antivirus_blocked','antivirus_removed')})){
     if(Test-BackupWarningPath $warning.relative_path $warnings){continue}
@@ -408,10 +437,11 @@ function Invoke-VerifiedBackupTree {
    if($existingHash-ceq $file.sha256){
     try{New-Item -ItemType HardLink -Path $target -Target $existing -ErrorAction Stop|Out-Null;$linked=$true}catch{if([IO.File]::Exists($target)){throw}}
    }
-   $stage='copy';if(-not $linked){Copy-BackupFileVerified $file.full_path $target $file.sha256}
+   $stage='destination_write';if(-not $linked){Assert-BackupBytesFit $target $file.length 128MB;$stage='copy';Copy-BackupFileVerified $file.full_path $target $file.sha256}
    }catch{
     $copyStage=[string]$_.Exception.Data['backup_file_stage'];if($copyStage){$stage=$copyStage}
     $warning=Get-BackupFileWarning $_ $file.relative_path $stage -AllowSourceDisappeared:($stage-eq 'source_read' -or $stage-eq 'copy')
+    if(-not $warning -and $stage-eq 'destination_write'){$warning=Get-BackupSpaceWarning $_ $file.relative_path $stage}
     if(-not $warning -and $stage.StartsWith('destination_')){$warning=Get-BackupDestinationWarning $_ ([string]$_.Exception.Data['backup_destination_path']) $file.relative_path $stage $since}
     if(-not $warning){throw};Add-BackupFileWarning $warnings $warning
    }
@@ -516,23 +546,46 @@ function Get-VerifiedDevConfigPackage([string]$OutDir,[switch]$MetadataOnly){
  if(-not $MetadataOnly -and (Get-BackupStableFileHash $zip)-cne $pointer.sha256){throw 'backup_package_hash_mismatch'}
  return [pscustomobject]@{Zip=$zip;Sha=$pointer.sha256;Name=$pointer.package_name;MB=[math]::Round($item.Length/1MB,2);Receipt=$receipt;Current=$pointer}
 }
-function Remove-OldDevConfigPackages([string]$Root,[ValidateRange(1,365)][int]$Keep,[string]$CurrentName){
+function Remove-OldDevConfigPackages([string]$Root,[ValidateRange(1,365)][int]$Keep,[string]$CurrentName,[switch]$PreferComplete){
  $files=@(Get-ChildItem -LiteralPath $Root -File -Filter 'devconfig-*.zip' -ErrorAction Stop|Where-Object{$_.Name-cmatch '^devconfig-[0-9]{8}(?:-[0-9]{6})?(?:-[a-f0-9]{8})?\.zip$'}|Sort-Object Name -Descending)
- $retain=@($CurrentName)+@($files|Where-Object{$_.Name-cne $CurrentName}|Select-Object -First ($Keep-1)|ForEach-Object{$_.Name})
+ $previous=@($files|Where-Object{$_.Name-cne $CurrentName})
+ if($PreferComplete){
+  $complete=@($previous|Where-Object{
+   $receipt=Read-BackupJson ($_.FullName+'.receipt.json')
+   $receipt -and (-not $receipt.PSObject.Properties['file_warnings'] -or -not @($receipt.file_warnings|Where-Object{$_}).Count)
+  }|Select-Object -First 1)
+  $previous=$complete+@($previous|Where-Object{$_.Name-notin @($complete|ForEach-Object Name)})
+ }
+ $retain=@($CurrentName)+@($previous|Select-Object -First ($Keep-1)|ForEach-Object{$_.Name})
  foreach($file in $files){if($file.Name-notin $retain){foreach($suffix in @('','.sha256','.receipt.json','.manifest.json')){$path=$file.FullName+$suffix;if([IO.File]::Exists($path)){[IO.File]::Delete($path)}}}}
 }
 function Publish-DevConfigPackage($Pack,[string]$Root,[ValidateRange(1,365)][int]$Keep){
  Assert-BackupPathChain $Root;[void][IO.Directory]::CreateDirectory($Root)
  $target=Join-Path $Root $Pack.Name
  if(-not $Pack.Zip.Equals($target,[StringComparison]::OrdinalIgnoreCase)){
-  Copy-BackupFileVerified $Pack.Zip $target $Pack.Sha
-  foreach($suffix in @('.sha256','.receipt.json','.manifest.json')){Copy-BackupFileVerified ($Pack.Zip+$suffix) ($target+$suffix) (Get-BackupStableFileHash ($Pack.Zip+$suffix))}
+  foreach($suffix in @('','.sha256','.receipt.json','.manifest.json')){
+   $source=$Pack.Zip+$suffix;$destination=$target+$suffix
+   $hash=if($suffix){Get-BackupStableFileHash $source}else{$Pack.Sha}
+   if([IO.File]::Exists($destination) -and (Get-BackupStableFileHash $destination)-ceq $hash){continue}
+   Assert-BackupBytesFit $destination ([IO.FileInfo]::new($source).Length)
+   Copy-BackupFileVerified $source $destination $hash
+  }
  }
- $latest=Join-Path $Root 'latest.zip';Copy-BackupFileVerified $target $latest $Pack.Sha
+ $latest=Join-Path $Root 'latest.zip'
+ if(-not [IO.File]::Exists($latest) -or @(& fsutil.exe hardlink list $target 2>$null) -notcontains $latest.Substring(2)){
+  $link=Join-Path $Root ('.latest-'+[guid]::NewGuid().ToString('N')+'.tmp')
+  try{
+   New-Item -ItemType HardLink -Path $link -Target $target -ErrorAction Stop|Out-Null
+   if([IO.File]::Exists($latest)){[IO.File]::Replace($link,$latest,[NullString]::Value)}else{[IO.File]::Move($link,$latest)}
+  }finally{[IO.File]::Delete($link)}
+ }
  foreach($suffix in @('.sha256','.receipt.json','.manifest.json')){Copy-BackupFileVerified ($target+$suffix) ($latest+$suffix) (Get-BackupStableFileHash ($target+$suffix))}
  $receipt=Read-BackupJson ($target+'.receipt.json') -Required
  Write-BackupJsonAtomic (Join-Path $Root 'current.json') @{schema='devconfig.package-current.v2';status='complete';collection_status='complete';verification_status='complete';completed_utc=(Get-BackupUtc);destination=[IO.Path]::GetFullPath($Root).TrimEnd('\');package_name=$Pack.Name;sha256=$Pack.Sha;package_bytes=$receipt.package_bytes;content_sha256=$receipt.content_sha256;file_warnings=@($receipt.file_warnings|Where-Object{$_})}
- if(-not @($receipt.file_warnings|Where-Object{$_}).Count){Remove-OldDevConfigPackages $Root $Keep $Pack.Name}
+ $warnings=@($receipt.file_warnings|Where-Object{$_})
+ if(-not @($warnings|Where-Object reason -ne 'insufficient_destination_space').Count){
+  Remove-OldDevConfigPackages $Root $Keep $Pack.Name -PreferComplete:($warnings.Count-gt 0)
+ }
 }
 function Invoke-BackupRclone {
  [CmdletBinding()]param([Parameter(ValueFromRemainingArguments=$true)][object[]]$Arguments)

@@ -34,7 +34,7 @@ function Get-BackupStatusSnapshot {
   try{$record=Read-BackupJson (Join-Path $state $name)}catch{$record=[pscustomobject]@{schema=$name;status='unreadable';failure='run_record_unreadable'}}
   if($record){$record|Add-Member -NotePropertyName task_kind -NotePropertyValue $name.Replace('-last.json','') -Force;$attempts+=$record}
  }
- $tasks=@();try{foreach($task in @(Get-ScheduledTask -TaskName 'DevConfigBackup-*','WeChatBackup-*','WeChatDrive-Monitor-Hourly' -ErrorAction Stop)){
+ $tasks=@();try{foreach($task in @(Get-ScheduledTask -TaskName 'DevConfigBackup-Local','WeChatBackup-Hot-Daily' -ErrorAction Stop)){
   $info=$task|Get-ScheduledTaskInfo -ErrorAction Stop
   $tasks+=[pscustomobject]@{name=$task.TaskName;state=[string]$task.State;enabled=[bool]$task.Settings.Enabled;last_exit=$info.LastTaskResult;last_run=$info.LastRunTime;next_run=$info.NextRunTime}
  }}catch{$tasks=@([pscustomobject]@{name='Task Scheduler';state='unavailable';last_exit=$null;next_run=$null})}

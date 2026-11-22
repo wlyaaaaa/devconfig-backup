@@ -56,19 +56,9 @@ function New-TestDefinitions {
             Settings = New-TestSettings $false 3 2 10; Description = 'local'
         },
         [pscustomobject]@{
-            Name = 'DevConfigBackup-Drive-Daily'; Action = New-TestAction 'Drive'; Principal = $principal
-            Triggers = @((New-TestTrigger 'daily' '00:00'))
-            Settings = New-TestSettings $true 3 3 15; Description = 'drive'
-        },
-        [pscustomobject]@{
             Name = 'WeChatBackup-Hot-Daily'; Action = New-TestAction 'Hot'; Principal = $weChatHotPrincipal
             Triggers = @((New-TestTrigger 'daily' '20:30'))
             Settings = New-TestSettings $false 3 3 15; Description = 'wechat-hot'
-        },
-        [pscustomobject]@{
-            Name = 'WeChatBackup-Drive-Weekly'; Action = New-TestAction 'Drive'; Principal = $principal
-            Triggers = @((New-TestTrigger 'weekly' '22:00' '' 'Sunday'))
-            Settings = New-TestSettings $true 3 4 30; Description = 'wechat-drive'
         }
     )
 }
@@ -186,7 +176,7 @@ Assert-Condition ($foreignStore.ContainsKey('DevConfigBackup-Other')) 'A foreign
 # Inaccessible or hidden state is not absence and must fail closed without -Force.
 $blockedStore = @{}
 $blockedEvents = New-Object System.Collections.ArrayList
-$blockedApi = New-TestTaskApi -Store $blockedStore -Definitions $definitions -Events $blockedEvents -BlockedNames @('DevConfigBackup-Drive-Daily')
+$blockedApi = New-TestTaskApi -Store $blockedStore -Definitions $definitions -Events $blockedEvents -BlockedNames @('WeChatBackup-Hot-Daily')
 $blockedRejected = $false
 try { Invoke-BackupScheduledTaskRegistrationTransaction -Definitions $definitions -Api $blockedApi | Out-Null } catch { $blockedRejected = $_.Exception.Message -match 'not safely resolved' }
 Assert-Condition $blockedRejected 'An inaccessible task state must not be treated as absent.'
@@ -196,7 +186,7 @@ Assert-Condition ($blockedEvents.Count -eq 0) 'Blocked task lookup must not regi
 $existingStore = @{}
 foreach ($definition in $definitions) { $existingStore[$definition.Name] = New-TestTask -Definition $definition -Xml ("xml:old:$($definition.Name)") }
 $existingEvents = New-Object System.Collections.ArrayList
-$existingApi = New-TestTaskApi -Store $existingStore -Definitions $definitions -Events $existingEvents -FailRegisterName 'DevConfigBackup-Drive-Daily'
+$existingApi = New-TestTaskApi -Store $existingStore -Definitions $definitions -Events $existingEvents -FailRegisterName 'WeChatBackup-Hot-Daily'
 $existingRolledBack = $false
 try { Invoke-BackupScheduledTaskRegistrationTransaction -Definitions $definitions -Api $existingApi | Out-Null } catch { $existingRolledBack = $_.Exception.Message -match 'Exact preimages were restored' }
 Assert-Condition $existingRolledBack 'Runtime registration failure must restore existing XML preimages.'
@@ -208,18 +198,16 @@ foreach ($definition in $definitions) {
 
 # Previously absent tasks can be removed on rollback only after a matching definition was read back.
 $mixedStore = @{
-    'DevConfigBackup-Local' = New-TestTask -Definition $definitions[0] -Xml 'xml:local-old'
-    'DevConfigBackup-Drive-Daily' = New-TestTask -Definition $definitions[1] -Xml 'xml:drive-old'
-    'WeChatBackup-Drive-Weekly' = New-TestTask -Definition $definitions[3] -Xml 'xml:weekly-old'
+    'WeChatBackup-Hot-Daily' = New-TestTask -Definition $definitions[1] -Xml 'xml:hot-old'
 }
 $mixedEvents = New-Object System.Collections.ArrayList
-$mixedApi = New-TestTaskApi -Store $mixedStore -Definitions $definitions -Events $mixedEvents -FailRegisterName 'WeChatBackup-Drive-Weekly'
+$mixedApi = New-TestTaskApi -Store $mixedStore -Definitions $definitions -Events $mixedEvents -FailRegisterName 'WeChatBackup-Hot-Daily'
 $mixedRolledBack = $false
 try { Invoke-BackupScheduledTaskRegistrationTransaction -Definitions $definitions -Api $mixedApi | Out-Null } catch { $mixedRolledBack = $_.Exception.Message -match 'Exact preimages were restored' }
 Assert-Condition $mixedRolledBack 'Failure after an absent task is created must roll back exact preimages.'
-Assert-Condition (-not $mixedStore.ContainsKey('WeChatBackup-Hot-Daily')) 'A confirmed task absent before registration must be removed during rollback.'
-Assert-Condition (@($mixedEvents | Where-Object { $_ -eq 'unregister:WeChatBackup-Hot-Daily' }).Count -eq 1) 'Only the confirmed newly created task may be deleted during rollback.'
-Assert-Condition (@($mixedEvents | Where-Object { $_ -like 'unregister:DevConfig*' -or $_ -like 'unregister:WeChatBackup-Drive-Weekly' }).Count -eq 0) 'Existing tasks must not be deleted during mixed rollback.'
+Assert-Condition (-not $mixedStore.ContainsKey('DevConfigBackup-Local')) 'A confirmed task absent before registration must be removed during rollback.'
+Assert-Condition (@($mixedEvents | Where-Object { $_ -eq 'unregister:DevConfigBackup-Local' }).Count -eq 1) 'Only the confirmed newly created task may be deleted during rollback.'
+Assert-Condition (@($mixedEvents | Where-Object { $_ -eq 'unregister:WeChatBackup-Hot-Daily' }).Count -eq 0) 'Existing tasks must not be deleted during mixed rollback.'
 
 # Readback validates action, principal, triggers, and settings; a settings drift restores XML.
 $driftStore = @{
@@ -294,20 +282,16 @@ try {
     }
 
     & $setupPath
-    Assert-Condition ($global:DevConfigBackupTaskRegistrationMock.Count -eq 4) 'Production setup mock must register exactly four tasks.'
+    Assert-Condition ($global:DevConfigBackupTaskRegistrationMock.Count -eq 2) 'Production setup mock must register only the two local tasks.'
     $mockLocal = $global:DevConfigBackupTaskRegistrationMock['DevConfigBackup-Local']
-    $mockDrive = $global:DevConfigBackupTaskRegistrationMock['DevConfigBackup-Drive-Daily']
     $mockWeChatHot = $global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Hot-Daily']
-    $mockWeChatDrive = $global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Drive-Weekly']
     $setupAst = [System.Management.Automation.Language.Parser]::ParseInput($setupText, [ref]$null, [ref]$null)
     $conversion = $setupAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Convert-BeijingTimeToLocal' }, $true)
     Assert-Condition ($null -ne $conversion) 'Setup must provide the Beijing-to-local time converter.'
     . ([scriptblock]::Create($conversion.Extent.Text))
     $beijingTimes = [ordered]@{
         'DevConfigBackup-Local' = '12:05'
-        'DevConfigBackup-Drive-Daily' = '13:00'
         'WeChatBackup-Hot-Daily' = '09:30'
-        'WeChatBackup-Drive-Weekly' = '12:00'
     }
     foreach ($name in $beijingTimes.Keys) {
         $localAt = Convert-BeijingTimeToLocal $beijingTimes[$name]
@@ -320,26 +304,22 @@ try {
         Assert-Condition ($global:DevConfigBackupTaskRegistrationMock[$name].Triggers[0].At -ceq $localAt) "Default trigger must use the converted Beijing time for $name."
     }
     Assert-Condition ($mockLocal.Actions[0].Arguments -match 'Backup-DevConfig-Hidden\.vbs" Local,Hot$') 'Local task action changed.'
-    Assert-Condition ($mockDrive.Actions[0].Arguments -match 'Backup-DevConfig-Hidden\.vbs" Drive$') 'Drive task action changed.'
     Assert-Condition ($mockWeChatHot.Actions[0].Arguments -match 'Backup-WeChat-Hidden\.vbs" Hot$') 'WeChat hot task action changed.'
-    Assert-Condition ($mockWeChatDrive.Actions[0].Arguments -match 'Backup-WeChat-Hidden\.vbs" Drive$') 'WeChat Drive task action changed.'
     Assert-Condition ($mockLocal.Triggers.Count -eq 2 -and $mockLocal.Triggers[1].Delay -eq 'PT20M') 'Local task triggers changed.'
-    Assert-Condition ($mockDrive.Settings.RunOnlyIfNetworkAvailable -and $mockDrive.Settings.RestartCount -eq 3) 'Drive task settings changed.'
     Assert-Condition ($mockWeChatHot.Settings.RestartCount -eq 3 -and -not $mockWeChatHot.Settings.RunOnlyIfNetworkAvailable) 'WeChat hot task settings changed.'
-    Assert-Condition ($mockWeChatDrive.Triggers[0].Type -eq 'daily' -and $mockWeChatDrive.Settings.ExecutionTimeLimit -eq [TimeSpan]::FromHours(4)) 'WeChat Drive must check daily and retain its execution limit.'
-    foreach ($task in @($mockLocal, $mockDrive, $mockWeChatHot, $mockWeChatDrive)) {
+    foreach ($task in @($mockLocal, $mockWeChatHot)) {
         $expectedRunLevel = if ($task.TaskName -eq 'WeChatBackup-Hot-Daily') { 'Highest' } else { 'Limited' }
         Assert-Condition ($task.Principal.UserId -eq $env:USERNAME -and $task.Principal.LogonType -eq 'Interactive' -and $task.Principal.RunLevel -eq $expectedRunLevel) 'Task principal changed.'
     }
 
     $global:DevConfigBackupTaskRegistrationMock = @{}
-    & $setupPath -DailyAt '01:02' -DriveAt '03:04' -WeChatHotAt '05:06' -WeChatDriveWeeklyAt '07:08'
-    $explicitTimes = @('01:02', '03:04', '05:06', '07:08'); $index = 0
+    & $setupPath -DailyAt '01:02' -WeChatHotAt '05:06'
+    $explicitTimes = @('01:02', '05:06'); $index = 0
     foreach ($name in $beijingTimes.Keys) {
-        Assert-Condition ($global:DevConfigBackupTaskRegistrationMock[$name].Triggers[0].At -ceq $explicitTimes[$index++]) 'Explicit local times and the weekly parameter alias must remain unchanged.'
+        Assert-Condition ($global:DevConfigBackupTaskRegistrationMock[$name].Triggers[0].At -ceq $explicitTimes[$index++]) 'Explicit local times must remain unchanged.'
     }
 
-    $legacyHot = New-TestTask -Definition $definitions[2] -Xml 'xml:legacy-hot'
+    $legacyHot = New-TestTask -Definition $definitions[1] -Xml 'xml:legacy-hot'
     $legacyHot.Actions[0].Execute = (Join-Path $env:WINDIR 'System32\wscript.exe')
     $legacyHot.Actions[0].Arguments = ('"' + (Join-Path $RepoRoot 'Backup-WeChat-Hidden.vbs') + '" Hot')
     $legacyHot.Actions[0].WorkingDirectory = $RepoRoot
@@ -351,19 +331,8 @@ try {
     Assert-Condition ($global:DevConfigBackupTaskRegistrationMock.Count -eq 1 -and $global:DevConfigBackupTaskRegistrationMock.ContainsKey('WeChatBackup-Hot-Daily')) 'Setup -TaskName must register only the selected existing task.'
     $hotOnlyProduction = $global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Hot-Daily']
     Assert-Condition ($hotOnlyProduction.Actions[0].Arguments -match 'Backup-WeChat-Hidden\.vbs" Hot$' -and $hotOnlyProduction.Principal.RunLevel -eq 'Highest' -and $hotOnlyProduction.Settings.ExecutionTimeLimit -eq [TimeSpan]::FromHours(3) -and $hotOnlyProduction.Triggers[0].At -eq 'legacy-date') 'Setup -TaskName must retain live timing/settings while changing only the required Hot principal.'
-    $legacyDrive = New-TestTask -Definition $definitions[3] -Xml 'xml:legacy-drive'
-    $legacyDrive.Actions[0] = [pscustomobject]@{ Execute=(Join-Path $env:WINDIR 'System32\wscript.exe'); Arguments=('"'+(Join-Path $RepoRoot 'Backup-WeChat-Hidden.vbs')+'" Drive'); WorkingDirectory=$RepoRoot }
-    $legacyDrive.Triggers = @([pscustomobject]@{Type='weekly';StartBoundary='2026-10-18T22:00:00';DaysOfWeek='Sunday'})
-    $global:DevConfigBackupTaskRegistrationMock = @{'WeChatBackup-Drive-Weekly'=$legacyDrive}
-    & $setupPath -TaskName WeChatBackup-Drive-Weekly
-    $migratedDrive=$global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Drive-Weekly']
-    Assert-Condition ($migratedDrive.Triggers[0].Type -eq 'daily' -and $migratedDrive.Triggers[0].At -eq '22:00:00' -and $migratedDrive.Settings.ExecutionTimeLimit -eq $legacyDrive.Settings.ExecutionTimeLimit) 'Existing weekly task must become daily at its original local time.'
-    $global:DevConfigBackupTaskRegistrationMock = @{'WeChatBackup-Drive-Weekly'=$legacyDrive}
-    & $setupPath -TaskName WeChatBackup-Drive-Weekly -WeChatDriveAt '21:00'
-    $explicitMigratedDrive=$global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Drive-Weekly']
-    Assert-Condition ($explicitMigratedDrive.Triggers[0].Type -eq 'daily' -and $explicitMigratedDrive.Triggers[0].At -eq '21:00') 'An explicit Drive time must override the existing trigger for a selected task.'
     $unknownSetupRejected = $false
-    try { & $setupPath -TaskName Unknown-Task } catch { $unknownSetupRejected = $true }
+    try { & $setupPath -TaskName WeChatBackup-Drive-Weekly } catch { $unknownSetupRejected = $true }
     Assert-Condition ($unknownSetupRejected -and $global:DevConfigBackupTaskRegistrationMock.Count -eq 1) 'Setup must reject unsupported task names without touching registered tasks.'
 }
 finally {
