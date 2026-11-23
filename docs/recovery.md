@@ -79,6 +79,8 @@ Defender 动作编号 2/3 对应隔离/移除，依据 [Microsoft MPTHREAT_ACTIO
 
 微信 Hot/Drive 成功回执的 `payload_names_emitted` 在 `file_warnings` 非空时为 `true`，因为其中输出了文件相对路径；无文件警告时为 `false`。`payload_content_interpreted` 始终保持 `false`。
 
+依据 2026-11-23 北京时间 10:47 本人说的“某几个文件导致的备份问题不属于失败，属于大部分成功，定义改变”，微信运行回执的 `success_with_skips` 表示剩余文件已核验、跳过路径已列出、进程退出 0。跳过超过半数或树校验失败时，保留上一版，进程退出 1。已核验的树清单仍用 `status=complete` 表示清单本身可用，另用 `backup_outcome` 标记覆盖情况。
+
 微信 Drive 与补传监控通过共用 `Get-BackupRcloneWarningFilters` 按字面转义警告路径，保留 `[]`、`{}` 等文件名字符的真实含义。过滤规则统一采用 `--filter` 并固定到来源根，依据 [rclone 官方过滤语法](https://rclone.org/filtering/#pattern-syntax)，健康文件不会因警告路径被当成通配符而漏掉复制或核对。
 
 ## 任务、网络和 H 冷备

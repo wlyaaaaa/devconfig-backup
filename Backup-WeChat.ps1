@@ -55,7 +55,7 @@ function Get-WeChatSummary {
     $manifestHash=Get-BackupStableFileHash $portable
     $manifestBytes=[long](Get-Item -LiteralPath $portable -ErrorAction Stop).Length
     $warnings=@($Manifest.file_warnings|Where-Object{$_})
-    $summary=[ordered]@{manifest_sha256=$manifestHash;manifest_bytes=$manifestBytes;schema=('wechat.'+$Kind+'-backup-receipt.v2');status='complete';completed_utc=(Get-BackupUtc);source=$Source;destination=$Manifest.destination;generation_id=$Manifest.run_id;collection_status='complete';verification_status='sha256_full_tree';verification_scope='selected_files_excluding_file_warnings';retention_status='source_follow_verified';content_sha256=$Manifest.content_sha256;file_count=$Manifest.file_count;bytes=$Manifest.bytes;excluded_directory_count=$exclDirs.Count;file_warnings=$warnings;payload_names_emitted=($warnings.Count-gt 0);payload_content_interpreted=$false;capture_consistency=$script:SourceCaptureMode;application_consistency='not_proven';application_recovery='not_tested'}
+    $summary=[ordered]@{backup_outcome=$(if($warnings.Count){'success_with_skips'}else{'complete'});manifest_sha256=$manifestHash;manifest_bytes=$manifestBytes;schema=('wechat.'+$Kind+'-backup-receipt.v2');status='complete';completed_utc=(Get-BackupUtc);source=$Source;destination=$Manifest.destination;generation_id=$Manifest.run_id;collection_status='complete';verification_status='sha256_full_tree';verification_scope='selected_files_excluding_file_warnings';retention_status='source_follow_verified';content_sha256=$Manifest.content_sha256;file_count=$Manifest.file_count;bytes=$Manifest.bytes;excluded_directory_count=$exclDirs.Count;file_warnings=$warnings;payload_names_emitted=($warnings.Count-gt 0);payload_content_interpreted=$false;capture_consistency=$script:SourceCaptureMode;application_consistency='not_proven';application_recovery='not_tested'}
     if($Kind-ceq 'hot' -and $SourceSnapshot){$summary.source_snapshot=$SourceSnapshot};return $summary
 }
 function New-WeChatUploadSourceRecord {
@@ -184,6 +184,7 @@ if($Plan){
 $capturesSource=($Target-contains 'Hot' -or $Target-contains 'Local')
 $run=[ordered]@{schema='wechat.run.v2';run_id=[guid]::NewGuid().ToString('N');started_utc=(Get-BackupUtc);completed_utc=$null;status='running';targets=$Target;hot='not_requested';local='not_requested';drive='not_requested';failure=$null;file_warnings=@();capture_consistency=$(if($capturesSource){$script:SourceCaptureMode}else{'no_source_capture'});application_recovery='not_tested'}
 $script:WeChatFileWarnings=[Collections.Generic.List[object]]::new()
+$captureWarnings=$null
 if($Target-contains 'Drive'){$run.upload_source=New-WeChatUploadSourceRecord}
 $runPath=Join-Path $StateRoot ('wechat-'+$(if($Target.Count-eq 1 -and $Target[0]-eq 'Drive'){'drive'}else{'local'})+'-last.json')
 $code=0;$lease=$null;$driveLease=$null;$snapshot=$null;$vssCapture=$null;$sourceForCapture=$Source
@@ -197,22 +198,28 @@ try{
          $hotLease=Open-BackupResourceLock $HotRoot
          try {
          $receiptPath=$script:HotReceiptFile
-         $hot=Invoke-VerifiedBackupTree -Source $sourceForCapture -SourceIdentity $Source -Destination $HotRoot -ExcludeDirs $exclDirs -LockHeld -PostCommitReceiptPath $receiptPath -PostCommit {
+         $captureWarnings=[Collections.Generic.List[object]]::new()
+         $hot=Invoke-VerifiedBackupTree -FileWarnings $captureWarnings -Source $sourceForCapture -SourceIdentity $Source -Destination $HotRoot -ExcludeDirs $exclDirs -LockHeld -PostCommitReceiptPath $receiptPath -PostCommit {
              param($record)
              Write-BackupJsonAtomic $receiptPath (Get-WeChatSummary $record 'hot' $vssCapture.SourceSnapshot)
          }
          } finally {$hotLease.Dispose()}
         foreach($warning in @($hot.file_warnings)){Add-BackupFileWarning $script:WeChatFileWarnings $warning};$run.file_warnings=$script:WeChatFileWarnings.ToArray()
-        $run.hot='complete';Write-BackupJsonAtomic $runPath $run
-        } catch { $run.hot='failed';$run.failure=Get-BackupFailureCode $_;$code=1;Write-BackupJsonAtomic $runPath $run }
+        $run.hot=$hot.backup_outcome;Write-BackupJsonAtomic $runPath $run
+        } catch {
+            $run.hot='failed';$run.failure=Get-BackupFailureCode $_;$code=1
+            foreach($warning in $captureWarnings){Add-BackupFileWarning $script:WeChatFileWarnings $warning};$run.file_warnings=$script:WeChatFileWarnings.ToArray()
+            Write-BackupJsonAtomic $runPath $run
+        }
     }
     if($Target-contains 'Local'){
         $lease=Open-BackupResourceLock $LocalRoot
         $run.local='running';Write-BackupJsonAtomic $runPath $run
-        $snapshot=Invoke-VerifiedBackupTree -Source $sourceForCapture -SourceIdentity $Source -Destination $LocalRoot -ExcludeDirs $exclDirs -LockHeld
+        $captureWarnings=[Collections.Generic.List[object]]::new()
+        $snapshot=Invoke-VerifiedBackupTree -FileWarnings $captureWarnings -Source $sourceForCapture -SourceIdentity $Source -Destination $LocalRoot -ExcludeDirs $exclDirs -LockHeld
         $null=Get-VerifiedBackupTreeManifest $LocalRoot
         foreach($warning in @($snapshot.file_warnings)){Add-BackupFileWarning $script:WeChatFileWarnings $warning};$run.file_warnings=$script:WeChatFileWarnings.ToArray()
-        $run.local='complete';Write-BackupJsonAtomic $runPath $run
+        $run.local=$snapshot.backup_outcome;Write-BackupJsonAtomic $runPath $run
         $lease.Dispose();$lease=$null
     }
     if($Target-contains 'Drive'){
@@ -231,9 +238,10 @@ try{
             $run.drive='complete'
         }
     }
-    $run.status=if($code-eq 0){'complete'}else{'failed'}
+    $run.status=if($code-ne 0){'failed'}elseif($run.file_warnings.Count){'success_with_skips'}else{'complete'}
 }catch{
     $run.status='failed';$run.failure=Get-BackupFailureCode $_;$code=1
+    foreach($warning in $captureWarnings){Add-BackupFileWarning $script:WeChatFileWarnings $warning};$run.file_warnings=$script:WeChatFileWarnings.ToArray()
     $sourceSnapshot=$_.Exception.Data['backup_vss_source_snapshot'];if($sourceSnapshot){$run.source_snapshot=$sourceSnapshot}
     $diagnostic=$_.Exception.Data['backup_drive_diagnostic']
     if($diagnostic){

@@ -71,7 +71,7 @@ function Get-BackupStatusSnapshot {
  return [pscustomobject][ordered]@{schema='devconfig.backup-status.v2';observed_utc=(Get-BackupUtc);write_mode=$(if($LiveDrive -and -not $NoDrive){'metadata_query_may_refresh_oauth'}else{'zero_write'});status=$health;local=$local;hot=$hot;wechat_hot=[pscustomobject]$wechat;drive=[pscustomobject]$drive;last_attempts=$attempts;run_history_status=$historyStatus;file_warnings=$warnings.ToArray();scheduled_tasks=$tasks;application_recovery='not_tested';log_payloads='not_read'}
 }
 function Format-BackupStatusForHuman($Snapshot){
- $labels=@{current='当前有效';stale='已过期';unknown='尚未验证';legacy_or_unverified='旧版或未验证';complete='完成';failed='失败';running='进行中';not_requested='本次未请求';not_contacted='未联网检查';attention_required='需要处理';receipts_current='成功回执均在有效期内';complete_with_skipped_files='完成，有文件跳过';receipts_current_with_skipped_files='成功回执均在有效期内，最近一次有文件跳过';Ready='就绪';Disabled='已禁用';passed='通过';refused='未通过，未上传';pending='未检查';not_uploaded='未上传'}
+ $labels=@{current='当前有效';stale='已过期';unknown='尚未验证';legacy_or_unverified='旧版或未验证';complete='完成';success_with_skips='大部分成功';failed='失败';running='进行中';not_requested='本次未请求';not_contacted='未联网检查';attention_required='需要处理';receipts_current='成功回执均在有效期内';complete_with_skipped_files='完成，有文件跳过';receipts_current_with_skipped_files='成功回执均在有效期内，最近一次有文件跳过';Ready='就绪';Disabled='已禁用';passed='通过';refused='未通过，未上传';pending='未检查';not_uploaded='未上传'}
  function Label([string]$Value){if($labels.ContainsKey($Value)){return $labels[$Value]};return $Value}
  function FormatTime($Value){
   if($null-eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)){return '未提供'}

@@ -139,8 +139,12 @@ function Get-BackupSpaceWarning($ErrorRecord,[string]$RelativePath,[string]$Stag
  }
 }
 function Get-BackupFileWarning {
- param($ErrorRecord,[string]$RelativePath,[string]$Stage,[switch]$AllowSourceDisappeared)
+ param($ErrorRecord,[string]$RelativePath,[string]$Stage,[switch]$AllowSourceDisappeared,[switch]$AllowSourceUnreadable)
  $e=if($ErrorRecord-is [Exception]){$ErrorRecord}else{$ErrorRecord.Exception};$missing=$false
+ if($AllowSourceUnreadable){
+  $code=@{access_denied=5;sharing_violation=32;lock_violation=33}[[string](Get-BackupUnreadableReason $e)]
+  if($code){return [pscustomobject]@{relative_path=$RelativePath.Replace('\','/');reason=$(if($code-eq 5){'source_access_denied'}else{'source_file_in_use'});error_code=$code;stage=$Stage}}
+ }
  while($e){
   $code=$e.HResult-band 0xFFFF
   if($e-is [ComponentModel.Win32Exception]){$code=$e.NativeErrorCode}
@@ -249,7 +253,7 @@ function Get-BackupTreeInventory {
     }
     $digest=if($Hash){Get-BackupStableFileHash $path}else{$null}
    }catch{
-    if($null-eq $FileWarnings){throw};$stage=if($Hash){'hash'}else{'scan'};$warning=if($null-ne $DestinationSince){Get-BackupDestinationWarning $_ $path $logical $stage $DestinationSince}else{Get-BackupFileWarning $_ $logical $stage -AllowSourceDisappeared:$AllowSourceDisappeared};if(-not $warning){throw};Add-BackupFileWarning $FileWarnings $warning;continue
+    if($null-eq $FileWarnings){throw};$stage=if($Hash){'hash'}else{'scan'};$warning=if($null-ne $DestinationSince){Get-BackupDestinationWarning $_ $path $logical $stage $DestinationSince}else{Get-BackupFileWarning $_ $logical $stage -AllowSourceDisappeared:$AllowSourceDisappeared -AllowSourceUnreadable:($AllowSourceDisappeared -and $Hash)};if(-not $warning){throw};Add-BackupFileWarning $FileWarnings $warning;continue
    }
    if($files.ContainsKey($relative)){throw 'backup_case_collision'}
    $files.Add($relative,[pscustomobject]@{relative_path=$relative;full_path=$path;length=[long]$item.Length;mtime_ticks=[long]$item.LastWriteTimeUtc.Ticks;sha256=$digest})
@@ -392,10 +396,15 @@ function Repair-BackupTreeTransaction([string]$Destination,[string]$ReceiptPath=
  [IO.File]::Delete($journalPath)
  Remove-BackupTreeOrphans $dest $(if($hasReceiptBinding){[string]$journal.post_commit_receipt_path}else{$ReceiptPath})
 }
+function Get-BackupTreeOutcome($Selected,$Warnings){
+ $skipped=@($Warnings | ForEach-Object { $_.relative_path.Replace('\','/') } | Sort-Object -Unique).Count
+ if($skipped-gt @($Selected.files).Count){throw 'backup_majority_files_skipped'}
+ if($skipped){'success_with_skips'}else{'complete'}
+}
 function Invoke-VerifiedBackupTree {
- param([string]$Source,[string]$Destination,[string[]]$ExcludeDirs=@(),[string[]]$ExcludeFiles=@(),[switch]$Plan,[switch]$LockHeld,[scriptblock]$PostCommit,[string]$PostCommitReceiptPath='', [string]$SourceIdentity='')
+ param([string]$Source,[string]$Destination,[string[]]$ExcludeDirs=@(),[string[]]$ExcludeFiles=@(),[switch]$Plan,[switch]$LockHeld,[scriptblock]$PostCommit,[string]$PostCommitReceiptPath='', [string]$SourceIdentity='', [Collections.Generic.List[object]]$FileWarnings=[Collections.Generic.List[object]]::new())
  $src=Resolve-BackupPath $Source;$dest=Resolve-BackupPath $Destination;$sourceIdentityPath=if($SourceIdentity){Resolve-BackupPath $SourceIdentity}else{$src};Assert-BackupPathsIndependent $src $dest;Assert-BackupPathsIndependent $sourceIdentityPath $dest;Assert-BackupPathChain $dest
- $warnings=[Collections.Generic.List[object]]::new();$since=[DateTimeOffset]::UtcNow
+ $warnings=$FileWarnings;$since=[DateTimeOffset]::UtcNow
  if($PostCommit -and [string]::IsNullOrWhiteSpace($PostCommitReceiptPath)){throw 'backup_post_commit_receipt_path_required'}
  if($Plan){
   $inventory=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles -FileWarnings $warnings -AllowSourceDisappeared
@@ -440,7 +449,7 @@ function Invoke-VerifiedBackupTree {
    $stage='destination_write';if(-not $linked){Assert-BackupBytesFit $target $file.length 128MB;$stage='copy';Copy-BackupFileVerified $file.full_path $target $file.sha256}
    }catch{
     $copyStage=[string]$_.Exception.Data['backup_file_stage'];if($copyStage){$stage=$copyStage}
-    $warning=Get-BackupFileWarning $_ $file.relative_path $stage -AllowSourceDisappeared:($stage-eq 'source_read' -or $stage-eq 'copy')
+    $warning=Get-BackupFileWarning $_ $file.relative_path $stage -AllowSourceDisappeared:($stage-eq 'source_read' -or $stage-eq 'copy') -AllowSourceUnreadable:($stage-eq 'source_read')
     if(-not $warning -and $stage-eq 'destination_write'){$warning=Get-BackupSpaceWarning $_ $file.relative_path $stage}
     if(-not $warning -and $stage.StartsWith('destination_')){$warning=Get-BackupDestinationWarning $_ ([string]$_.Exception.Data['backup_destination_path']) $file.relative_path $stage $since}
     if(-not $warning){throw};Add-BackupFileWarning $warnings $warning
@@ -470,9 +479,10 @@ function Invoke-VerifiedBackupTree {
   $digest=Get-BackupInventoryDigest $selected
   if((Get-BackupInventoryDigest $actualSelected)-cne $digest){throw 'backup_candidate_tree_hash_mismatch'}
   if((Get-BackupInventoryDigest (Get-BackupInventoryWithoutWarnings $sourceAgain $warnings) -Metadata)-cne (Get-BackupInventoryDigest $selected -Metadata)){throw 'backup_source_changed_before_publication'}
+  $outcome=Get-BackupTreeOutcome $selected $warnings
   $hadTarget=[IO.Directory]::Exists($dest)
   $retained=@();if($old){$retained+=@($old.retained_warning_generations|Where-Object{$_});if($oldPreviousPath){$retained+=$oldPreviousPath}}
-  $record=[ordered]@{schema='devconfig.tree-manifest.v1';status='complete';run_id=$run;completed_utc=(Get-BackupUtc);source=$sourceIdentityPath;destination=$dest;content_sha256=$digest;verification='sha256_full_tree';verification_scope='selected_files_excluding_file_warnings';file_warnings=$warnings.ToArray();file_count=@($selected.files).Count;bytes=[long](($selected.files|Measure-Object length -Sum).Sum);directories=$selected.directories;files=@($selected.files|Select-Object relative_path,length,mtime_ticks,sha256);previous_path=$(if($hadTarget){$previous}else{$null});retained_warning_generations=$(if($warnings.Count){@($retained|Select-Object -Unique)}else{@()})}
+  $record=[ordered]@{schema='devconfig.tree-manifest.v1';status='complete';backup_outcome=$outcome;run_id=$run;completed_utc=(Get-BackupUtc);source=$sourceIdentityPath;destination=$dest;content_sha256=$digest;verification='sha256_full_tree';verification_scope='selected_files_excluding_file_warnings';file_warnings=$warnings.ToArray();file_count=@($selected.files).Count;bytes=[long](($selected.files|Measure-Object length -Sum).Sum);directories=$selected.directories;files=@($selected.files|Select-Object relative_path,length,mtime_ticks,sha256);previous_path=$(if($hadTarget){$previous}else{$null});retained_warning_generations=$(if($warnings.Count){@($retained|Select-Object -Unique)}else{@()})}
    Write-BackupJsonAtomic ($dest+'.backup-transaction.json') @{schema='devconfig.tree-transaction.v1';run_id=$run;destination=$dest;incoming=$incoming;previous=$previous;had_target=$hadTarget;had_manifest=$hadManifest;had_receipt=$hadReceipt;previous_manifest_path=$previousManifestBackup;previous_receipt_path=$previousReceiptBackup;post_commit_receipt_path=$postReceiptPath;old_previous_path=$oldPreviousPath}
    if($hadTarget){[IO.Directory]::Move($dest,$previous)}
    [IO.Directory]::Move($incoming,$dest)
@@ -486,6 +496,7 @@ function Invoke-VerifiedBackupTree {
    }
    if((Get-BackupInventoryDigest (Get-BackupInventoryWithoutWarnings $published $warnings) -Metadata)-cne (Get-BackupInventoryDigest (Get-BackupInventoryWithoutWarnings $actual $warnings) -Metadata)){throw 'backup_published_tree_changed'}
    $selected=Get-BackupInventoryWithoutWarnings $inventory $warnings
+   $record.backup_outcome=Get-BackupTreeOutcome $selected $warnings
    $record.content_sha256=Get-BackupInventoryDigest $selected;$record.file_warnings=$warnings.ToArray();$record.file_count=@($selected.files).Count;$record.bytes=[long](($selected.files|Measure-Object length -Sum).Sum);$record.directories=$selected.directories;$record.files=@($selected.files|Select-Object relative_path,length,mtime_ticks,sha256)
    if($warnings.Count){$record.retained_warning_generations=@($retained|Where-Object{$_}|Select-Object -Unique)}
    Write-BackupJsonAtomic ($dest+'.backup-manifest.json') $record
