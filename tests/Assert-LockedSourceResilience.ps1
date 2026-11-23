@@ -1,8 +1,7 @@
 [CmdletBinding()]
 param()
 # A single source file held open by a running application is skipped and reported
-# instead of failing the whole generation; required sources still fail closed and
-# every failure names the offending relative path.
+# instead of failing the whole generation. Required files need verified prior bytes.
 $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
 $repo=Split-Path -Parent $PSScriptRoot
 . (Join-Path $repo 'Backup.Common.ps1')
@@ -48,10 +47,9 @@ try{
  Check $refused 'New source files still fail the selection check'
  [IO.File]::Delete((Join-Path $profile 'settings\late.txt'))
  $required=Hold (Join-Path $profile '.gitconfig');$handles.Add($required)
- $inventory=Get-DevConfigSourceInventory $config $profile;$failure=$null
- try{Copy-DevConfigSourceInventory $inventory (Join-Path $fixture 'stage-required')}catch{$failure=$_}
- Check ($null-ne $failure -and (Get-BackupFailureCode $failure)-ceq 'required_backup_source_unreadable') 'A locked required source fails the capture'
- Check ((Get-BackupFailureSourcePath $failure)-ceq 'home/.gitconfig') 'Required-source failure names its relative path'
+ $inventory=Get-DevConfigSourceInventory $config $profile
+ Copy-DevConfigSourceInventory $inventory (Join-Path $fixture 'stage-required')
+ Check ($inventory.file_warnings[0].relative_path-ceq 'home/.gitconfig' -and $inventory.file_warnings[0].reason-ceq 'sharing_violation') 'A locked required file is reported for package fallback'
  $required.Dispose();[void]$handles.Remove($required)
  $plain=$null;try{throw 'backup_example_failure'}catch{$_.Exception.Data['backup_source_path']=(Join-Path $profile 'settings\ok.txt');$plain=$_}
  Check ((Get-BackupFailureSourcePath $plain @(,@('profile',$profile)))-ceq 'profile/settings/ok.txt') 'A full source path is reported relative to its root, never as an absolute path'
@@ -72,7 +70,7 @@ try{
  Check ($inventory.file_count-eq 1 -and $inventory.file_warnings[0].relative_path-ceq 'home/.codex/dependency.lock' -and $inventory.file_warnings[0].reason-ceq 'sharing_violation') 'A locked file in an available required directory is reported while the other file is copied'
  $dependency.Dispose();[void]$handles.Remove($dependency)
 
- # End to end: task stays successful but distinguishable; required lock fails with a named path.
+ # End to end: partial success, required-file fallback and no prior package.
  $output=Join-Path $fixture 'output';$hot=Join-Path $fixture 'hot';$sources=Join-Path $fixture 'sources.psd1'
  $runtimeLocks=@('appdata-local/Microsoft/PowerToys/settings.json.cli-lock','appdata-roaming/Typora/Local Storage/leveldb/LOCK')
  foreach($relative in $runtimeLocks){
@@ -109,12 +107,26 @@ try{
  foreach($h in @($handles)){$h.Dispose()};$handles.Clear()
  $r=Run $base;$run=Read-BackupJson (Join-Path $output 'state\devconfig-local-last.json') -Required
  Check ($r.Exit-eq 0 -and $run.status-ceq 'complete' -and $run.skipped_file_count-eq 0) 'Without locks the run is plain complete'
- $pointer=Get-BackupStableFileHash (Join-Path $output 'out\current.json')
+ $previous=Get-VerifiedDevConfigPackage (Join-Path $output 'out')
+ Put (Join-Path $profile '.gitconfig') 'new locked configuration'
  $required=Hold (Join-Path $profile '.gitconfig');$handles.Add($required)
  $r=Run $base;$run=Read-BackupJson (Join-Path $output 'state\devconfig-local-last.json') -Required
- Check ($r.Exit-ne 0 -and $run.status-ceq 'failed' -and $run.failure-ceq 'required_backup_source_unreadable') 'A locked required source fails the task'
- Check ($run.failure_path-ceq 'home/.gitconfig' -and $run.failure_io_reason-ceq 'sharing_violation') 'Failure receipt names the relative path and the lock reason'
- Check ((Get-BackupStableFileHash (Join-Path $output 'out\current.json'))-ceq $pointer) 'Failed run keeps the previous success pointer'
+ $pack=Get-VerifiedDevConfigPackage (Join-Path $output 'out');$warning=$run.file_warnings[0]
+ Check ($r.Exit-eq 0 -and $run.status-ceq 'complete_with_skipped_files' -and $pack.Name-cne $previous.Name -and $pack.Sha-ceq (Get-VerifiedDevConfigPackage $hot).Sha) ('A locked required file publishes a new verified package: '+$r.Text)
+ Check ($warning.relative_path-ceq 'home/.gitconfig' -and $warning.reason-ceq 'sharing_violation' -and $warning.fallback-ceq 'previous_package') 'Run receipt names the locked required file and its fallback'
+ $manifest=Read-BackupJson ($pack.Zip+'.manifest.json') -Required
+ $zip=[IO.Compression.ZipFile]::OpenRead($pack.Zip)
+ try{$reader=[IO.StreamReader]::new($zip.GetEntry('home/.gitconfig').Open());try{$oldBytes=$reader.ReadToEnd()}finally{$reader.Dispose()}}finally{$zip.Dispose()}
+ Check ($oldBytes-ceq 'required configuration' -and $manifest.file_warnings[0].fallback-ceq 'previous_package' -and [IO.File]::Exists($previous.Zip)) 'New ZIP contains the previous bytes and retains the previous package'
+ [pscustomobject]@{exit_code=$r.Exit;status=$run.status;file_warnings=$run.file_warnings;archive_contains_previous_value=($oldBytes-ceq 'required configuration')}|ConvertTo-Json -Depth 5 -Compress
+ $empty=$base.Clone();$empty[[array]::IndexOf($empty,'-OutputRoot')+1]=Join-Path $fixture 'empty-output'
+ $noPrior=Run $empty
+ Check ($noPrior.Exit-eq 1 -and ($noPrior.Text|ConvertFrom-Json).failure-ceq 'required_backup_previous_package_unavailable') 'A locked required file fails without a previous package'
+ Put $majoritySources "@{HomeDirs=@('settings');RequiredSources=@('home/settings')}"
+ foreach($name in 'exclusive.txt','guard.lock'){$handles.Add((Hold (Join-Path $profile ('settings/'+$name))))}
+ $failed=Run $majorityArgs;$failedRun=$failed.Text|ConvertFrom-Json
+ Check ($failed.Exit-eq 1 -and $failedRun.failure-ceq 'backup_majority_of_files_skipped' -and $failedRun.file_warnings[0].fallback-ceq 'previous_package') 'Prior copies do not count as current coverage in a required directory'
+ Check ((Get-VerifiedDevConfigPackage (Join-Path $output 'out')).Name-ceq $pack.Name) 'A failed majority leaves the previous pointer unchanged'
 }finally{
  foreach($h in @($handles)){try{$h.Dispose()}catch{}}
  Remove-BackupOwnedDirectory $fixture $parent '^devconfig-locked-[a-f0-9]{32}$'

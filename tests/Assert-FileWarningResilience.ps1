@@ -134,8 +134,8 @@ try{
  [IO.File]::Move((Join-Path $directProfile 'required.txt'),(Join-Path $fixture 'moved-required.txt'))
  $again=Get-DevConfigSourceInventory $directConfig $directProfile -KnownInventory $direct
  Check (@($again.file_warnings).Count-eq 1 -and (Test-DevConfigSelectionAfterCapture $direct $again)-eq 0) 'An enumerated required single file disappearing on recheck is warned'
- $refused=$false;try{$null=Get-DevConfigSourceInventory $directConfig $directProfile}catch{$refused=$true}
- Check $refused 'A required file absent at the start still fails'
+ $refused=$false;try{$null=Get-DevConfigSourceInventory @{HomeDirs=@('missing');RequiredSources=@('home/missing')} $directProfile}catch{$refused=$_.Exception.Message-ceq 'required_backup_source_missing: home/missing'}
+ Check $refused 'A missing required directory still fails'
 
  foreach($evidence in @($false,$true)){
   . (Join-Path $repo 'Backup.Common.ps1')

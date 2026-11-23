@@ -237,15 +237,15 @@ def run_tests(repo, fixture, powershell):
     result = subprocess.run([str(powershell), "-NoProfile", "-File", str(selection)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
     check(result.returncode == 0 and json.loads(result.stdout)["changes"] == 1 and json.loads(result.stdout)["attempts"] == 1, "Committed WAL changes after capture are counted without demanding unchanged live hashes")
 
-    # Persistent SQLite exclusive transaction: no raw-copy fallback or publication.
+    # Persistent SQLite exclusive transaction: use the previous verified snapshot.
     writer.close()
     busy = sqlite3.connect(source)
     busy.execute("PRAGMA journal_mode=DELETE")
     busy.execute("BEGIN EXCLUSIVE")
     try:
         result, receipt = backup()
-        check(result.returncode != 0 and receipt["status"] == "failed" and receipt["failure"] == "backup_sqlite_capture_failed", "Persistent database occupancy remains a real task failure")
-        check(receipt["failure_path"] == "home/.codex/state_1.sqlite" and current.read_bytes() == before, "Busy database names its path and preserves the prior successful package")
+        check(result.returncode == 0 and receipt["status"] == "complete_with_skipped_files", "Busy required SQLite uses its previous verified snapshot")
+        check(any(w.get("fallback") == "previous_package" and w["relative_path"] == "home/.codex/state_1.sqlite" for w in receipt["file_warnings"]), "Busy database receipt names the file and the fallback")
     finally:
         busy.rollback()
         busy.close()
@@ -259,9 +259,12 @@ def run_tests(repo, fixture, powershell):
     check(handle not in (None, ctypes.c_void_p(-1).value), "Synthetic SQLite is held with a real exclusive Windows handle")
     try:
         result, receipt = backup()
-        check(result.returncode != 0 and receipt["status"] == "failed" and current.read_bytes() == before, "Unreadable required SQLite remains failed and preserves the prior package")
+        check(result.returncode == 0 and receipt["status"] == "complete_with_skipped_files", "Exclusively locked required SQLite uses its previous verified snapshot")
     finally:
         kernel.CloseHandle(handle)
+    before = current.read_bytes()
+    with zipfile.ZipFile(output / "out" / json.loads(before)["package_name"]) as new, zipfile.ZipFile(archive) as old:
+        check(new.read("home/.codex/state_1.sqlite") == old.read("home/.codex/state_1.sqlite"), "New package contains the previous verified SQLite bytes")
 
     source.write_bytes(b"not a SQLite database")
     result, receipt = backup()

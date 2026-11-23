@@ -150,21 +150,48 @@ function New-DevConfigCandidate([string]$Container){
  }
  $script:run.file_warnings=$warnings.ToArray()
  $script:run.capture_consistency='per_file_verified_not_point_in_time';$script:run.changed_after_capture_count=$captureChanges
- $payload=Get-BackupTreeInventory $stage -Hash -IgnoreFileWarnings $warnings -FileWarnings $warnings -DestinationSince ([DateTimeOffset]::Parse($script:run.started_utc))
+ $previous=$null;try{$previous=Get-VerifiedDevConfigPackage $OutDir}catch{}
+ $requiredWarnings=@($warnings|Where-Object{$_.reason-ne 'insufficient_destination_space' -and (Test-DevConfigRequiredPath $_.relative_path $inventory)})
+ $fallbackPaths=@($requiredWarnings.relative_path|Sort-Object -Unique)
+ if($fallbackPaths.Count){
+  if(-not $previous){throw 'required_backup_previous_package_unavailable'}
+  $oldManifest=Read-BackupJson ($previous.Zip+'.manifest.json') -Required
+  $encoding=Get-BackupArchiveEncoding $previous.Zip $oldManifest
+  $zip=[IO.Compression.ZipFile]::Open($previous.Zip,[IO.Compression.ZipArchiveMode]::Read,$encoding)
+  try{
+   foreach($path in $fallbackPaths){
+    $file=$oldManifest.files|Where-Object relative_path -IEQ $path|Select-Object -First 1
+    $entry=$zip.Entries|Where-Object {$_.FullName.Replace('\','/') -ieq $path}|Select-Object -First 1
+    if(-not $file -or -not $entry){throw 'required_backup_previous_file_unavailable'}
+    $sqliteFallback=$sqliteSnapshots|Where-Object {$_.relative_path-ieq $path -and $_.method-ceq 'previous_package'}
+    if($sqliteFallback -and
+       -not @($oldManifest.sqlite_snapshots|Where-Object {$_.relative_path-ieq $path -and $_.integrity_check-ceq 'ok' -and $_.method-cin @('sqlite_online_backup','previous_package')}).Count){throw 'required_backup_previous_sqlite_unverified'}
+    $target=Join-Path $stage $path
+    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target))
+    Assert-BackupBytesFit $target $entry.Length
+    [IO.Compression.ZipFileExtensions]::ExtractToFile($entry,$target,$true)
+    if((Get-BackupStableFileHash $target)-cne $file.sha256){throw 'required_backup_previous_file_hash_mismatch'}
+    if($sqliteFallback){$sqliteFallback.integrity_check='ok'}
+   }
+   foreach($warning in $requiredWarnings){$warning|Add-Member -NotePropertyName fallback -NotePropertyValue 'previous_package'}
+  }finally{$zip.Dispose()}
+ }
+ $omitted=@($warnings|Where-Object {-not $_.fallback})
+ $payload=Get-BackupTreeInventory $stage -Hash -IgnoreFileWarnings $omitted -FileWarnings $warnings -DestinationSince ([DateTimeOffset]::Parse($script:run.started_utc))
  $script:run.file_warnings=$warnings.ToArray()
- $verified=Get-BackupInventoryWithoutWarnings $payload $warnings
- if(@($warnings.relative_path | Sort-Object -Unique).Count -gt @($verified.files).Count){throw 'backup_majority_of_files_skipped'}
+ $verified=Get-BackupInventoryWithoutWarnings $payload @($warnings|Where-Object {-not $_.fallback})
+ if(@($fallbackPaths|Where-Object {$_ -notin $verified.files.relative_path}).Count){throw 'required_backup_previous_file_unavailable'}
+ if(@($warnings.relative_path | Sort-Object -Unique).Count -gt (@($verified.files).Count-$fallbackPaths.Count)){throw 'backup_majority_of_files_skipped'}
  $treeHash=Get-BackupInventoryDigest $verified
  $policyHash=Get-BackupTextHash ((Get-BackupStableFileHash $SourcesFile)+'|'+[string]$IncludeHistory+'|'+[string]$SkipSystemExport)
  $contentHash=Get-BackupTextHash ($treeHash+'|'+$policyHash+'|'+($warnings.ToArray()|ConvertTo-Json -Compress -Depth 5))
  $script:run.collection=$(if($warnings.Count){'complete_with_skipped_files'}else{'complete'});$script:run.package='running';Write-BackupJsonAtomic $runPath $script:run
- $previous=$null;try{$previous=Get-VerifiedDevConfigPackage $OutDir}catch{}
  if($previous -and $previous.Receipt.content_sha256-ceq $contentHash){$script:run.package='reused';return $previous}
  $manifest=[ordered]@{schema='devconfig.payload-manifest.v1';capture_consistency='per_file_verified_not_point_in_time';changed_after_capture_count=$captureChanges;content_sha256=$contentHash;payload_tree_sha256=$treeHash;policy_sha256=$policyHash;file_count=$payload.file_count;bytes=$payload.bytes;directories=$payload.directories;files=@($payload.files|Select-Object relative_path,length,mtime_ticks,sha256);sources=$inventory.sources;intentional_exclusions=$intentionalExclusions;skipped_file_count=$skipped.Count;skipped_files=$skipped;file_warnings=$warnings.ToArray();sqlite_snapshots=$sqliteSnapshots;application_consistency='not_proven'}
  Write-BackupJsonAtomic (Join-Path $stage 'backup-manifest.json') $manifest
  $name='devconfig-'+(Get-Date -Format yyyyMMdd-HHmmss)+'-'+[guid]::NewGuid().ToString('N').Substring(0,8)+'.zip';$zip=Join-Path $Container $name
  $zipExe=Get-BackupExecutable 7z -FallbackPath $SevenZipPath
- $warningExcludes=@($warnings|ForEach-Object{'-xr!'+$_.relative_path.Replace('/','\')})
+ $warningExcludes=@($warnings|Where-Object {-not $_.fallback}|ForEach-Object{'-xr!'+$_.relative_path.Replace('/','\')})
  $zipOutput=@(& $zipExe a -tzip -mcu=on -mx=5 -mmt=4 -bso0 -bsp0 @warningExcludes -- $zip ($stage+'\*') 2>&1 | ForEach-Object {$_.ToString()})
  $zipExit=$LASTEXITCODE
  if($zipExit-ne 0 -or -not [IO.File]::Exists($zip)){

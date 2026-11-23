@@ -20,7 +20,7 @@ function Get-DevConfigSourceInventory {
   catch [IO.FileNotFoundException]{$present=$false}
   catch [IO.DirectoryNotFoundException]{$present=$false}
   catch{
-   $warning=Get-BackupFileWarning $_ $Relative 'scan'
+   $warning=Get-BackupFileWarning $_ $Relative 'scan' -AllowSourceUnreadable:(-not $IsDirectory)
    if($IsDirectory -or -not $warning){throw};Add-BackupFileWarning $warnings $warning;$sources.Add([pscustomobject]@{id=$Relative;status='available_with_file_warning';required=$required});return
   }
   if(-not $present){
@@ -30,7 +30,11 @@ function Get-DevConfigSourceInventory {
     $warning=if($priorAv.Count){Get-BackupAntivirusRetryWarning $priorAv[0] $Source}else{[pscustomobject]@{relative_path=$Relative;reason='source_disappeared';error_code=2;stage='source_recheck'}}
     Add-BackupFileWarning $warnings $warning;$sources.Add([pscustomobject]@{id=$Relative;status='available_with_file_warning';required=$required});return
    }
-   if($required){throw ('required_backup_source_missing: '+$Relative)}
+   if($required){
+    if($IsDirectory){throw ('required_backup_source_missing: '+$Relative)}
+    Add-BackupFileWarning $warnings ([pscustomobject]@{relative_path=$Relative;reason='source_missing';error_code=2;stage='scan'})
+    $sources.Add([pscustomobject]@{id=$Relative;status='available_with_file_warning';required=$true});return
+   }
    $sources.Add([pscustomobject]@{id=$Relative;status='optional_absent';required=$required});return
   }
   if($IsDirectory-ne (($attributes-band [IO.FileAttributes]::Directory)-ne 0)){throw 'backup_source_type_changed'}
@@ -51,7 +55,7 @@ function Get-DevConfigSourceInventory {
    try{
     $item=Get-Item -LiteralPath $Source -Force -ErrorAction Stop
     $record=[pscustomobject]@{relative_path=$Relative;full_path=$Source;length=[long]$item.Length;mtime_ticks=[long]$item.LastWriteTimeUtc.Ticks;sha256=$(if($Hash){Get-BackupStableFileHash $Source}else{$null})}
-   }catch{$warning=Get-BackupFileWarning $_ $Relative $(if($Hash){'hash'}else{'scan'}) -AllowSourceDisappeared;if(-not $warning){throw};Add-BackupFileWarning $warnings $warning;return}
+   }catch{$warning=Get-BackupFileWarning $_ $Relative $(if($Hash){'hash'}else{'scan'}) -AllowSourceDisappeared -AllowSourceUnreadable;if(-not $warning){throw};Add-BackupFileWarning $warnings $warning;return}
    if($fileMap.ContainsKey($Relative)){if($fileMap[$Relative].full_path-ine $Source){throw 'backup_source_destination_collision'}}else{$fileMap.Add($Relative,$record)}
   }
  }
@@ -170,11 +174,11 @@ function Test-DevConfigSQLiteSidecar([string]$Path,$Snapshots){
  foreach($snapshot in @($Snapshots)){foreach($suffix in @('-wal','-shm','-journal')){if($Path-ieq ($snapshot.relative_path+$suffix)){return $true}}};return $false
 }
 function Test-DevConfigRequiredPath([string]$RelativePath,$Inventory){
- return $RelativePath -in @($Inventory.sources | Where-Object required | ForEach-Object id)
+ foreach($source in $Inventory.sources){if($source.required -and ($RelativePath-ieq $source.id -or $RelativePath.StartsWith($source.id+'/',[StringComparison]::OrdinalIgnoreCase))){return $true}}
+ return $false
 }
 function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
- # Individual locked or ACL-denied files are reported; a required file source
- # itself and an unusable source root still fail collection.
+ # The package builder handles required-file warnings after collection.
  [void][IO.Directory]::CreateDirectory($Destination)
  foreach($directory in @($Inventory.directories)){[void][IO.Directory]::CreateDirectory((Join-Path $Destination $directory))}
  $kept=[Collections.Generic.List[object]]::new();$skipped=[Collections.Generic.List[object]]::new();$warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($Inventory.file_warnings)){Add-BackupFileWarning $warnings $warning};$since=[DateTimeOffset]::UtcNow
@@ -223,14 +227,17 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
     $retryable=$_.Exception.Message-match 'backup_source_changed|backup_copy_hash_mismatch' -or ($reason-ne 'access_denied' -and ($_.Exception-is [IO.IOException] -or $_.Exception.InnerException-is [IO.IOException]))
     if($sqlite -and ($_.Exception.Data['backup_sqlite_error_code']-in @(5,6) -or $_.Exception.Data['backup_sqlite_reason']-eq 'timeout')){$retryable=$true}
     if($attempt-lt 3 -and $retryable){Start-Sleep -Milliseconds 150;continue}
-    if($sqlite){throw} # Never fall back to raw copies or skipped database payloads.
-    if(-not $reason){throw}
-    if(Test-DevConfigRequiredPath $file.relative_path $Inventory){
-     $required=[Management.Automation.RuntimeException]::new('required_backup_source_unreadable',$_.Exception)
-     $required.Data['backup_source_relative_path']=$file.relative_path;$required.Data['backup_unreadable_reason']=$reason;throw $required
+    if($sqlite){
+     $diagnostic=$_.Exception.Data['backup_sqlite_diagnostic']
+     if($diagnostic.stage-notin @('source_open','source_read') -or
+        $diagnostic.sqlite_error_code-notin @(5,6,14) -or -not (Test-DevConfigRequiredPath $file.relative_path $Inventory)){throw}
+     $reason='sqlite_source_unreadable';$stage=$diagnostic.stage
+     $snapshots.Add([pscustomobject]@{relative_path=$file.relative_path;method='previous_package';integrity_check='pending'})
     }
+    if(-not $reason){throw}
     if([IO.File]::Exists($target)){[IO.File]::Delete($target)}
-    $skip=[pscustomobject]@{relative_path=$file.relative_path;reason=$reason;error_code=@{access_denied=5;sharing_violation=32;lock_violation=33}[$reason];stage=$stage}
+    $code=if($sqlite){$diagnostic.sqlite_error_code}else{@{access_denied=5;sharing_violation=32;lock_violation=33}[$reason]}
+    $skip=[pscustomobject]@{relative_path=$file.relative_path;reason=$reason;error_code=$code;stage=$stage}
     $skipped.Add($skip);Add-BackupFileWarning $warnings $skip;break
    }
   }
