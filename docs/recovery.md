@@ -65,9 +65,9 @@ Codex 的 `node_repl/active_execs` 与 `managed-hooks/codex-context/hooks/*/__py
 
 `sources.psd1` 仅精确排除 Claude 的 `file-history`、`debug`、`paste-cache`、`image-cache`、`session-env`、`shell-snapshots`、`usage-data` 子树。官方 [Claude 目录说明](https://code.claude.com/docs/en/claude-directory#application-data) 将它们列为会话检查点、缓存或运行数据；它们不用于恢复配置。settings、skills、agents、commands、plans 与必要来源继续保留，不全局排除 `*.lock`。
 
-微信树和开发配置采集遇到 Win32 225/226（HRESULT `0x800700E1` / `0x800700E2`），或已枚举的源文件在扫描、哈希、复制、复核中消失，只跳过这一文件，其余继续完成。整体回执保持 `status=complete`，并在 `file_warnings` 中逐项记录相对路径、`reason`、`error_code`、`stage`。原因值是 `antivirus_blocked`、`antivirus_removed` 或 `source_disappeared`。下次自然运行重新尝试，不持久排除这些路径，也不修改防病毒设置。
+开发配置和微信的运行回执区分完整成功、部分成功和失败。防病毒拦截、个别文件不可读、占用、消失或放不下时，继续备份其余文件，按相对路径在 `file_warnings` 记录 `reason`、`error_code`、`stage`。有跳过但完成至少一半时，开发配置报 `complete_with_skipped_files`，微信报 `success_with_skips`，退出码均为 0。跳过超过一半、整包未完成或来源根不可读时失败，保留旧包或旧树。经校验的包和树清单仍用 `status=complete` 表达其中实际文件的验证状态。下一轮自然重试跳过项。
 
-目标复制后消失，须只读匹配本轮同一精确路径的 Defender 1117 成功隔离/移除动作，才能记为 `antivirus_removed`；普通缺失、写盘失败、哈希不一致、来源根不可读和配置错误仍失败。配置文件的原有占用/ACL 跳过规则继续使用 `complete_with_skipped_files`。
+目标复制后消失，须只读匹配本轮同一精确路径的 Defender 1117 成功隔离或移除动作，才能记为 `antivirus_removed`。无法验证候选、非容量类写盘故障、哈希不一致和配置错误仍失败。开发配置要求可读的指定文件来源和一致的 SQLite 副本。必要目录中个别普通文件临时不可读时，仍可按上述规则保全其余文件。
 
 警告路径按字面精确匹配，不解释成通配符。微信发布保留该路径上的旧副本；无法沿当前路径携带时，旧树仍保存在明确登记的前代目录里。AV（防病毒）警告从既有成功清单带入下一轮：路径仍不存在时继续保护旧副本，路径重新可读后正常复制，成功后自然清除警告，不建立永久复制排除。普通 `source_disappeared` 只保护本轮，下一轮源根正常但未枚举到该路径时仍按跟源删除处理。本人明确决定删除受 AV 保护的旧副本时，可明确解除对应清单/回执里的警告；本库不新增处理界面。持续出现警告时不清理可恢复的前代，下一轮无文件警告时再恢复原有有界保留。配置包遇文件警告时也暂停旧包清理，因此 `Keep=1` 不会删掉仍包含该文件旧副本的成功包。
 

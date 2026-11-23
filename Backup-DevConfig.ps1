@@ -151,10 +151,13 @@ function New-DevConfigCandidate([string]$Container){
  $script:run.file_warnings=$warnings.ToArray()
  $script:run.capture_consistency='per_file_verified_not_point_in_time';$script:run.changed_after_capture_count=$captureChanges
  $payload=Get-BackupTreeInventory $stage -Hash -IgnoreFileWarnings $warnings -FileWarnings $warnings -DestinationSince ([DateTimeOffset]::Parse($script:run.started_utc))
- $script:run.file_warnings=$warnings.ToArray();$treeHash=Get-BackupInventoryDigest (Get-BackupInventoryWithoutWarnings $payload $warnings)
+ $script:run.file_warnings=$warnings.ToArray()
+ $verified=Get-BackupInventoryWithoutWarnings $payload $warnings
+ if(@($warnings.relative_path | Sort-Object -Unique).Count -gt @($verified.files).Count){throw 'backup_majority_of_files_skipped'}
+ $treeHash=Get-BackupInventoryDigest $verified
  $policyHash=Get-BackupTextHash ((Get-BackupStableFileHash $SourcesFile)+'|'+[string]$IncludeHistory+'|'+[string]$SkipSystemExport)
  $contentHash=Get-BackupTextHash ($treeHash+'|'+$policyHash+'|'+($warnings.ToArray()|ConvertTo-Json -Compress -Depth 5))
- $script:run.collection=$(if($skipped.Count){'complete_with_skipped_files'}else{'complete'});$script:run.package='running';Write-BackupJsonAtomic $runPath $script:run
+ $script:run.collection=$(if($warnings.Count){'complete_with_skipped_files'}else{'complete'});$script:run.package='running';Write-BackupJsonAtomic $runPath $script:run
  $previous=$null;try{$previous=Get-VerifiedDevConfigPackage $OutDir}catch{}
  if($previous -and $previous.Receipt.content_sha256-ceq $contentHash){$script:run.package='reused';return $previous}
  $manifest=[ordered]@{schema='devconfig.payload-manifest.v1';capture_consistency='per_file_verified_not_point_in_time';changed_after_capture_count=$captureChanges;content_sha256=$contentHash;payload_tree_sha256=$treeHash;policy_sha256=$policyHash;file_count=$payload.file_count;bytes=$payload.bytes;directories=$payload.directories;files=@($payload.files|Select-Object relative_path,length,mtime_ticks,sha256);sources=$inventory.sources;intentional_exclusions=$intentionalExclusions;skipped_file_count=$skipped.Count;skipped_files=$skipped;file_warnings=$warnings.ToArray();sqlite_snapshots=$sqliteSnapshots;application_consistency='not_proven'}
@@ -211,7 +214,8 @@ try{
   $run.hot='running';Write-BackupJsonAtomic $runPath $run
   try{Push-Hot $pack;$run.hot='complete'}catch{
    $warning=Get-BackupSpaceWarning $_ $pack.Name 'hot_publish'
-   if($warning){$run.hot='retained_previous';$run.file_warnings+=@($warning)}else{$run.hot='failed';$run.failure=Get-BackupFailureCode $_;$script:overallExitCode=1}
+   if($warning){$run.file_warnings+=@($warning)}
+   $run.hot='failed';$run.failure=if($warning){$warning.reason}else{Get-BackupFailureCode $_};$script:overallExitCode=1
   }
  }
  if($Tier-contains 'Drive'){
@@ -223,20 +227,16 @@ try{
   }
  }
  # Skipped unreadable files keep the task successful but are never reported as plain complete.
- $run.status=if($script:overallExitCode-ne 0){'failed'}elseif($run.skipped_file_count-gt 0 -or $run.file_warnings.reason-contains 'insufficient_destination_space'){'complete_with_skipped_files'}else{'complete'}
+ $run.status=if($script:overallExitCode-ne 0){'failed'}elseif($run.skipped_file_count-gt 0 -or $run.file_warnings.Count){'complete_with_skipped_files'}else{'complete'}
 }catch{
  $warning=Get-BackupSpaceWarning $_ $(if($pack){$pack.Name}else{'devconfig.zip'}) 'local_publish'
- if($warning){
-  $run.status='complete_with_skipped_files';$run.file_warnings+=@($warning)
-  foreach($phase in @('collection','package','retention')){if($run[$phase]-eq 'running'){$run[$phase]='retained_previous'}}
- }else{
- $script:overallExitCode=1;$run.status='failed';$run.failure=Get-BackupFailureCode $_;$run.failure_type=$_.Exception.GetType().Name
+ if($warning){$run.file_warnings+=@($warning)}
+ $script:overallExitCode=1;$run.status='failed';$run.failure=if($warning){$warning.reason}else{Get-BackupFailureCode $_};$run.failure_type=$_.Exception.GetType().Name
  $run.failure_stage=[string]$_.Exception.Data['backup_stage']
  $run.failure_site=@($_.ScriptStackTrace-split "`n")[0]
  $sqliteDiagnostic=$_.Exception.Data['backup_sqlite_diagnostic'];if($sqliteDiagnostic){$run.sqlite_diagnostic=$sqliteDiagnostic}
  try{$run.failure_path=Get-BackupFailureSourcePath $_ @(@('profile',$ProfileRoot),@('output',$OutputRoot));$run.failure_io_reason=Get-BackupUnreadableReason $_.Exception}catch{$run.failure_path=$null}
  foreach($phase in @('collection','package','hot','drive','retention')){if($run[$phase]-eq 'running'){$run[$phase]='failed'}}
- }
 }finally{
  if($pin){$pin.Dispose()};if($outLease){$outLease.Dispose()}
  if($container -and [IO.Directory]::Exists($container)){try{Remove-BackupOwnedDirectory $container $StageParent '^run-[a-f0-9]{32}$'}catch{$script:overallExitCode=1;$run.status='failed';$run.failure='backup_staging_cleanup_failed'}}

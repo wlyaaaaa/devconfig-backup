@@ -182,7 +182,7 @@ try{
  Put (Join-Path $profile 'settings/blocked.bin') 'new';Put (Join-Path $profile 'settings/good.bin') 'new-good'
  $warned=Run-Script (New-FaultEntrypoint 'Backup-DevConfig.ps1' 225) $args
  $run=Read-BackupJson (Join-Path $output 'state/devconfig-local-last.json') -Required
- Check ($warned.Exit-eq 0 -and $run.status-ceq 'complete' -and $run.file_warnings[0].reason-ceq 'antivirus_blocked') ('Config entrypoint remains complete with warning: '+$warned.Text)
+ Check ($warned.Exit-eq 0 -and $run.status-ceq 'complete_with_skipped_files' -and $run.file_warnings[0].reason-ceq 'antivirus_blocked') ('Config entrypoint reports partial success for one warned file out of two: '+$warned.Text)
  $pack=Get-VerifiedDevConfigPackage (Join-Path $output 'out');$hotPack=Get-VerifiedDevConfigPackage $hot
  Check ($pack.Receipt.file_warnings[0].relative_path-ceq 'home/settings/blocked.bin' -and $pack.Sha-ceq $hotPack.Sha -and @($hotPack.Current.file_warnings).Count-eq 1) 'Package receipt and G pointer propagate file warning'
  Check ([IO.File]::Exists($prior.Zip) -and [IO.File]::Exists((Join-Path $hot $prior.Name))) 'Warned config generation does not prune old packages even with Keep=1'

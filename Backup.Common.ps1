@@ -584,7 +584,8 @@ function Publish-DevConfigPackage($Pack,[string]$Root,[ValidateRange(1,365)][int
  Write-BackupJsonAtomic (Join-Path $Root 'current.json') @{schema='devconfig.package-current.v2';status='complete';collection_status='complete';verification_status='complete';completed_utc=(Get-BackupUtc);destination=[IO.Path]::GetFullPath($Root).TrimEnd('\');package_name=$Pack.Name;sha256=$Pack.Sha;package_bytes=$receipt.package_bytes;content_sha256=$receipt.content_sha256;file_warnings=@($receipt.file_warnings|Where-Object{$_})}
  $warnings=@($receipt.file_warnings|Where-Object{$_})
  if(-not @($warnings|Where-Object reason -ne 'insufficient_destination_space').Count){
-  Remove-OldDevConfigPackages $Root $Keep $Pack.Name -PreferComplete:($warnings.Count-gt 0)
+  $keepCount=if($warnings.Count){[math]::Max($Keep,2)}else{$Keep}
+  Remove-OldDevConfigPackages $Root $keepCount $Pack.Name -PreferComplete:($warnings.Count-gt 0)
  }
 }
 function Invoke-BackupRclone {

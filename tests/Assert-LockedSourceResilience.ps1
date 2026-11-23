@@ -67,9 +67,9 @@ try{
  $inventory=Get-DevConfigSourceInventory $requiredRoot $profile
  Copy-DevConfigSourceInventory $inventory (Join-Path $fixture 'stage-runtime-mutex')
  Check ($inventory.file_count-eq 2 -and @($inventory.skipped_files).Count-eq 0) 'A locked maintenance mutex does not fail or downgrade the required Codex root'
- $dependency=Hold (Join-Path $profile '.codex/dependency.lock');$handles.Add($dependency);$failure=$null
- try{Copy-DevConfigSourceInventory (Get-DevConfigSourceInventory $requiredRoot $profile) (Join-Path $fixture 'stage-real-lock')}catch{$failure=$_}
- Check ($null-ne $failure -and (Get-BackupFailureCode $failure)-ceq 'required_backup_source_unreadable' -and (Get-BackupFailureSourcePath $failure)-ceq 'home/.codex/dependency.lock') 'Other locked files in the required root still fail with their exact path'
+ $dependency=Hold (Join-Path $profile '.codex/dependency.lock');$handles.Add($dependency)
+ $inventory=Get-DevConfigSourceInventory $requiredRoot $profile;Copy-DevConfigSourceInventory $inventory (Join-Path $fixture 'stage-real-lock')
+ Check ($inventory.file_count-eq 1 -and $inventory.file_warnings[0].relative_path-ceq 'home/.codex/dependency.lock' -and $inventory.file_warnings[0].reason-ceq 'sharing_violation') 'A locked file in an available required directory is reported while the other file is copied'
  $dependency.Dispose();[void]$handles.Remove($dependency)
 
  # End to end: task stays successful but distinguishable; required lock fails with a named path.
@@ -101,6 +101,11 @@ try{
   Check ($relative-in @($manifest.files.relative_path)) ('Recoverable neighbor remains in package: '+$relative)
  }
  Check (@($manifest.files|Where-Object{$_.relative_path-like '*exclusive*' -or $_.relative_path-like '*guard*'}).Count-eq 0 -and $manifest.skipped_file_count-eq 2 -and @($manifest.files|Where-Object{$_.relative_path-ceq 'home/settings/ok.txt'}).Count-eq 1) 'Package manifest lists the skipped files and omits their payload'
+ $majoritySources=Join-Path $fixture 'majority.psd1';Put $majoritySources "@{HomeDirs=@('settings')}"
+ $majorityArgs=$base.Clone();$majorityArgs[[array]::IndexOf($majorityArgs,'-SourcesFile')+1]=$majoritySources
+ $failed=Run $majorityArgs;$failedRun=Read-BackupJson (Join-Path $output 'state/devconfig-local-last.json') -Required
+ Check ($failed.Exit-eq 1 -and $failedRun.status-ceq 'failed' -and $failedRun.failure-ceq 'backup_majority_of_files_skipped' -and @($failedRun.file_warnings).Count-eq 2) ('Majority missed fails and lists both files: '+$failed.Text)
+ Check ((Get-VerifiedDevConfigPackage (Join-Path $output 'out')).Name-ceq $pack.Name -and (Get-VerifiedDevConfigPackage $hot).Name-ceq $hotPack.Name) 'Majority missed preserves both previous backup pointers'
  foreach($h in @($handles)){$h.Dispose()};$handles.Clear()
  $r=Run $base;$run=Read-BackupJson (Join-Path $output 'state\devconfig-local-last.json') -Required
  Check ($r.Exit-eq 0 -and $run.status-ceq 'complete' -and $run.skipped_file_count-eq 0) 'Without locks the run is plain complete'

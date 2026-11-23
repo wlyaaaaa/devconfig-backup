@@ -170,11 +170,11 @@ function Test-DevConfigSQLiteSidecar([string]$Path,$Snapshots){
  foreach($snapshot in @($Snapshots)){foreach($suffix in @('-wal','-shm','-journal')){if($Path-ieq ($snapshot.relative_path+$suffix)){return $true}}};return $false
 }
 function Test-DevConfigRequiredPath([string]$RelativePath,$Inventory){
- foreach($source in @($Inventory.sources|Where-Object{$_.required})){$id=[string]$source.id;if($RelativePath-ieq $id -or $RelativePath.StartsWith($id+'/',[StringComparison]::OrdinalIgnoreCase)){return $true}};return $false
+ return $RelativePath -in @($Inventory.sources | Where-Object required | ForEach-Object id)
 }
 function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
- # A single file held open exclusively (or ACL-denied) by a running application is
- # skipped and reported; required sources and every other failure stay fatal.
+ # Individual locked or ACL-denied files are reported; a required file source
+ # itself and an unusable source root still fail collection.
  [void][IO.Directory]::CreateDirectory($Destination)
  foreach($directory in @($Inventory.directories)){[void][IO.Directory]::CreateDirectory((Join-Path $Destination $directory))}
  $kept=[Collections.Generic.List[object]]::new();$skipped=[Collections.Generic.List[object]]::new();$warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($Inventory.file_warnings)){Add-BackupFileWarning $warnings $warning};$since=[DateTimeOffset]::UtcNow
@@ -213,8 +213,8 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
     $warning=Get-BackupFileWarning $_ $file.relative_path $stage -AllowSourceDisappeared:(-not $stage.StartsWith('destination_'))
     if(-not $warning -and $stage-in @('destination_write','sqlite_backup')){
      $warning=Get-BackupSpaceWarning $_ $file.relative_path $stage
-     if($warning -and $sqlite){foreach($suffix in '-wal','-shm','-journal'){
-      Add-BackupFileWarning $warnings ([pscustomobject]@{relative_path=($file.relative_path+$suffix);reason=$warning.reason;error_code=$warning.error_code;stage=$stage})
+     if($warning -and $sqlite){foreach($sidecar in @($Inventory.files | Where-Object {Test-DevConfigSQLiteSidecar $_.relative_path @($file)})){
+      Add-BackupFileWarning $warnings ([pscustomobject]@{relative_path=$sidecar.relative_path;reason=$warning.reason;error_code=$warning.error_code;stage=$stage})
      }}
     }
     if(-not $warning -and $stage.StartsWith('destination_')){$warning=Get-BackupDestinationWarning $_ ([string]$_.Exception.Data['backup_destination_path']) $file.relative_path $stage $since}
@@ -230,7 +230,8 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
      $required.Data['backup_source_relative_path']=$file.relative_path;$required.Data['backup_unreadable_reason']=$reason;throw $required
     }
     if([IO.File]::Exists($target)){[IO.File]::Delete($target)}
-    $skipped.Add([pscustomobject]@{relative_path=$file.relative_path;reason=$reason});break
+    $skip=[pscustomobject]@{relative_path=$file.relative_path;reason=$reason;error_code=@{access_denied=5;sharing_violation=32;lock_violation=33}[$reason];stage=$stage}
+    $skipped.Add($skip);Add-BackupFileWarning $warnings $skip;break
    }
   }
  }
