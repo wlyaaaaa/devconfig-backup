@@ -27,6 +27,7 @@ try{
   '.gemini/antigravity/antigravity_state.pbtxt','.gemini/antigravity/annotations/c.pbtxt','.gemini/antigravity/brain/b/task.md',
   '.gemini/antigravity/conversations/c.pb','.gemini/antigravity/mcp/server/tool.json','.gemini/antigravity-cli/settings.json',
   '.gemini/antigravity-cli/mcp.json','.gemini/antigravity-cli/oauth_creds.json',
+  '.gemini/antigravity-cli/log/run.log','.gemini/antigravity-cli/log-backup/keep.json',
   '.gemini/antigravity-cli/conversations/c.pb','.gemini/antigravity-cli/implicit/i.pbtxt',
   '.gemini/antigravity-cli/annotations/a.pbtxt','.gemini/antigravity-cli/brain/b.md',
   '.gemini/antigravity-cli/knowledge/k.md','.gemini/antigravity-cli/conversation_summaries.db',
@@ -42,6 +43,7 @@ try{
   'home/.codex/memories/extensions/ad_hoc/notes/n.md','home/.codex/skills/s/SKILL.md',
   'home/.gemini/config/projects/p.json','home/.gemini/config/plugins/x/plugin.json','home/.gemini/antigravity/antigravity_state.pbtxt',
   'home/.gemini/antigravity-cli/settings.json','home/.gemini/antigravity-cli/mcp.json',
+  'home/.gemini/antigravity-cli/log-backup/keep.json',
   'home/.gemini/antigravity-cli/oauth_creds.json','home/.config/opencode/opencode.jsonc','home/.config/opencode/plugins/huihui-backend.js',
   'appdata-roaming/ai.opencode.desktop/default.dat')){Check ($expected-in $paths) ('Selected: '+$expected)}
  foreach($pattern in @('home/.codex/memories/.git/*','home/.codex/sessions/*','home/.gemini/antigravity/annotations/*','home/.gemini/antigravity/brain/*',
@@ -50,6 +52,7 @@ try{
   'home/.gemini/antigravity-cli/annotations/*','home/.gemini/antigravity-cli/brain/*',
   'home/.gemini/antigravity-cli/knowledge/*','home/.gemini/antigravity-cli/conversation_summaries.db',
   'home/.gemini/antigravity-cli/history.jsonl','home/.gemini/antigravity-cli/jetbox_summaries_proto.pb',
+  'home/.gemini/antigravity-cli/log/*',
   'home/.config/opencode/node_modules/*',
   'appdata-roaming/ai.opencode.desktop/drafts.sqlite','home/.openclaw/*')){
   Check (@($paths|Where-Object{$_-like $pattern}).Count-eq 0) ('Not selected: '+$pattern)

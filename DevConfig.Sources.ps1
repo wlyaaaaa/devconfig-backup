@@ -119,7 +119,9 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
         $marker.schema-is [string] -and $marker.stage-is [string] -and
         $marker.schema-ceq 'devconfig.sqlite-stage.v1' -and
         $marker.stage-cin @('source_open','source_read','target_create','target_open','online_backup','standalone_mode','integrity_check')){
-      if($lastStage-ceq 'standalone_mode' -and $marker.stage-ceq 'integrity_check'){$idleDeadline=$clock.ElapsedMilliseconds+$idleTimeoutMs}
+      # integrity_check has no page progress reports. Let it use the remaining
+      # capture budget after the online backup has finished.
+      if($lastStage-ceq 'standalone_mode' -and $marker.stage-ceq 'integrity_check'){$idleDeadline=$hardDeadline}
       $lastStage=[string]$marker.stage
      }
      $progressKeys=@('step_count','sqlite_status','remaining_pages','total_pages','elapsed_ms')

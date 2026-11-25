@@ -187,6 +187,8 @@
         'appdata-roaming/Typora/Local Storage/leveldb/LOCK',
         'appdata-roaming/WhirlwindFX/SignalRgb/QtWebEngine/*/Local Storage/leveldb/LOCK',
         'home/.gemini/antigravity-cli/presence/*.lock',
+        # Antigravity CLI writes a fresh diagnostic log for each invocation.
+        'home/.gemini/antigravity-cli/log',
         # Codex-managed sandbox executables are ephemeral and intentionally ACL-locked;
         # excluding the exact subtree keeps collection fail-closed for selected sources.
         'home/.codex/.sandbox-bin',

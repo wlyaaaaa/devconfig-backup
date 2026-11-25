@@ -24,6 +24,9 @@ if sys.argv[1].endswith('progressing.sqlite'):
     for step in range(1,7):
         print(json.dumps({'schema':'devconfig.sqlite-progress.v1','step_count':step,'sqlite_status':0,'remaining_pages':10-step,'total_pages':10,'elapsed_ms':450*(step-1)}),file=sys.stderr,flush=True)
         time.sleep(0.45)
+    for stage in ('standalone_mode', 'integrity_check'):
+        print(json.dumps({'schema':'devconfig.sqlite-stage.v1','stage':stage}),file=sys.stderr,flush=True)
+    time.sleep(2.25)
     with sqlite3.connect(sys.argv[2]) as db:
         db.execute('CREATE TABLE fixture(a)')
     print(json.dumps({'status':'complete','method':'sqlite_online_backup','integrity_check':'ok'}))
@@ -59,6 +62,6 @@ sys.exit(0)
  Write-Output 'PASS: Outer timeout retains only the last valid safe stage and remains failed'
  $verified=Join-Path $fixture 'published.sqlite'
  $hash=Copy-DevConfigSQLiteDatabase (Join-Path $fixture 'progressing.sqlite') $verified $fixture
- if($hash-cne (Get-BackupStableFileHash $verified)){throw 'sqlite_forward_progress_did_not_publish'}
- Write-Output 'PASS: Actual forward progress extends the host deadline and the verified candidate is published'
+ if($hash-cne (Get-BackupStableFileHash $verified)){throw 'sqlite_integrity_check_did_not_publish'}
+ Write-Output 'PASS: Advancing backup and quiet integrity check both finish past the idle timeout'
 }finally{Remove-BackupOwnedDirectory $fixture $parent '^devconfig-sqlite-[a-f0-9]{32}$'}
