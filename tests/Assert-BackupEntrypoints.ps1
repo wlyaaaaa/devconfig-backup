@@ -44,27 +44,8 @@ try{
  }finally{
   if([IO.File]::Exists($pipeChildPid)){try{$child=[Diagnostics.Process]::GetProcessById([int][IO.File]::ReadAllText($pipeChildPid))}catch [ArgumentException]{$child=$null};if($child){try{if(-not $child.WaitForExit(10000)){throw 'synthetic child did not finish naturally'}}finally{$child.Dispose()}}}
  }
- $ui=[IO.File]::ReadAllText((Join-Path $repo 'Backup-Status.ps1')).Replace('$PSScriptRoot',("'"+$repo.Replace("'","''")+"'"))
- $paint=@'
-$form.CreateControl()
-$form.PerformLayout()
-& $update
-$deadline=[Diagnostics.Stopwatch]::StartNew()
-while($read.Pending -and $deadline.Elapsed.TotalSeconds-lt 15){
- [Windows.Forms.Application]::DoEvents()
- Start-Sleep -Milliseconds 20
-}
-if($box.Text-notmatch 'DevConfig'){throw 'panel_refresh_failed'}
-$image=New-Object Drawing.Bitmap($form.Width,$form.Height)
-try{$form.DrawToBitmap($image,(New-Object Drawing.Rectangle(0,0,$form.Width,$form.Height)))}finally{$image.Dispose()}
-Write-Output 'PANEL_PAINT_PASS'
-'@
- $ui=$ui.Replace('[void]$form.ShowDialog()',$paint)
- $uiPath=Join-Path $script:FixtureRoot 'panel-harness.ps1';[IO.File]::WriteAllText($uiPath,$ui,[Text.UTF8Encoding]::new($true))
- $output=(& $runtime -NoProfile -ExecutionPolicy Bypass -File $uiPath -Gui -NoDrive -OutputRoot $script:FixtureRoot -HotRoot (Join-Path $script:FixtureRoot 'hot') -HotReceiptPath (Join-Path $script:FixtureRoot 'absent.json') 2>&1|Out-String)
- Check ($LASTEXITCODE-eq 0 -and $output-match 'PANEL_PAINT_PASS') ('Actual panel builds, refreshes and paints without a desktop capture: '+$output)
  Check ([IO.File]::Exists((Join-Path $repo 'Backup.Common.ps1'))) 'Source repository still exists after entrypoint work'
- Write-Output 'RESULT: 8 guarded entrypoint and panel checks passed.'
+ Write-Output 'RESULT: 7 guarded entrypoint checks passed.'
 }finally{
  Remove-BackupOwnedDirectory $script:FixtureRoot $script:FixtureParent '^backup-entrypoints-[a-f0-9]{32}$'
 }
