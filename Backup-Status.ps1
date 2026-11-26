@@ -102,6 +102,9 @@ function Format-BackupStatusForHuman($Snapshot){
 }
 if($Gui){
  if($Json){throw 'gui_json_modes_are_exclusive'};Add-Type -AssemblyName System.Windows.Forms;Add-Type -AssemblyName System.Drawing
+ Add-Type -Namespace DevConfig -Name BackupStatusWindow -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+'@
  $form=New-Object Windows.Forms.Form;$form.Text='DevConfig / 微信备份状态';$form.Width=1080;$form.Height=760
  $bar=New-Object Windows.Forms.FlowLayoutPanel;$bar.Dock='Top';$bar.Height=42
  $refresh=New-Object Windows.Forms.Button;$refresh.Text='立即刷新';$refresh.Width=120
@@ -109,11 +112,34 @@ if($Gui){
  $notice=New-Object Windows.Forms.Label;$notice.Text='关闭窗口只停止界面刷新，不停止备份任务。';$notice.AutoSize=$true;$notice.Padding='8,8,0,0'
  $bar.Controls.AddRange(@($refresh,$control,$notice))
  $box=New-Object Windows.Forms.TextBox;$box.Multiline=$true;$box.ReadOnly=$true;$box.ScrollBars='Both';$box.Dock='Fill';$box.WordWrap=$false;$box.Font=New-Object Drawing.Font('Microsoft YaHei UI',10)
+ $box.Text='正在读取备份状态…'
  $form.Controls.Add($box);$form.Controls.Add($bar)
- $update={try{$box.Text=Format-BackupStatusForHuman (Get-BackupStatusSnapshot)}catch{$box.Text='状态读取失败，不推断备份成功。'}}
- $refresh.Add_Click($update);$form.Add_Shown($update);$control.Add_Click({Start-Process taskschd.msc})
+ # The same read-only status command runs off the UI thread, including manifest reads.
+ $statusArguments=@{};foreach($key in $PSBoundParameters.Keys){if($key-ne 'Gui'){$statusArguments[$key]=$PSBoundParameters[$key]}}
+ $worker=[PowerShell]::Create()
+ [void]$worker.AddCommand($PSCommandPath).AddParameters($statusArguments)
+ $read=[pscustomobject]@{Pending=$null}
+ $readTimer=New-Object Windows.Forms.Timer;$readTimer.Interval=100
+ $update={
+  if($read.Pending){return}
+  try{$read.Pending=$worker.BeginInvoke();$refresh.Enabled=$false;$readTimer.Start()}
+  catch{$box.Text='状态读取失败，不推断备份成功。'}
+ }
+ $readTimer.Add_Tick({
+  if(-not $read.Pending.IsCompleted){return}
+  $readTimer.Stop()
+  try{$box.Text=$worker.EndInvoke($read.Pending) -join [Environment]::NewLine}
+  catch{$box.Text='状态读取失败，不推断备份成功。'}
+  finally{$read.Pending=$null;$refresh.Enabled=$true}
+ })
+ $refresh.Add_Click($update);$control.Add_Click({Start-Process taskschd.msc})
+ $form.Add_Shown({
+  # The VBS launcher's hide hint can suppress the form's first ShowWindow call.
+  [void][DevConfig.BackupStatusWindow]::ShowWindow($form.Handle,5) # SW_SHOW
+  & $update
+ })
  $timer=New-Object Windows.Forms.Timer;$timer.Interval=60000;$timer.Add_Tick($update);$timer.Start()
- try{[void]$form.ShowDialog()}finally{$timer.Stop();$timer.Dispose();$form.Dispose()};exit 0
+ try{[void]$form.ShowDialog()}finally{$timer.Dispose();$readTimer.Dispose();$form.Dispose();$worker.Dispose()};exit 0
 }
 $snapshot=Get-BackupStatusSnapshot
 if($Json){$snapshot|ConvertTo-Json -Depth 12}else{Format-BackupStatusForHuman $snapshot}
