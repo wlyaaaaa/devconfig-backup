@@ -19,6 +19,23 @@ try{
  $script:DevConfigSQLiteHelper=Join-Path $fixture 'delayed-helper.py'
  [IO.File]::WriteAllText($script:DevConfigSQLiteHelper,@'
 import json,sqlite3,sys,time
+if sys.argv[1].endswith('large-priority.sqlite'):
+    import ctypes
+    budget = int(sys.argv[sys.argv.index('--timeout') + 1])
+    assert 1800 < budget <= 2400, budget
+    kernel = ctypes.windll.kernel32
+    kernel.GetCurrentProcess.restype = ctypes.c_void_p
+    kernel.GetPriorityClass.argtypes = [ctypes.c_void_p]
+    for _ in range(80):
+        if kernel.GetPriorityClass(kernel.GetCurrentProcess()) == 32:
+            break
+        time.sleep(0.02)
+    else:
+        raise RuntimeError('helper_not_at_normal_priority')
+    with sqlite3.connect(sys.argv[2]) as db:
+        db.execute('CREATE TABLE fixture(a)')
+    print(json.dumps({'status':'complete','method':'sqlite_online_backup','integrity_check':'ok'}))
+    sys.exit(0)
 if sys.argv[1].endswith('progressing.sqlite'):
     print(json.dumps({'schema':'devconfig.sqlite-stage.v1','stage':'online_backup'}),file=sys.stderr,flush=True)
     for step in range(1,7):
@@ -70,4 +87,15 @@ sys.exit(0)
  finally{Start-BackupRunBudget 0}
  if((Get-BackupStableFileHash $verified)-cne $hash){throw 'sqlite_budget_changed_verified_copy'}
  Write-Output 'PASS: SQLite uses the remaining business budget and retains the prior verified file'
+ $large=Join-Path $fixture 'large-priority.sqlite'
+ $stream=[IO.File]::Create($large)
+ try{$stream.SetLength(256MB)}finally{$stream.Dispose()}
+ $fixtureProcess=[Diagnostics.Process]::GetCurrentProcess()
+ $originalPriority=$fixtureProcess.PriorityClass
+ Start-BackupRunBudget 3600
+ try{
+  $fixtureProcess.PriorityClass=[Diagnostics.ProcessPriorityClass]::BelowNormal
+  $null=Copy-DevConfigSQLiteDatabase $large (Join-Path $fixture 'large-priority-copy.sqlite') $fixture
+ }finally{$fixtureProcess.PriorityClass=$originalPriority;$fixtureProcess.Dispose();Start-BackupRunBudget 0}
+ Write-Output 'PASS: Large SQLite gets spare copy time without using the 20-minute reserve, and the helper reaches Normal priority'
 }finally{Remove-BackupOwnedDirectory $fixture $parent '^devconfig-sqlite-[a-f0-9]{32}$'}

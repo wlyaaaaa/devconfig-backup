@@ -90,12 +90,16 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
  $python=Get-BackupExecutable python
  $snapshot=Join-Path $ScratchRoot ('sqlite-'+[guid]::NewGuid().ToString('N')+'.tmp')
  $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$python
- # Keep the original host idle bound, with a larger total budget for slow copies
- # that are still making measurable progress under system load.
+  # Let a large, advancing backup use spare run time while leaving time to package and publish.
  $captureTimeoutSeconds=1800
  $idleTimeoutMs=125000
  Assert-BackupRunBudget
- $hardDeadline=[Math]::Min(($captureTimeoutSeconds+5)*1000,(Get-BackupRunRemainingMs))
+  $remainingMs=Get-BackupRunRemainingMs
+  $spareCopySeconds=[Math]::Floor($remainingMs/1000)-1200-5
+  if($remainingMs-ne [int]::MaxValue -and $spareCopySeconds-gt $captureTimeoutSeconds -and [IO.FileInfo]::new($Source).Length-ge 256MB){
+   $captureTimeoutSeconds=[Math]::Min(5400,$spareCopySeconds)
+  }
+  $hardDeadline=[Math]::Min(($captureTimeoutSeconds+5)*1000,$remainingMs)
  $captureTimeoutSeconds=[Math]::Min($captureTimeoutSeconds,[Math]::Max(1,[Math]::Floor($hardDeadline/1000)))
  $start.Arguments='-I -B '+((@($script:DevConfigSQLiteHelper,$Source,$snapshot)|ForEach-Object{'"'+$_+'"'})-join ' ')+' --timeout '+$captureTimeoutSeconds
  $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
@@ -104,6 +108,12 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
  $diagnostic=[ordered]@{stage='process_start';reason='native_error';native_exit=$null;sqlite_error_code=$null;sqlite_error_name=$null;os_error_code=$null;elapsed_ms=0}
  try{
   [void]$process.Start()
+   # The scheduled task's BelowNormal priority is inherited by this single-threaded worker.
+   try{
+    if($remainingMs-ne [int]::MaxValue -and $process.PriorityClass-eq [Diagnostics.ProcessPriorityClass]::BelowNormal){
+     $process.PriorityClass=[Diagnostics.ProcessPriorityClass]::Normal
+    }
+   }catch [InvalidOperationException]{}catch [ComponentModel.Win32Exception]{}
   $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError
   $diagnostic.stage='process_wait'
   $idleDeadline=$idleTimeoutMs
@@ -121,9 +131,10 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
         $marker.schema-is [string] -and $marker.stage-is [string] -and
         $marker.schema-ceq 'devconfig.sqlite-stage.v1' -and
         $marker.stage-cin @('source_open','source_read','target_create','target_open','online_backup','standalone_mode','integrity_check')){
-      # integrity_check has no page progress reports. Let it use the remaining
-      # capture budget after the online backup has finished.
-      if($lastStage-ceq 'standalone_mode' -and $marker.stage-ceq 'integrity_check'){$idleDeadline=$hardDeadline}
+       # Full integrity checking is quiet. Extra copy time must not extend this quiet phase.
+       if($lastStage-ceq 'standalone_mode' -and $marker.stage-ceq 'integrity_check'){
+        $idleDeadline=[Math]::Min($hardDeadline,($clock.ElapsedMilliseconds+1800000))
+       }
       $lastStage=[string]$marker.stage
      }
      $progressKeys=@('step_count','sqlite_status','remaining_pages','total_pages','elapsed_ms')
