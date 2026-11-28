@@ -105,7 +105,7 @@ function Get-BackupScheduledTaskDefinitionMismatch {
             $diff.Add(('Principal.{0}(expected={1};actual={2})' -f $property, (ConvertTo-BackupScheduledTaskValue $expected), (ConvertTo-BackupScheduledTaskValue $actual)))
         }
     }
-    foreach ($property in @('StartWhenAvailable', 'RunOnlyIfNetworkAvailable', 'AllowStartIfOnBatteries', 'DontStopIfGoingOnBatteries', 'MultipleInstances', 'ExecutionTimeLimit', 'RestartCount', 'RestartInterval')) {
+    foreach ($property in @('Enabled', 'StartWhenAvailable', 'RunOnlyIfNetworkAvailable', 'AllowStartIfOnBatteries', 'DontStopIfGoingOnBatteries', 'MultipleInstances', 'ExecutionTimeLimit', 'RestartCount', 'RestartInterval')) {
         $actual = Get-BackupScheduledTaskPropertyValue -Object $Task.Settings -Property $property
         $expected = Get-BackupScheduledTaskPropertyValue -Object $Definition.Settings -Property $property
         if (-not [string]::Equals((ConvertTo-BackupScheduledTaskValue $actual), (ConvertTo-BackupScheduledTaskValue $expected), [StringComparison]::OrdinalIgnoreCase)) {
@@ -152,7 +152,7 @@ function Test-BackupScheduledTaskDefinition {
             -Properties @('UserId', 'LogonType', 'RunLevel'))) { return $false }
     if (-not (Test-BackupScheduledTaskPropertySet -Actual $Task.Settings -Expected $Definition.Settings `
             -Properties @(
-                'StartWhenAvailable', 'RunOnlyIfNetworkAvailable', 'AllowStartIfOnBatteries',
+                'Enabled', 'StartWhenAvailable', 'RunOnlyIfNetworkAvailable', 'AllowStartIfOnBatteries',
                 'DontStopIfGoingOnBatteries', 'MultipleInstances', 'ExecutionTimeLimit',
                 'RestartCount', 'RestartInterval'
             ))) { return $false }

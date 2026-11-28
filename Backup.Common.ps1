@@ -1,6 +1,17 @@
 ﻿. (Join-Path $PSScriptRoot 'Elevation.ps1')
 # Shared primitives: including this file performs no disk or network mutation.
 function Get-BackupUtc { [DateTimeOffset]::UtcNow.ToString('o') }
+function Start-BackupRunBudget([int]$Seconds){
+ $script:BackupRunClock=if($Seconds){[Diagnostics.Stopwatch]::StartNew()}
+ $script:BackupRunBudgetMs=[long]$Seconds*1000
+}
+function Get-BackupRunRemainingMs {
+ if(-not $script:BackupRunClock){return [int]::MaxValue}
+ return [int][Math]::Max(0,$script:BackupRunBudgetMs-$script:BackupRunClock.ElapsedMilliseconds)
+}
+function Assert-BackupRunBudget {
+ if($script:BackupRunClock -and $script:BackupRunClock.ElapsedMilliseconds-ge $script:BackupRunBudgetMs){throw 'backup_run_budget_exhausted'}
+}
 function Get-BackupTextHash([string]$Text) {
  $sha=[Security.Cryptography.SHA256]::Create();try{return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text)))).Replace('-','').ToLowerInvariant()}finally{$sha.Dispose()}
 }
@@ -40,13 +51,15 @@ function Invoke-BackupVssCreate($Class,[string]$VolumeRoot){
  $parameters=$Class.GetMethodParameters('Create');$parameters['Volume']=$VolumeRoot;$parameters['Context']='ClientAccessible'
  $failedCodes=[Collections.Generic.List[uint32]]::new()
  for($attempt=1;$attempt-le 3;$attempt++){
+  Assert-BackupRunBudget
   $result=$Class.InvokeMethod('Create',$parameters,$null);$code=[uint32]$result['ReturnValue']
   if($code-eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$result['ShadowID'])){return [pscustomobject]@{ShadowId=[string]$result['ShadowID'];SourceSnapshot=[ordered]@{create_attempts=$attempt;create_failed_codes=$failedCodes.ToArray()}}}
   $failedCodes.Add($code)
   if($attempt-eq 3 -or $code-notin @(7,9,10,12)){
    $failure=[Exception]::new("backup_vss_create_failed:$($code)_attempts_$attempt");$failure.Data['backup_vss_source_snapshot']=[ordered]@{create_attempts=$attempt;create_failed_codes=$failedCodes.ToArray()};throw $failure
   }
-  Start-Sleep -Seconds (@(120,300)[$attempt-1])
+  $retryDelay=@(120,300)[$attempt-1]
+  if($script:BackupRunClock){Start-Sleep -Milliseconds ([Math]::Min((Get-BackupRunRemainingMs),($retryDelay*1000)))}else{Start-Sleep -Seconds $retryDelay}
  }
 }
 function New-BackupVssSnapshot([string]$Source,[string]$StateRoot,[string]$RunId){
@@ -58,11 +71,22 @@ function New-BackupVssSnapshot([string]$Source,[string]$StateRoot,[string]$RunId
   Write-BackupJsonAtomic $journalPath ([ordered]@{schema='devconfig.wechat-vss-journal.v1';shadow_id=$shadowId;volume_root=$volumeRoot;volume_id=$volumeId;source=$sourceFull;snapshot_source=$null;state='created';run_id=$RunId;created_utc=(Get-BackupUtc)})
   $shadow=@(Get-CimInstance -ClassName Win32_ShadowCopy -Namespace root/cimv2 -Filter ("ID='{0}'"-f $shadowId) -ErrorAction Stop);if($shadow.Count -ne 1){throw 'backup_vss_readback_failed'};$shadow=$shadow[0];$expectedVolume=Get-BackupVssVolumeIdentity $volumeRoot;if(-not ([string]$shadow.VolumeName).Equals($volumeId,[StringComparison]::OrdinalIgnoreCase) -or [int]$shadow.State -ne 12 -or -not [bool]$shadow.ClientAccessible -or -not [bool]$shadow.NoAutoRelease){throw 'backup_vss_snapshot_identity_invalid'};$snapshotSource=Get-BackupVssSourcePath $shadow $sourceFull
   Write-BackupJsonAtomic $journalPath ([ordered]@{schema='devconfig.wechat-vss-journal.v1';shadow_id=[string]$shadow.ID;volume_root=$volumeRoot;volume_id=$expectedVolume;source=$sourceFull;snapshot_source=$snapshotSource;state='active';run_id=$RunId;created_utc=(Get-BackupUtc)})
-  return [pscustomobject]@{ShadowId=[string]$shadow.ID;SnapshotSource=$snapshotSource;Source=$sourceFull;VolumeRoot=$volumeRoot;JournalPath=$journalPath;SourceSnapshot=$created.SourceSnapshot}
+   return [pscustomobject]@{ShadowId=[string]$shadow.ID;SnapshotSource=$snapshotSource;Source=$sourceFull;VolumeRoot=$volumeRoot;JournalPath=$journalPath;SourceSnapshot=$created.SourceSnapshot;RunId=$RunId}
  }catch{$_.Exception.Data['backup_vss_source_snapshot']=$created.SourceSnapshot;try{Remove-BackupVssSnapshotExact $shadowId;if([IO.File]::Exists($journalPath)){[IO.File]::Delete($journalPath)}}catch{};throw}
 }
-function Remove-BackupVssSnapshot([Parameter(Mandatory)]$Capture){
- Remove-BackupVssSnapshotExact ([string]$Capture.ShadowId);$journalPath=[string]$Capture.JournalPath;if($journalPath -and [IO.File]::Exists($journalPath)){[IO.File]::Delete($journalPath)}
+function Remove-BackupVssSnapshot([Parameter(Mandatory)]$Capture,[switch]$SourceLost){
+ Remove-BackupVssSnapshotExact ([string]$Capture.ShadowId) -AllowMissing:$SourceLost
+ $journalPath=[string]$Capture.JournalPath
+ if($journalPath -and [IO.File]::Exists($journalPath)){
+  $journal=Read-BackupJson $journalPath -Required
+  if($journal.run_id-cne $Capture.RunId -or $journal.shadow_id-cne $Capture.ShadowId){throw 'backup_vss_cleanup_journal_changed'}
+  [IO.File]::Delete($journalPath)
+ }
+}
+function Assert-BackupVssSourceAvailable([string]$Source){
+ if($Source.StartsWith('\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy',[StringComparison]::OrdinalIgnoreCase) -and -not [IO.Directory]::Exists($Source)){
+  throw 'backup_vss_source_snapshot_lost'
+ }
 }
 function Assert-BackupPathChain([string]$Path){
  $current=[IO.Path]::GetFullPath($Path)
@@ -102,12 +126,13 @@ function Open-BackupResourceLock([string]$Resource,[ValidateRange(0,7200)][int]$
  $path=Resolve-BackupPath $Resource;Assert-BackupPathChain $path;[void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($path))
  $clock=[Diagnostics.Stopwatch]::StartNew()
  while($true){
+  Assert-BackupRunBudget
   try{return [IO.File]::Open(($path+'.backup.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)}catch [IO.IOException]{
    if((Get-BackupUnreadableReason $_.Exception)-notin @('sharing_violation','lock_violation')){throw}
    if($WaitSeconds-eq 0){throw 'backup_resource_busy'}
    $remaining=$WaitSeconds*1000-$clock.Elapsed.TotalMilliseconds
    if($remaining-le 0){throw 'backup_resource_wait_timeout'}
-   Start-Sleep -Milliseconds ([int][Math]::Min(500,$remaining))
+   Start-Sleep -Milliseconds ([int][Math]::Min([Math]::Min(500,$remaining),(Get-BackupRunRemainingMs)))
    if($clock.Elapsed.TotalSeconds-ge $WaitSeconds){throw 'backup_resource_wait_timeout'}
   }
  }
@@ -231,6 +256,7 @@ function Get-BackupTreeInventory {
  $spaceLimit=if($SpaceCheckDestination){(Get-BackupAvailableBytes $SpaceCheckDestination)-128MB}else{[long]::MaxValue}
  $directories=[Collections.Generic.List[string]]::new();$pending=[Collections.Generic.Stack[string]]::new();$pending.Push($full);$excluded=0
  while($pending.Count){
+  Assert-BackupRunBudget
   $directory=$pending.Pop()
   foreach($path in [IO.Directory]::EnumerateFileSystemEntries($directory)){
    $name=[IO.Path]::GetFileName($path);$relative=$path.Substring($full.Length+1).Replace('\','/');$logical=if($RelativePrefix){$RelativePrefix.TrimEnd('/')+'/'+$relative}else{$relative}
@@ -301,6 +327,9 @@ function Remove-BackupOwnedDirectory([string]$Path,[string]$Parent,[string]$Name
  if([IO.Path]::GetDirectoryName($full)-ine $parentFull -or [IO.Path]::GetFileName($full)-cnotmatch $NamePattern){throw 'backup_cleanup_scope_invalid'}
  Assert-BackupPathChain $full
  if([IO.Directory]::Exists($full)){
+  # Most candidate trees do not need a separate recursive attribute pass.
+  try{[IO.Directory]::Delete($full,$true);return}catch [UnauthorizedAccessException]{} catch [IO.IOException]{}
+  if(-not [IO.Directory]::Exists($full)){return}
   $clear=[IO.FileAttributes]::ReadOnly -bor [IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::System
   foreach($item in @(Get-ChildItem -LiteralPath $full -Recurse -Force -ErrorAction Stop)){
    if(($item.Attributes-band $clear)-ne 0){[IO.File]::SetAttributes($item.FullName,$item.Attributes-band (-bnot $clear))}
@@ -414,7 +443,9 @@ function Invoke-VerifiedBackupTree {
   $lease=$null;$incoming=$null;$committed=$false;$run=[guid]::NewGuid().ToString('N');$parent=[IO.Path]::GetDirectoryName($dest);$leaf=[IO.Path]::GetFileName($dest);$postReceiptPath=if($PostCommit){Resolve-BackupPath $PostCommitReceiptPath}else{$null};$previousManifestBackup=$null;$previousReceiptBackup=$null
  try{
   if(-not $LockHeld){$lease=Open-BackupResourceLock $dest};Repair-BackupTreeTransaction $dest $postReceiptPath
-  $inventory=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles -Hash -FileWarnings $warnings -AllowSourceDisappeared -SpaceCheckDestination $dest
+   Assert-BackupVssSourceAvailable $src
+   $inventory=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles -Hash -FileWarnings $warnings -AllowSourceDisappeared -SpaceCheckDestination $dest
+   Assert-BackupVssSourceAvailable $src
    $digest=Get-BackupInventoryDigest $inventory;$manifestPath=$dest+'.backup-manifest.json';$old=Read-BackupJson $manifestPath;$hadManifest=[IO.File]::Exists($manifestPath);$oldPreviousPath=if($old -and $old.previous_path){[string]$old.previous_path}else{$null}
    if($old -and $old.source-ieq $sourceIdentityPath){foreach($warning in @($old.file_warnings|Where-Object{$_ -and $_.reason-in @('antivirus_blocked','antivirus_removed')})){
     if(Test-BackupWarningPath $warning.relative_path $warnings){continue}
@@ -430,6 +461,7 @@ function Invoke-VerifiedBackupTree {
   [void][IO.Directory]::CreateDirectory($incoming)
   foreach($directory in $inventory.directories){[void][IO.Directory]::CreateDirectory((Join-Path $incoming $directory))}
   foreach($file in $inventory.files){
+    if($script:BackupRunClock -and $script:BackupRunClock.ElapsedMilliseconds-ge $script:BackupRunBudgetMs){throw 'backup_run_budget_exhausted'}
    if(Test-BackupWarningPath $file.relative_path $warnings){continue}
    $target=Join-Path $incoming $file.relative_path;$existing=Join-Path $dest $file.relative_path;$linked=$false
    $stage='existing_target_hash'
@@ -450,6 +482,7 @@ function Invoke-VerifiedBackupTree {
    }catch{
     $copyStage=[string]$_.Exception.Data['backup_file_stage'];if($copyStage){$stage=$copyStage}
     $warning=Get-BackupFileWarning $_ $file.relative_path $stage -AllowSourceDisappeared:($stage-eq 'source_read' -or $stage-eq 'copy') -AllowSourceUnreadable:($stage-eq 'source_read')
+     if($warning.reason-ceq 'source_disappeared'){Assert-BackupVssSourceAvailable $src}
     if(-not $warning -and $stage-eq 'destination_write'){$warning=Get-BackupSpaceWarning $_ $file.relative_path $stage}
     if(-not $warning -and $stage.StartsWith('destination_')){$warning=Get-BackupDestinationWarning $_ ([string]$_.Exception.Data['backup_destination_path']) $file.relative_path $stage $since}
     if(-not $warning){throw};Add-BackupFileWarning $warnings $warning
@@ -463,7 +496,8 @@ function Invoke-VerifiedBackupTree {
     try{New-Item -ItemType HardLink -Path $target -Target $existing -ErrorAction Stop|Out-Null}catch{if(-not (Get-BackupFileWarning $_ $warning.relative_path 'preserve_previous')){throw}}
    }
   }
-  $actual=Get-BackupTreeInventory $incoming -IgnoreFileWarnings $warnings -Hash -FileWarnings $warnings -DestinationSince $since
+   Assert-BackupVssSourceAvailable $src
+   $actual=Get-BackupTreeInventory $incoming -IgnoreFileWarnings $warnings -Hash -FileWarnings $warnings -DestinationSince $since
   # Enumeration cannot report a file already quarantined before it began.
   $actualPaths=@{};foreach($file in $actual.files){$actualPaths[$file.relative_path]=$true}
   foreach($file in $inventory.files){
@@ -471,7 +505,8 @@ function Invoke-VerifiedBackupTree {
    $missing=[IO.FileNotFoundException]::new('backup_candidate_file_missing');$warning=Get-BackupDestinationWarning $missing (Join-Path $incoming $file.relative_path) $file.relative_path 'verify' $since
    if(-not $warning){throw 'backup_candidate_file_missing'};Add-BackupFileWarning $warnings $warning
   }
-  $sourceAgain=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles -FileWarnings $warnings -AllowSourceDisappeared
+   Assert-BackupVssSourceAvailable $src
+   $sourceAgain=Get-BackupTreeInventory $src -ExcludeDirs $ExcludeDirs -ExcludeFiles $ExcludeFiles -FileWarnings $warnings -AllowSourceDisappeared
   # A file seen earlier but missing on re-enumeration is a transient single-file warning.
   $againPaths=@{};foreach($file in $sourceAgain.files){$againPaths[$file.relative_path]=$true}
   foreach($file in $inventory.files){if(-not $againPaths.ContainsKey($file.relative_path) -and -not (Test-BackupWarningPath $file.relative_path $warnings)){Add-BackupFileWarning $warnings ([pscustomobject]@{relative_path=$file.relative_path;reason='source_disappeared';error_code=2;stage='source_recheck'})}}
@@ -483,7 +518,9 @@ function Invoke-VerifiedBackupTree {
   $hadTarget=[IO.Directory]::Exists($dest)
   $retained=@();if($old){$retained+=@($old.retained_warning_generations|Where-Object{$_});if($oldPreviousPath){$retained+=$oldPreviousPath}}
   $record=[ordered]@{schema='devconfig.tree-manifest.v1';status='complete';backup_outcome=$outcome;run_id=$run;completed_utc=(Get-BackupUtc);source=$sourceIdentityPath;destination=$dest;content_sha256=$digest;verification='sha256_full_tree';verification_scope='selected_files_excluding_file_warnings';file_warnings=$warnings.ToArray();file_count=@($selected.files).Count;bytes=[long](($selected.files|Measure-Object length -Sum).Sum);directories=$selected.directories;files=@($selected.files|Select-Object relative_path,length,mtime_ticks,sha256);previous_path=$(if($hadTarget){$previous}else{$null});retained_warning_generations=$(if($warnings.Count){@($retained|Select-Object -Unique)}else{@()})}
-   Write-BackupJsonAtomic ($dest+'.backup-transaction.json') @{schema='devconfig.tree-transaction.v1';run_id=$run;destination=$dest;incoming=$incoming;previous=$previous;had_target=$hadTarget;had_manifest=$hadManifest;had_receipt=$hadReceipt;previous_manifest_path=$previousManifestBackup;previous_receipt_path=$previousReceiptBackup;post_commit_receipt_path=$postReceiptPath;old_previous_path=$oldPreviousPath}
+    Assert-BackupVssSourceAvailable $src
+    Assert-BackupRunBudget
+    Write-BackupJsonAtomic ($dest+'.backup-transaction.json') @{schema='devconfig.tree-transaction.v1';run_id=$run;destination=$dest;incoming=$incoming;previous=$previous;had_target=$hadTarget;had_manifest=$hadManifest;had_receipt=$hadReceipt;previous_manifest_path=$previousManifestBackup;previous_receipt_path=$previousReceiptBackup;post_commit_receipt_path=$postReceiptPath;old_previous_path=$oldPreviousPath}
    if($hadTarget){[IO.Directory]::Move($dest,$previous)}
    [IO.Directory]::Move($incoming,$dest)
    # The rename can itself trigger scanning. Recheck the published paths before the receipt.
@@ -508,7 +545,8 @@ function Invoke-VerifiedBackupTree {
    Remove-BackupTreeOrphans $dest $postReceiptPath
    return [pscustomobject]$record
  }catch{
-  if(-not $committed -and [IO.File]::Exists($dest+'.backup-transaction.json')){Repair-BackupTreeTransaction $dest $postReceiptPath};throw
+   if(-not $committed -and [IO.File]::Exists($dest+'.backup-transaction.json')){Repair-BackupTreeTransaction $dest $postReceiptPath}
+   if(-not $committed){Assert-BackupVssSourceAvailable $src};throw
  }finally{
   if($incoming -and [IO.Directory]::Exists($incoming) -and -not [IO.File]::Exists($dest+'.backup-transaction.json')){Remove-BackupOwnedDirectory $incoming $parent ('^'+[regex]::Escape($leaf)+'\.incoming-[a-f0-9]{32}$')}
   if($lease){$lease.Dispose()}

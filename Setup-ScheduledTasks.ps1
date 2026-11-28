@@ -59,7 +59,7 @@ $sLocalHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBat
 
 $sWeChatHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 3) `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 270) `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 15)
 
 # ① 本地 + G 热备：默认每天北京时间12:05 + 登录后20分钟（错过窗口时补一份；不走海外流量）
@@ -143,10 +143,16 @@ if ($allowSubset) {
             if (-not (Test-BackupScheduledTaskAction -Task $lookup.Task -ExpectedAction $definition.Action)) {
                 throw "Refusing to reuse settings from a non-owned scheduled task: $($definition.Name)"
             }
-            # A selected existing task keeps its live timing/settings preimage;
-            # the new Action and Principal still go through the normal transaction.
+            # Keep the active trigger and settings. The Hot launcher needs room to close its receipt.
             $definition.Triggers = @($lookup.Task.Triggers)
             $definition.Settings = $lookup.Task.Settings
+            if ($definition.Name -ceq 'WeChatBackup-Hot-Daily') {
+                $limit = $definition.Settings.ExecutionTimeLimit
+                if ($limit -is [string]) { $limit = [System.Xml.XmlConvert]::ToTimeSpan($limit) }
+                if ($limit -gt [TimeSpan]::Zero -and $limit -lt [TimeSpan]::FromMinutes(270)) {
+                    $definition.Settings.ExecutionTimeLimit = $sWeChatHot.ExecutionTimeLimit
+                }
+            }
         }
     }
 }

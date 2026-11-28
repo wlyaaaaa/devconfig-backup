@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Collect, verify, publish and distribute complete DevConfig generations.
 .DESCRIPTION
@@ -17,7 +17,8 @@ param(
  [string]$SevenZipPath='E:\Scoop\shims\7z.exe',[switch]$SkipSystemExport,
  [ValidateRange(1,10)][int]$CaptureAttempts=3,
  [ValidateSet('ServerCopy','Upload')][string]$CloudLatestMode='ServerCopy',
- [ValidateRange(0,7200)][int]$ResourceLockWaitSeconds=0
+ [ValidateRange(0,7200)][int]$ResourceLockWaitSeconds=0,
+ [ValidateRange(0,21600)][int]$RunBudgetSeconds=0
 )
 if(-not $SourcesFile){$SourcesFile=Join-Path $PSScriptRoot 'sources.psd1'}
 if(-not $OutputRoot){$OutputRoot=$PSScriptRoot}
@@ -119,6 +120,7 @@ function New-DevConfigCandidate([string]$Container){
  $preparation=[pscustomobject]@{file_warnings=$null}
  $prepare={
   param($candidateStage)
+  Assert-BackupRunBudget
   $preparation.file_warnings=[Collections.Generic.List[object]]::new()
   $script:run.optional_tools_absent=@(if($SkipSystemExport){'system_export_explicitly_skipped'}else{Invoke-DevConfigSystemExport $cfg $candidateStage $preparation.file_warnings $pendingAv.file_warnings})
   $binding=Join-Path $StateDir 'rclone-remote-binding.json'
@@ -215,7 +217,8 @@ if($Plan){
  $result=[ordered]@{schema='devconfig.backup-plan.v1';write_mode='zero_write';tiers=$Tier;difference=(Get-BackupDifference $inventory $prior);comparison_basis=$basis;source_count=$inventory.source_count;file_count=$inventory.file_count;bytes=$inventory.bytes;optional_absent_count=$inventory.optional_absent_count;sources=$inventory.sources;file_warnings=@($inventory.file_warnings);system_exports='not_run';cloud='not_contacted';out=$OutDir;hot=$HotRoot}
  if($Json){$result|ConvertTo-Json -Depth 8}else{[pscustomobject]$result|Format-List};exit 0
 }
-$script:overallExitCode=0;$outLease=$null;$pin=$null;$container=$null;$pack=$null
+ Start-BackupRunBudget $RunBudgetSeconds
+ $script:overallExitCode=0;$outLease=$null;$pin=$null;$container=$null;$pack=$null
 $script:run=[ordered]@{schema='devconfig.run.v2';run_id=[guid]::NewGuid().ToString('N');status='running';started_utc=(Get-BackupUtc);completed_utc=$null;tiers=$Tier;collection='not_requested';package='not_requested';hot='not_requested';drive='not_requested';retention='not_requested';failure=$null;skipped_file_count=0;skipped_files=@();intentional_exclusions=@();file_warnings=@();optional_tools_absent=@();capture_attempt_count=0;capture_max_attempts=$CaptureAttempts;capture_retry_history=@();application_recovery='not_tested'}
 $runPath=Join-Path $StateDir ('devconfig-'+$(if($Tier.Count-eq 1 -and $Tier[0]-eq 'Drive'){'drive'}else{'local'})+'-last.json')
 try{
@@ -229,6 +232,7 @@ try{
   $run.collection='running';Write-BackupJsonAtomic $runPath $run
   $container=Join-Path $StageParent ('run-'+$run.run_id);[void][IO.Directory]::CreateDirectory($container)
   $pack=New-DevConfigCandidate $container
+  Assert-BackupRunBudget
   $run.retention='running';Publish-DevConfigPackage $pack $OutDir $KeepLocal
   $pack=Get-VerifiedDevConfigPackage $OutDir
   if($run.package-ne 'reused'){$run.package='complete'};$run.retention='complete'
@@ -239,7 +243,7 @@ try{
  Write-BackupJsonAtomic $runPath $run
  if($Tier-contains 'Hot'){
   $run.hot='running';Write-BackupJsonAtomic $runPath $run
-  try{Push-Hot $pack;$run.hot='complete'}catch{
+  try{Assert-BackupRunBudget;Push-Hot $pack;$run.hot='complete'}catch{
    $warning=Get-BackupSpaceWarning $_ $pack.Name 'hot_publish'
    if($warning){$run.file_warnings+=@($warning)}
    $run.hot='failed';$run.failure=if($warning){$warning.reason}else{Get-BackupFailureCode $_};$script:overallExitCode=1
@@ -265,8 +269,9 @@ try{
  try{$run.failure_path=Get-BackupFailureSourcePath $_ @(@('profile',$ProfileRoot),@('output',$OutputRoot));$run.failure_io_reason=Get-BackupUnreadableReason $_.Exception}catch{$run.failure_path=$null}
  foreach($phase in @('collection','package','hot','drive','retention')){if($run[$phase]-eq 'running'){$run[$phase]='failed'}}
 }finally{
+ Start-BackupRunBudget 0
  if($pin){$pin.Dispose()};if($outLease){$outLease.Dispose()}
- if($container -and [IO.Directory]::Exists($container)){try{Remove-BackupOwnedDirectory $container $StageParent '^run-[a-f0-9]{32}$'}catch{$script:overallExitCode=1;$run.status='failed';$run.failure='backup_staging_cleanup_failed'}}
+ if($container -and [IO.Directory]::Exists($container)){try{Remove-BackupOwnedDirectory $container $StageParent '^run-[a-f0-9]{32}$'}catch{$script:overallExitCode=1;$run.status='failed';$run.staging_cleanup_failure=Get-BackupFailureCode $_;if(-not $run.failure){$run.failure='backup_staging_cleanup_failed'}}}
  $run.completed_utc=Get-BackupUtc;try{Write-BackupJsonAtomic $runPath $run}catch{$script:overallExitCode=1;$run.status='failed';$run.failure='backup_status_publication_failed'}
  try{Write-BackupRunHistory $StateDir $run final}catch{$script:overallExitCode=1;$run.status='failed';$run.failure='run_history_publication_failed'}
  try{Write-BackupProjectLive $OutputRoot}catch{Write-Warning 'live_project_output_failed'}

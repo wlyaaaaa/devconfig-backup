@@ -19,5 +19,6 @@ foreach($mode in @('duplicate','error')){$script:mode=$mode;$err='';try{Remove-B
 $script:mode='present';Remove-BackupVssSnapshotExact $id -AllowMissing
 Check ($script:removed -eq 1) 'Existing exact snapshot still deleted and verified'
 $source=Get-Content (Join-Path (Split-Path -Parent $PSScriptRoot) 'Backup.Common.ps1') -Raw
-Check ($source -match 'Remove-BackupVssSnapshotExact \(\[string\]\$journal.shadow_id\) -AllowMissing;') 'Only journal recovery opts into absent snapshot acceptance'
+Check ($source -match 'Remove-BackupVssSnapshotExact \(\[string\]\$journal.shadow_id\) -AllowMissing;' -and
+ $source.Contains('Remove-BackupVssSnapshotExact ([string]$Capture.ShadowId) -AllowMissing:$SourceLost')) 'Only journal recovery and a lost source opt into confirmed absence'
 'RESULT: 6 isolated missing snapshot checks passed; no real snapshots queried or modified'

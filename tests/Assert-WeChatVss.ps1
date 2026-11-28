@@ -31,7 +31,7 @@ try {
     Check ($backupText -match '\[switch\]\$UseVss' -and $backupText -match 'New-BackupVssSnapshot') 'Hot entrypoint exposes the explicit VSS source path'
     $hiddenText = Get-Content -LiteralPath (Join-Path $repo 'Backup-WeChat-Hidden.vbs') -Raw
     $setupText = Get-Content -LiteralPath (Join-Path $repo 'Setup-ScheduledTasks.ps1') -Raw
-    Check ($hiddenText -match 'LCase\(target\) = "hot"' -and $hiddenText -match 'vssArg = " -UseVss"') 'The existing Hot launcher passes UseVss without changing Drive'
+    Check ($hiddenText -match 'LCase\(target\) = "hot"' -and $hiddenText -match 'vssArg = " -UseVss -RunBudgetSeconds 14400"') 'The existing Hot launcher passes VSS and its business budget without changing Drive'
     Check ($setupText -match '\$weChatHotPrincipal\s*=\s*New-ScheduledTaskPrincipal' -and $setupText -match 'RunLevel Highest' -and $setupText -match 'Principal = \$weChatHotPrincipal') 'The installer declares Highest only for the existing WeChat Hot task'
     Check ($setupText -match '\[string\[\]\]\s*\$TaskName' -and $setupText -match 'Invoke-BackupScheduledTaskRegistrationTransaction .*AllowSubset') 'The installer exposes exact task selection through the existing transaction'
     Check ((Resolve-BackupPath '\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy999\fixture') -match '(?i)HarddiskVolumeShadowCopy999') 'VSS device paths resolve without a filesystem provider lookup'

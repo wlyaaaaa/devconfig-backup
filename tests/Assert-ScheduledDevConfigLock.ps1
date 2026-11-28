@@ -9,10 +9,10 @@ function Wait-Marker([string]$Path){
  $clock=[Diagnostics.Stopwatch]::StartNew()
  while(-not [IO.File]::Exists($Path)){if($clock.Elapsed.TotalSeconds-ge 20){throw 'fixture_marker_timeout'};Start-Sleep -Milliseconds 50}
 }
-function Start-Run([string]$Tier,[string]$Output,[int]$Wait=5){
+function Start-Run([string]$Tier,[string]$Output,[int]$Wait=5,[int]$Budget=0){
  $psi=New-Object Diagnostics.ProcessStartInfo;$psi.FileName=$runtime;$psi.UseShellExecute=$false;$psi.CreateNoWindow=$true
  $psi.RedirectStandardOutput=$true;$psi.RedirectStandardError=$true
- $psi.Arguments='-NoProfile -File "'+$harness+'" -Tier '+$Tier+' -ResourceLockWaitSeconds '+$Wait+' -ProfileRoot "'+$profile+'" -SourcesFile "'+$sources+'" -OutputRoot "'+$Output+'" -SkipSystemExport -Json'
+ $psi.Arguments='-NoProfile -File "'+$harness+'" -Tier '+$Tier+' -ResourceLockWaitSeconds '+$Wait+' -RunBudgetSeconds '+$Budget+' -ProfileRoot "'+$profile+'" -SourcesFile "'+$sources+'" -OutputRoot "'+$Output+'" -SkipSystemExport -Json'
  $p=[Diagnostics.Process]::Start($psi);[void]$children.Add($p);return $p
 }
 function Finish-Run($Process,[int]$Exit){
@@ -61,6 +61,11 @@ function Push-Drive($Pack){Enter-FixturePhase 'Drive';[IO.File]::WriteAllText((J
    $expected=if($wait){'backup_resource_wait_timeout'}else{'backup_resource_busy'}
    Check ($run.failure-ceq $expected -and $run.collection-ceq 'not_requested') 'Manual refusal and bounded wait exhaustion both fail without entering collection'
   }
+  $p=Start-Run Local $root 20 1;Finish-Run $p 1
+  $run=Read-BackupJson (Join-Path $root 'state/devconfig-local-last.json') -Required
+  Check ($run.status-ceq 'failed' -and $run.failure-ceq 'backup_run_budget_exhausted' -and $run.completed_utc -and $run.collection-ceq 'not_requested') 'An exhausted business budget writes a final failed receipt without entering collection'
+  $final=(Get-Content -LiteralPath (Join-Path $root 'state/run-history.jsonl') -Tail 1)|ConvertFrom-Json
+  Check ($final.event-ceq 'final' -and $final.run_id-ceq $run.run_id -and $final.failure-ceq $run.failure) 'The failure history is written after the business budget expires'
  }finally{$held.Dispose()}
  $denied=Join-Path $fixture 'readonly';[IO.File]::WriteAllText(($denied+'.backup.lock'),'fixture');[IO.File]::SetAttributes(($denied+'.backup.lock'),[IO.FileAttributes]::ReadOnly)
  try{
@@ -71,11 +76,11 @@ function Push-Drive($Pack){Enter-FixturePhase 'Drive';[IO.File]::WriteAllText((J
  }finally{[IO.File]::SetAttributes(($denied+'.backup.lock'),[IO.FileAttributes]::Normal)}
  $hidden=Join-Path $fixture 'hidden';[void][IO.Directory]::CreateDirectory($hidden)
  Copy-Item -LiteralPath (Join-Path $repo 'Backup-DevConfig-Hidden.vbs') -Destination $hidden
- [IO.File]::WriteAllText((Join-Path $hidden 'Backup-DevConfig.ps1'),'param($Tier,[int]$ResourceLockWaitSeconds);[IO.File]::WriteAllText((Join-Path $PSScriptRoot ($Tier+".txt")),[string]$ResourceLockWaitSeconds);exit 7')
+  [IO.File]::WriteAllText((Join-Path $hidden 'Backup-DevConfig.ps1'),'param($Tier,[int]$ResourceLockWaitSeconds,[int]$RunBudgetSeconds);[IO.File]::WriteAllText((Join-Path $PSScriptRoot ($Tier+".txt")),"$ResourceLockWaitSeconds,$RunBudgetSeconds");exit 7')
  foreach($tier in @('Local','Drive')){
   $psi=New-Object Diagnostics.ProcessStartInfo;$psi.FileName=Join-Path $env:WINDIR 'System32/wscript.exe';$psi.Arguments='//B "'+(Join-Path $hidden 'Backup-DevConfig-Hidden.vbs')+'" '+$tier;$psi.UseShellExecute=$false;$psi.CreateNoWindow=$true
   $p=[Diagnostics.Process]::Start($psi);[void]$children.Add($p);Check ($p.WaitForExit(20000) -and $p.ExitCode-eq 7) 'Actual hidden launcher preserves the business failure exit code'
-  $expected=if($tier-eq 'Drive'){'7200'}else{'3600'};Check ([IO.File]::ReadAllText((Join-Path $hidden ($tier+'.txt')))-ceq $expected) 'Actual scheduled launcher supplies its bounded lock-wait budget'
+   $expected=if($tier-eq 'Drive'){'7200,0'}else{'3600,6900'};Check ([IO.File]::ReadAllText((Join-Path $hidden ($tier+'.txt')))-ceq $expected) 'Actual scheduled launcher supplies the existing lock wait and Local/Hot business budget'
  }
 }finally{
  foreach($p in $children){try{if(-not $p.HasExited){$p.Kill();$null=$p.WaitForExit(10000)}}finally{$p.Dispose()}}

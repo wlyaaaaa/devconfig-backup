@@ -23,7 +23,7 @@ param(
     [string]$BwLimit='4M', [string]$MaxTransfer='8G', [switch]$DriveFull,
     [switch]$DbOnly, [Alias('List')][switch]$Plan, [switch]$Json, [switch]$UseVss,
     [ValidateRange(1,720)][int]$MaxHotAgeHours=48, [switch]$AllowLiveSourceHot,
-    [string]$StateRoot=''
+    [string]$StateRoot='', [ValidateRange(0,21600)][int]$RunBudgetSeconds=0
 )
 if(-not $StateRoot){$StateRoot=Join-Path $PSScriptRoot 'state'}
 $ErrorActionPreference='Stop'
@@ -182,6 +182,7 @@ if($Plan){
     if($Json){$result|ConvertTo-Json -Depth 10}else{[pscustomobject]$result|Format-List};exit 0
 }
 $capturesSource=($Target-contains 'Hot' -or $Target-contains 'Local')
+Start-BackupRunBudget $RunBudgetSeconds
 $run=[ordered]@{schema='wechat.run.v2';run_id=[guid]::NewGuid().ToString('N');started_utc=(Get-BackupUtc);completed_utc=$null;status='running';targets=$Target;hot='not_requested';local='not_requested';drive='not_requested';failure=$null;file_warnings=@();capture_consistency=$(if($capturesSource){$script:SourceCaptureMode}else{'no_source_capture'});application_recovery='not_tested'}
 $script:WeChatFileWarnings=[Collections.Generic.List[object]]::new()
 $captureWarnings=$null
@@ -254,9 +255,16 @@ try{
     }
     foreach($phase in @('hot','local','drive')){if($run[$phase]-eq 'running'){$run[$phase]='failed'}}
 }finally{
+    Start-BackupRunBudget 0
     if($lease){$lease.Dispose()}
     if($driveLease){$driveLease.Dispose()}
-    if($vssCapture){try{Remove-BackupVssSnapshot $vssCapture}catch{$code=1;$run.status='failed';$run.failure='backup_vss_cleanup_failed'}}
+    if($vssCapture){
+        try{Remove-BackupVssSnapshot $vssCapture -SourceLost:($run.failure-ceq 'backup_vss_source_snapshot_lost');$run.vss_cleanup='verified'}
+        catch{
+            $code=1;$run.status='failed';$run.vss_cleanup_failure=Get-BackupFailureCode $_
+            if(-not $run.failure){$run.failure='backup_vss_cleanup_failed'}
+        }
+    }
     $run.completed_utc=Get-BackupUtc
     try{Write-BackupJsonAtomic $runPath $run}catch{$code=1;$run.status='failed';$run.failure='run_status_publication_failed'}
     try{Write-BackupRunHistory $StateRoot $run final}catch{$code=1;$run.status='failed';$run.failure='run_history_publication_failed'}

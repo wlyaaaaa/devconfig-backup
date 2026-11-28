@@ -27,5 +27,7 @@ End If
 lockWait = 3600
 If LCase(tier) = "drive" Then lockWait = 7200
 command = exe & " -NoProfile -ExecutionPolicy Bypass -File """ & here & "\Backup-DevConfig.ps1"" -Tier " & tier & " -ResourceLockWaitSeconds " & lockWait
+' Local/Hot must write its own final receipt before the two-hour Scheduler limit.
+If LCase(tier) <> "drive" Then command = command & " -RunBudgetSeconds 6900"
 exitCode = shell.Run(command, 0, True)
 WScript.Quit exitCode

@@ -94,6 +94,9 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
  # that are still making measurable progress under system load.
  $captureTimeoutSeconds=1800
  $idleTimeoutMs=125000
+ Assert-BackupRunBudget
+ $hardDeadline=[Math]::Min(($captureTimeoutSeconds+5)*1000,(Get-BackupRunRemainingMs))
+ $captureTimeoutSeconds=[Math]::Min($captureTimeoutSeconds,[Math]::Max(1,[Math]::Floor($hardDeadline/1000)))
  $start.Arguments='-I -B '+((@($script:DevConfigSQLiteHelper,$Source,$snapshot)|ForEach-Object{'"'+$_+'"'})-join ' ')+' --timeout '+$captureTimeoutSeconds
  $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
  $process=[Diagnostics.Process]::new();$process.StartInfo=$start
@@ -103,7 +106,6 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
   [void]$process.Start()
   $stdout=$process.StandardOutput.ReadToEndAsync();$stderr=$process.StandardError
   $diagnostic.stage='process_wait'
-  $hardDeadline=($captureTimeoutSeconds+5)*1000
   $idleDeadline=$idleTimeoutMs
   $lastStage=$null;$bestRemaining=$null
   # Drain stdout concurrently and only credit safe, strictly advancing reports.
@@ -163,7 +165,8 @@ function Copy-DevConfigSQLiteDatabase([string]$Source,[string]$Destination,[stri
  if($diagnostic.elapsed_ms-eq 0){$diagnostic.elapsed_ms=$clock.ElapsedMilliseconds}
  if($code-ne 0 -or -not $valid){
   if($diagnostic.sqlite_error_code-eq 13 -or $diagnostic.os_error_code-in @(28,39,112)){[IO.File]::Delete($snapshot)}
-  $failure=[InvalidOperationException]::new('backup_sqlite_capture_failed')
+   $failureCode=if((Get-BackupRunRemainingMs)-eq 0){'backup_run_budget_exhausted'}else{'backup_sqlite_capture_failed'}
+   $failure=[InvalidOperationException]::new($failureCode)
   $failure.Data['backup_sqlite_diagnostic']=$diagnostic;$failure.Data['backup_sqlite_error_code']=$diagnostic.sqlite_error_code;$failure.Data['backup_sqlite_reason']=$diagnostic.reason
   throw $failure
  }
@@ -186,6 +189,7 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
  $kept=[Collections.Generic.List[object]]::new();$skipped=[Collections.Generic.List[object]]::new();$warnings=[Collections.Generic.List[object]]::new();foreach($warning in @($Inventory.file_warnings)){Add-BackupFileWarning $warnings $warning};$since=[DateTimeOffset]::UtcNow
  $snapshots=[Collections.Generic.List[object]]::new()
  foreach($file in @($Inventory.files)){
+  Assert-BackupRunBudget
   # The base sorts before its sidecars. Exclude them only after its online backup succeeded.
   if(Test-DevConfigSQLiteSidecar $file.relative_path $snapshots){continue}
   if(Test-BackupWarningPath $file.relative_path $warnings){continue}
@@ -227,7 +231,12 @@ function Copy-DevConfigSourceInventory($Inventory,[string]$Destination){
     if($warning){Add-BackupFileWarning $warnings $warning;break}
     $reason=Get-BackupUnreadableReason $_.Exception
     $retryable=$_.Exception.Message-match 'backup_source_changed|backup_copy_hash_mismatch' -or ($reason-ne 'access_denied' -and ($_.Exception-is [IO.IOException] -or $_.Exception.InnerException-is [IO.IOException]))
-    if($sqlite -and ($_.Exception.Data['backup_sqlite_error_code']-in @(5,6) -or $_.Exception.Data['backup_sqlite_reason']-eq 'timeout')){$retryable=$true}
+    if($sqlite -and $_.Exception.Data.Contains('backup_sqlite_diagnostic')){
+     $sqliteFailure=$_.Exception.Data['backup_sqlite_diagnostic']
+     # An exhausted online backup or integrity check cannot benefit from copying the same database again.
+     $retryable=$_.Exception.Message-cne 'backup_run_budget_exhausted' -and
+      ($sqliteFailure.sqlite_error_code-in @(5,6) -or ($sqliteFailure.stage-ceq 'online_backup' -and $sqliteFailure.backup_progress.sqlite_status-in @(5,6)))
+    }
     if($attempt-lt 3 -and $retryable){Start-Sleep -Milliseconds 150;continue}
     if($sqlite){
      $diagnostic=$_.Exception.Data['backup_sqlite_diagnostic']
@@ -299,6 +308,7 @@ function Invoke-DevConfigSourceCapture {
  for($attempt=1;$attempt-le $MaxAttempts;$attempt++){
   $stage=Join-Path $Container ('payload-'+$attempt);$inventory=$null;$phase='source_scan'
   try{
+   Assert-BackupRunBudget
    $inventory=Get-DevConfigSourceInventory $Config $ProfileRoot -IncludeHistory:$IncludeHistory -KnownInventory $KnownInventory
    $phase='source_capture';Copy-DevConfigSourceInventory $inventory $stage
    if($PostCapture){$phase='capture_metadata';& $PostCapture $stage}

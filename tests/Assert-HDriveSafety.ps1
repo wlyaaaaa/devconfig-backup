@@ -18,7 +18,7 @@ $tokens=$null;$parseErrors=$null
 $setupAst=[Management.Automation.Language.Parser]::ParseInput($setup,[ref]$tokens,[ref]$parseErrors)
 Check (@($parseErrors).Count-eq 0) 'Scheduled task setup parses before settings contract checks'
 foreach($contract in @(
- @('sLocalHot','PT10M','PT2H'),@('sWeChatHot','PT15M','PT3H')
+ @('sLocalHot','PT10M','PT2H'),@('sWeChatHot','PT15M','PT4H30M')
 )){
  $name=[string]$contract[0]
  $assignments=@($setupAst.FindAll({param($node)$node-is [Management.Automation.Language.AssignmentStatementAst] -and $node.Left-is [Management.Automation.Language.VariableExpressionAst] -and $node.Left.VariablePath.UserPath-ceq $name},$false))

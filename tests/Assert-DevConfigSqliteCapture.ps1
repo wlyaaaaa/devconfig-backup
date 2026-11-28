@@ -64,4 +64,10 @@ sys.exit(0)
  $hash=Copy-DevConfigSQLiteDatabase (Join-Path $fixture 'progressing.sqlite') $verified $fixture
  if($hash-cne (Get-BackupStableFileHash $verified)){throw 'sqlite_integrity_check_did_not_publish'}
  Write-Output 'PASS: Advancing backup and quiet integrity check both finish past the idle timeout'
+ Start-BackupRunBudget 1
+ try{Copy-DevConfigSQLiteDatabase (Join-Path $fixture 'progressing.sqlite') $verified $fixture;throw 'sqlite_exceeded_run_budget'}
+ catch{if($_.Exception.Message-cne 'backup_run_budget_exhausted'){throw}}
+ finally{Start-BackupRunBudget 0}
+ if((Get-BackupStableFileHash $verified)-cne $hash){throw 'sqlite_budget_changed_verified_copy'}
+ Write-Output 'PASS: SQLite uses the remaining business budget and retains the prior verified file'
 }finally{Remove-BackupOwnedDirectory $fixture $parent '^devconfig-sqlite-[a-f0-9]{32}$'}

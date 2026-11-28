@@ -26,7 +26,8 @@ End If
 command = exe & " -NoProfile -ExecutionPolicy Bypass -File """ & here & "\Backup-WeChat.ps1"" -Target " & target
 vssArg = ""
 If LCase(target) = "hot" Then
-    vssArg = " -UseVss"
+    ' Install this launcher with the existing four-and-a-half-hour task definition.
+    vssArg = " -UseVss -RunBudgetSeconds 14400"
 End If
 command = command & vssArg
 exitCode = shell.Run(command, 0, True)

@@ -42,7 +42,7 @@ try{
  function Get-BackupVssVolumeIdentity {param($VolumeRoot) return 'fixture-volume'}
  function Get-BackupVssSourcePath {param($Shadow,$Source) return $Source}
  function Get-CimInstance {param($ClassName,$Namespace,$Filter,$ErrorAction) $script:reads++;if($script:readFailure){throw 'fixture_vss_readback_failed'};return [pscustomobject]@{ID='{00000000-0000-0000-0000-000000000001}';VolumeName='fixture-volume';State=12;ClientAccessible=$true;NoAutoRelease=$true}}
- function Remove-BackupVssSnapshotExact {param($ShadowId) Check ($ShadowId-ceq '{00000000-0000-0000-0000-000000000001}') 'Cleanup targets only the owned fixture ID';$script:cleanups++}
+ function Remove-BackupVssSnapshotExact {param($ShadowId,[switch]$AllowMissing) Check ($ShadowId-ceq '{00000000-0000-0000-0000-000000000001}') 'Cleanup targets only the owned fixture ID';$script:cleanups++;$script:allowedMissing=[bool]$AllowMissing}
  $backup=[Management.Automation.Language.Parser]::ParseFile((Join-Path $repo 'Backup-WeChat.ps1'),[ref]$null,[ref]$null)
  foreach($name in @('Get-WeChatSummary','Invoke-WeChatDriveRclone','Invoke-WeChatDrivePublication')){
   $node=$backup.Find({param($n)$n-is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name-ceq $name},$true);. ([scriptblock]::Create($node.Extent.Text))
@@ -62,6 +62,22 @@ try{
   Check ($value.status-ceq 'complete' -and $value.source_snapshot.create_attempts-eq 2 -and ($value.source_snapshot.create_failed_codes-join '|')-ceq '10') 'Fake 10 then success reaches the Hot receipt, local run and final history'
  }
  Check ($final.event-ceq 'final' -and $script:fakeClass.Calls-eq 2 -and $script:fakeClass.Disposed -and $script:cleanups-eq 1 -and $script:reads-eq 1 -and ($script:waits-join '|')-ceq '120') 'Successful lifecycle disposes, verifies and cleans up without extra Create calls'
+ & {
+  # Replay the same formal Hot body, keeping the last good receipt and tree.
+  function Get-BackupVssSourcePath {return '\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy2147483647\fixture'}
+  $script:fakeClass=New-FakeClass @(0)
+  $oldHash=Get-BackupStableFileHash $script:HotReceiptFile
+  . $main
+  $lost=Read-BackupJson (Join-Path $StateRoot 'wechat-local-last.json') -Required
+  Check ($code-eq 1 -and $lost.hot-ceq 'failed' -and $lost.failure-ceq 'backup_vss_source_snapshot_lost' -and $script:allowedMissing) 'Evicted source stays a Hot failure while exact absent cleanup settles its journal'
+  Check ((Get-BackupStableFileHash $script:HotReceiptFile)-ceq $oldHash -and -not [IO.File]::Exists((Get-BackupVssJournalPath $StateRoot))) 'Eviction preserves the verified Hot receipt and clears only its own fixture journal'
+  function Remove-BackupVssSnapshotExact {throw 'fixture_cim_query_failed'}
+  $script:fakeClass=New-FakeClass @(0)
+  . $main
+  $lost=Read-BackupJson (Join-Path $StateRoot 'wechat-local-last.json') -Required
+  Check ($code-eq 1 -and $lost.failure-ceq 'backup_vss_source_snapshot_lost' -and $lost.vss_cleanup_failure-ceq 'fixture_cim_query_failed' -and
+   [IO.File]::Exists((Get-BackupVssJournalPath $StateRoot))) 'Unknown cleanup preserves the journal and the earlier Hot error'
+ }
  function Get-WeChatCloudFilter {return @()}
  function Invoke-RcloneDrivePreflight {return [pscustomobject]@{Success=$true}}
  function Invoke-BackupRclone {$global:LASTEXITCODE=0}
