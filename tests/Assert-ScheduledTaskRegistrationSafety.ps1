@@ -292,7 +292,7 @@ try {
     Assert-Condition ($null -ne $conversion) 'Setup must provide the Beijing-to-local time converter.'
     . ([scriptblock]::Create($conversion.Extent.Text))
     $beijingTimes = [ordered]@{
-        'DevConfigBackup-Local' = '12:05'
+        'DevConfigBackup-Local' = '11:05'
         'WeChatBackup-Hot-Daily' = '09:30'
     }
     foreach ($name in $beijingTimes.Keys) {

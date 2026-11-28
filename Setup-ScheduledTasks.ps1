@@ -2,7 +2,7 @@
 .SYNOPSIS
   注册 DevConfig + WeChat 备份的计划任务（幂等，可重复运行）。
 .DESCRIPTION
-  - DevConfigBackup-Local        : 每天北京时间 12:05 + 登录后20分钟 -> -Tier Local,Hot（本地包+G盘热备）
+  - DevConfigBackup-Local        : 每天北京时间 11:05 + 登录后20分钟 -> -Tier Local,Hot（本地包+G盘热备）
   - WeChatBackup-Hot-Daily       : 每天北京时间 09:30               -> -Target Hot（G盘热备）
   默认值按北京时间换算成本机钟点；触发器带时区偏移，之后本机改时区北京时间不变。显式传参仍为本机钟点。
   本地和 G 热备离线运行，失败后下次定时自然重跑。
@@ -29,7 +29,7 @@ function Convert-BeijingTimeToLocal([string] $At) {
     $beijing = [DateTimeOffset]::ParseExact("$today ${At}:00 +08:00", 'yyyy-MM-dd HH:mm:ss zzz', $culture)
     return [TimeZoneInfo]::ConvertTime($beijing, [TimeZoneInfo]::Local).ToString('HH:mm', $culture)
 }
-if ([string]::IsNullOrEmpty($DailyAt)) { $DailyAt = Convert-BeijingTimeToLocal '12:05' }
+if ([string]::IsNullOrEmpty($DailyAt)) { $DailyAt = Convert-BeijingTimeToLocal '11:05' }
 if ([string]::IsNullOrEmpty($WeChatHotAt)) { $WeChatHotAt = Convert-BeijingTimeToLocal '09:30' }
 
 . (Join-Path $PSScriptRoot 'ScheduledTask-Registration.Common.ps1')
@@ -62,7 +62,7 @@ $sWeChatHot = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBa
     -ExecutionTimeLimit (New-TimeSpan -Minutes 270) `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 15)
 
-# ① 本地 + G 热备：默认每天北京时间12:05 + 登录后20分钟（错过窗口时补一份；不走海外流量）
+# ① 本地 + G 热备：默认每天北京时间11:05 + 登录后20分钟（错过窗口时补一份；不走海外流量）
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $logonTrigger.Delay = 'PT20M'
 
