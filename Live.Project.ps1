@@ -47,7 +47,8 @@ function Update-BackupProjectSnapshot([string]$RepoRoot){
  $paths=@(& git -C $RepoRoot ls-files);if($LASTEXITCODE-ne 0){throw 'live_git_files_failed'}
  $docs=@($paths|Where-Object{$_-match '\.md$'});$code=@($paths|Where-Object{$_-match '\.(ps1|psd1|vbs|py|cs)$'})
  $chars=0;$lines=0;$codeChars=0
- foreach($path in $docs){$chars+=[regex]::Matches([IO.File]::ReadAllText((Join-Path $RepoRoot $path)),'[\p{IsCJKUnifiedIdeographs}]|[A-Za-z0-9]+').Count}
+ # Match a supplementary character once, or a single non-whitespace BMP character.
+ foreach($path in $docs){$chars+=[regex]::Matches([IO.File]::ReadAllText((Join-Path $RepoRoot $path)),'[\uD800-\uDBFF][\uDC00-\uDFFF]|[^\s\x1C-\x1F]').Count}
  foreach($path in $code){$text=[IO.File]::ReadAllText((Join-Path $RepoRoot $path));$lines+=[IO.File]::ReadAllLines((Join-Path $RepoRoot $path)).Count;$codeChars+=[regex]::Replace($text,'\s','').Length}
  $metrics=[ordered]@{docs_files=$docs.Count;code_files=$code.Count};$size=[ordered]@{docs_chars=$chars;code_lines=$lines;code_chars=$codeChars};$path=Join-Path $RepoRoot 'docs\live.snapshot.json';$old=Read-BackupJson $path
  if($old -and ($old.metrics|ConvertTo-Json -Compress)-ceq ($metrics|ConvertTo-Json -Compress) -and $old.size.docs_chars-eq $chars -and $old.size.code_lines-eq $lines -and $old.size.code_chars-eq $codeChars){return}
