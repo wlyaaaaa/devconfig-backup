@@ -8,10 +8,13 @@ function Write-BackupProjectLive([string]$OutputRoot,[string]$HotReceiptPath='G:
   $pack=Get-VerifiedDevConfigPackage $out -MetadataOnly;$r=$pack.Receipt;$m=Read-BackupJson ($pack.Zip+'.manifest.json') -Required
   if($m.file_count-ne $r.file_count -or @($m.files).Count-ne $m.file_count -or ($m.files|Measure-Object length -Sum).Sum-ne $m.bytes){throw 'live_manifest_mismatch'}
   $available=@($m.sources|Where-Object status -eq 'available').Count;$absent=@($m.sources|Where-Object status -eq 'optional_absent').Count
-  if($available+$absent-ne @($m.sources).Count){throw 'live_source_status_unknown'}
+  $planned=@($m.sources).Count
+  if($available+$absent-ne $planned){throw 'live_source_status_unknown'}
+  $sourceShort='{0} 处' -f $available
+  $sourceExplanation='计划 {0} 处，这台电脑上没有 {1} 处' -f $planned,$absent
   $percent=if($m.bytes){[math]::Round(100*(1-$r.package_bytes/$m.bytes),2)}else{$null}
   $values=[ordered]@{
-   sources=@{text=('{0} 处（计划 {1} 处，这台电脑上没有 {2} 处）' -f $available,@($m.sources).Count,$absent);available=$available;planned=@($m.sources).Count;optional_absent=$absent}
+   sources=@{text=($sourceShort+'（'+$sourceExplanation+'）');short_text=$sourceShort;explanation_text=$sourceExplanation;available=$available;planned=$planned;optional_absent=$absent}
    files=$m.file_count
    package_size=@{text=('{0:N0} MB（原文件 {1:N2} GB）' -f ($r.package_bytes/1MB),($m.bytes/1GB));bytes=$r.package_bytes;original_bytes=$m.bytes}
    compression=@{text=$(if($null-ne $percent){'{0:N2} GB，压小 {1:N2}%' -f (($m.bytes-$r.package_bytes)/1GB),$percent}else{'原文件合计为 0，压缩比无定义'});saved_bytes=($m.bytes-$r.package_bytes);percent=$percent}
