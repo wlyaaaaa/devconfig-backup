@@ -9,6 +9,7 @@
   H 盘由 PCConfig 冷备任务管理。
   DevConfig 保持当前用户 Limited；WeChat Hot 使用同一用户、Interactive、Highest，以便创建 Windows VSS 快照。实际注册/提权仍由 PCConfig 负责。
   可用 -TaskName 只收敛一个已登记任务；省略时保持两项任务的默认安装语义。
+  选中 DevConfigBackup-Local 时，显式传 -DailyAt 可改日触发钟点，登录触发和任务设置沿用现役。
 .NOTES
   计划任务动作固定走 wscript.exe + VBS hidden launcher，避免 PowerShell 窗口一闪而过。
   VBS 优先使用 PowerShell 7，缺少时回退 Windows PowerShell 5.1。
@@ -29,7 +30,8 @@ function Convert-BeijingTimeToLocal([string] $At) {
     $beijing = [DateTimeOffset]::ParseExact("$today ${At}:00 +08:00", 'yyyy-MM-dd HH:mm:ss zzz', $culture)
     return [TimeZoneInfo]::ConvertTime($beijing, [TimeZoneInfo]::Local).ToString('HH:mm', $culture)
 }
-if ([string]::IsNullOrEmpty($DailyAt)) { $DailyAt = Convert-BeijingTimeToLocal '11:05' }
+$changeLocalDailyTime = -not [string]::IsNullOrEmpty($DailyAt)
+if (-not $changeLocalDailyTime) { $DailyAt = Convert-BeijingTimeToLocal '11:05' }
 if ([string]::IsNullOrEmpty($WeChatHotAt)) { $WeChatHotAt = Convert-BeijingTimeToLocal '09:30' }
 
 . (Join-Path $PSScriptRoot 'ScheduledTask-Registration.Common.ps1')
@@ -144,8 +146,14 @@ if ($allowSubset) {
                 throw "Refusing to reuse settings from a non-owned scheduled task: $($definition.Name)"
             }
             # Keep the active trigger and settings. The Hot launcher needs room to close its receipt.
+            $requestedDailyTrigger = $definition.Triggers[0]
             $definition.Triggers = @($lookup.Task.Triggers)
             $definition.Settings = $lookup.Task.Settings
+            if ($definition.Name -ceq 'DevConfigBackup-Local' -and $changeLocalDailyTime) {
+                $daily = @($definition.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskDailyTrigger' })
+                if ($daily.Count -ne 1) { throw 'Expected one active daily trigger for DevConfigBackup-Local.' }
+                $daily[0].StartBoundary = $requestedDailyTrigger.StartBoundary
+            }
             if ($definition.Name -ceq 'WeChatBackup-Hot-Daily') {
                 $limit = $definition.Settings.ExecutionTimeLimit
                 if ($limit -is [string]) { $limit = [System.Xml.XmlConvert]::ToTimeSpan($limit) }

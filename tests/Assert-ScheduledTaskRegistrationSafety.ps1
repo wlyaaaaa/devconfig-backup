@@ -260,7 +260,8 @@ try {
         [CmdletBinding()]
         param([switch] $AtLogOn, [switch] $Daily, [switch] $Weekly, [object] $At, [string] $User, [object] $DaysOfWeek)
         $type = if ($AtLogOn) { 'logon' } elseif ($Daily) { 'daily' } elseif ($Weekly) { 'weekly' } else { 'unknown' }
-        [pscustomobject]@{ Type = $type; At = $At; User = $User; DaysOfWeek = $DaysOfWeek; Delay = $null }
+        [pscustomobject]@{ Type = $type; At = $At; User = $User; DaysOfWeek = $DaysOfWeek; Delay = $null;
+            StartBoundary = $At; CimClass = [pscustomobject]@{ CimClassName = "MSFT_Task${type}Trigger" } }
     }
     function global:Get-ScheduledTask {
         [CmdletBinding()]
@@ -320,6 +321,12 @@ try {
     foreach ($name in $beijingTimes.Keys) {
         Assert-Condition ($global:DevConfigBackupTaskRegistrationMock[$name].Triggers[0].At -ceq $explicitTimes[$index++]) 'Explicit local times must remain unchanged.'
     }
+
+    $untouchedHot = $global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Hot-Daily']
+    & $setupPath -TaskName DevConfigBackup-Local -DailyAt '08:40'
+    $localOnly = $global:DevConfigBackupTaskRegistrationMock['DevConfigBackup-Local']
+    Assert-Condition ($localOnly.Triggers[0].StartBoundary -ceq '08:40' -and $localOnly.Triggers[1].Delay -eq 'PT20M') 'The selected task must accept an explicit daily time and keep its logon trigger.'
+    Assert-Condition ([object]::ReferenceEquals($global:DevConfigBackupTaskRegistrationMock['WeChatBackup-Hot-Daily'], $untouchedHot)) 'Rescheduling only DevConfig must leave the WeChat task untouched.'
 
     $legacyHot = New-TestTask -Definition $definitions[1] -Xml 'xml:legacy-hot'
     $legacyHot.Actions[0].Execute = (Join-Path $env:WINDIR 'System32\wscript.exe')
